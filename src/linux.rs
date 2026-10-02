@@ -22,6 +22,8 @@ const MIN_DIRECTORY_RECORD_BYTES: usize = 20;
 // These limits retain at most 512 KiB of parsed records in each scanning thread's pool.
 const MAX_CACHED_DIRECTORY_ENTRY_CAPACITY: usize = 4096;
 const MAX_CACHED_DIRECTORY_ENTRY_VECTORS: usize = 8;
+// Retain file records when a directory is large enough for parallel metadata calls.
+const PARALLEL_METADATA_ENTRY_ESTIMATE_THRESHOLD: usize = 128;
 // Avoid forcing remote metadata refreshes; remote results may reflect cached state.
 const STATX_DONT_SYNC: libc::c_int = 0x4000;
 const STATX_TYPE: libc::c_uint = 0x0001;
@@ -102,6 +104,8 @@ impl Drop for PooledDirectoryEntries {
 struct DirectoryEntries {
     names: DirectoryNames,
     entries: PooledDirectoryEntries,
+    // Inline subtotal for known non-directory entries sized during enumeration.
+    disk_size: u64,
 }
 
 struct DirectoryFrame {
@@ -281,10 +285,15 @@ pub(super) fn scan(path: &Path, apparent: bool) -> io::Result<ScanReport> {
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path)?;
     let ext4_eof_cookie = is_ext4(root.as_raw_fd());
-    let DirectoryEntries { names, entries } =
-        read_directory(root.as_raw_fd(), ext4_eof_cookie, true)?;
-    let name_bytes = names.as_slice();
     let skipped_entries = AtomicUsize::new(0);
+    let DirectoryEntries { names, entries, .. } = read_directory(
+        root.as_raw_fd(),
+        ext4_eof_cookie,
+        true,
+        apparent,
+        &skipped_entries,
+    )?;
+    let name_bytes = names.as_slice();
 
     let mut directories = entries
         .par_iter()
@@ -376,10 +385,19 @@ fn scan_directory_contents(
         );
     }
 
-    let DirectoryEntries { names, entries } =
-        read_directory(directory.as_raw_fd(), ext4_eof_cookie, false)?;
+    let DirectoryEntries {
+        names,
+        entries,
+        disk_size,
+    } = read_directory(
+        directory.as_raw_fd(),
+        ext4_eof_cookie,
+        false,
+        apparent,
+        skipped_entries,
+    )?;
     let name_bytes = names.as_slice();
-    entries
+    let child_size = entries
         .par_iter()
         .copied()
         .map(|entry| {
@@ -409,19 +427,39 @@ fn scan_directory_contents(
                     )
                 })
             },
+        )?;
+    disk_size.checked_add(child_size).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "directory total exceeds the supported byte-count range",
         )
+    })
 }
 
 impl DirectoryFrame {
-    fn new(directory: File, ext4_eof_cookie: bool) -> io::Result<Self> {
-        let DirectoryEntries { names, entries } =
-            read_directory(directory.as_raw_fd(), ext4_eof_cookie, false)?;
+    fn new(
+        directory: File,
+        ext4_eof_cookie: bool,
+        apparent: bool,
+        skipped_entries: &AtomicUsize,
+    ) -> io::Result<Self> {
+        let DirectoryEntries {
+            names,
+            entries,
+            disk_size,
+        } = read_directory(
+            directory.as_raw_fd(),
+            ext4_eof_cookie,
+            false,
+            apparent,
+            skipped_entries,
+        )?;
         Ok(Self {
             directory,
             names,
             entries,
             next_entry: 0,
-            disk_size: 0,
+            disk_size,
             overflowed: false,
             ext4_eof_cookie,
         })
@@ -453,7 +491,7 @@ fn scan_directory_iterative(
     ext4_eof_cookie: bool,
     skipped_entries: &AtomicUsize,
 ) -> io::Result<u64> {
-    let root = DirectoryFrame::new(directory, ext4_eof_cookie)?;
+    let root = DirectoryFrame::new(directory, ext4_eof_cookie, apparent, skipped_entries)?;
     let mut stack = vec![root];
 
     loop {
@@ -488,7 +526,12 @@ fn scan_directory_iterative(
                 Ok(ScannedEntry::Directory {
                     directory,
                     ext4_eof_cookie,
-                }) => match DirectoryFrame::new(directory, ext4_eof_cookie) {
+                }) => match DirectoryFrame::new(
+                    directory,
+                    ext4_eof_cookie,
+                    apparent,
+                    skipped_entries,
+                ) {
                     Ok(frame) => stack.push(frame),
                     Err(_) => {
                         skipped_entries.fetch_add(1, Ordering::Relaxed);
@@ -1033,11 +1076,15 @@ fn read_directory(
     fd: libc::c_int,
     ext4_eof_cookie: bool,
     directories_only: bool,
+    apparent: bool,
+    skipped_entries: &AtomicUsize,
 ) -> io::Result<DirectoryEntries> {
     DIRECTORY_BUFFER.with(|buffer| {
         let mut buffer = buffer.borrow_mut();
         let mut entries = PooledDirectoryEntries::take();
         let mut names = DirectoryNames::new();
+        let mut disk_size = 0u64;
+        let mut parallel_file_entries = false;
         let mut first_batch = true;
 
         loop {
@@ -1060,15 +1107,10 @@ fn read_directory(
             if first_batch {
                 // The first batch includes the two dot entries, which are not retained.
                 estimated_entries = estimated_entries.saturating_sub(2);
+                parallel_file_entries =
+                    !directories_only
+                        && estimated_entries >= PARALLEL_METADATA_ENTRY_ESTIMATE_THRESHOLD;
                 first_batch = false;
-            }
-            if estimated_entries > 0 {
-                let cached_capacity_remaining =
-                    MAX_CACHED_DIRECTORY_ENTRY_CAPACITY.saturating_sub(entries.len());
-                // Keep eager allocation within the reusable-vector limit; larger dirs can grow.
-                entries.reserve(estimated_entries.min(cached_capacity_remaining));
-                // Leave room for common short names while allowing longer names to grow.
-                names.reserve(bytes_read / 4);
             }
             let mut offset = 0;
             let mut final_offset = 0;
@@ -1111,22 +1153,55 @@ fn read_directory(
                     ));
                 }
 
-                if name_bytes != b"."
-                    && name_bytes != b".."
-                    && (!directories_only || !matches!(kind, EntryKind::Other))
-                {
-                    let length = u16::try_from(name_bytes.len()).map_err(|_| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "directory entry name exceeds the supported length",
-                        )
-                    })?;
-                    let start = names.append_name(name_bytes, bytes_read / 4);
-                    entries.push(DirectoryEntry {
-                        name_offset: start,
-                        name_length: length,
-                        kind,
-                    });
+                if name_bytes != b"." && name_bytes != b".." {
+                    if !directories_only
+                        && !parallel_file_entries
+                        && matches!(kind, EntryKind::Other)
+                    {
+                        // Known non-directories need no retained names or Rayon jobs.
+                        let name_with_nul = &buffer[offset + 19..offset + 19 + name_length + 1];
+                        // name_length points at the first NUL in the getdents64 record.
+                        let name = unsafe { CStr::from_bytes_with_nul_unchecked(name_with_nul) };
+                        match with_stat_at(
+                            fd,
+                            name,
+                            entry_size_mask(apparent),
+                            |stat| file_size(stat, apparent),
+                        ) {
+                            Ok(size) => {
+                                disk_size = disk_size.checked_add(size).ok_or_else(|| {
+                                    io::Error::new(
+                                        io::ErrorKind::InvalidData,
+                                        "directory total exceeds the supported byte-count range",
+                                    )
+                                })?;
+                            }
+                            Err(_) => {
+                                skipped_entries.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    } else if !directories_only || !matches!(kind, EntryKind::Other) {
+                        if entries.is_empty() {
+                            let cached_capacity_remaining =
+                                MAX_CACHED_DIRECTORY_ENTRY_CAPACITY.saturating_sub(entries.len());
+                            // Most directories contain only files or only subdirectories.
+                            entries.reserve(estimated_entries.min(cached_capacity_remaining));
+                            // Leave room for common short names while allowing longer names to grow.
+                            names.reserve(bytes_read / 4);
+                        }
+                        let length = u16::try_from(name_bytes.len()).map_err(|_| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "directory entry name exceeds the supported length",
+                            )
+                        })?;
+                        let start = names.append_name(name_bytes, bytes_read / 4);
+                        entries.push(DirectoryEntry {
+                            name_offset: start,
+                            name_length: length,
+                            kind,
+                        });
+                    }
                 }
                 offset += record_length;
             }
@@ -1138,7 +1213,11 @@ fn read_directory(
             }
         }
 
-        Ok(DirectoryEntries { names, entries })
+        Ok(DirectoryEntries {
+            names,
+            entries,
+            disk_size,
+        })
     })
 }
 

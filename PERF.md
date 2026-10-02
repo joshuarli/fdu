@@ -13,6 +13,7 @@ The scanner returns aggregate sizes only. It does not retain or render a full tr
 - Linux 6.0 or newer; direct Rust dependencies are libc and Rayon.
 - Four Rayon workers by default. RAYON_NUM_THREADS remains an explicit override.
 - Directory entries are read with getdents64 into a 512 KiB thread-local buffer. Names stay inline for small directories and promote to a byte vector when needed. Parsed entry vectors use a bounded per-thread pool.
+- The first getdents64 batch estimates directory width. Below 128 estimated entries, known non-directory entries are statted while their names still borrow the read buffer; only directories and unknown types are retained. Wider directories retain file records so Rayon can parallelize their metadata calls.
 - File sizes use narrow statx requests and count each hardlinked path independently. On x86-64, statx, getdents64, and openat2 use the Linux syscall ABI directly; other Linux architectures use libc wrappers.
 - Child directories use parent-relative openat2 with O_NOFOLLOW and fall back to openat when openat2 is unavailable or denied.
 - On ext4, the walker recognizes HTree end-of-directory cookies and avoids the trailing empty getdents64 call. Other filesystems use read-until-zero.
@@ -68,8 +69,10 @@ Earlier ext4 experiments on synthetic fixtures found that four workers preserved
 
 The strongest remaining counter is one statx per non-directory path. A shared inode cache had little opportunity because duplicate non-directory paths were rare. A single-thread statx-versus-fstatat probe favored the narrow statx request in instructions and cycles, while elapsed times overlapped. A single-thread io_uring statx microbenchmark reduced syscall entries but increased context switches, task-clock, and elapsed time. Keep direct statx as the default.
 
-The ext4 EOF-cookie check reduced getdents64 calls from roughly two per opened directory to one in a changing large-tree capture. It did not establish a whole-scan time gain. The host and workload varied during those runs, so use the generated fixture for future comparisons.
+The ext4 EOF-cookie check reduced getdents64 calls from roughly two per opened directory to one in a changing large-tree capture. It did not establish a whole-scan time gain.
+
+On the mixed fixture, the inline sizing path kept the statx, getdents64, openat2, and close counts unchanged. Across paired 39-scan release batches, elapsed time fell from 19.74 seconds to 18.57 seconds, and user instructions fell by about 56%. A one-scan strace pass recorded 20 futex calls, compared with 2,050 for the previous build. Traced durations are perturbed and are not compared. The 30,000-file directory path retains records for Rayon; a 100-scan single-wide fixture took 0.714 seconds, matching the previous build within measurement noise.
 
 Raw inode-table reads remain a separate research direction. Live ext4 in-memory allocation state can differ from on-disk inode values; any such experiment needs a read-only snapshot and a separate accounting contract.
 
-This work is paused. Resume with the generated fixture, keep the four-worker and two-dependency boundaries, and report counters separately from elapsed time.
+Continue with the generated fixture, keep the four-worker and two-dependency boundaries, and report counters separately from elapsed time. Each file still requires one statx lookup for allocated or apparent size accounting.
