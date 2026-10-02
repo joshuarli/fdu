@@ -205,10 +205,6 @@ const _: [(); 8] = [(); mem::offset_of!(OpenHow, mode)];
 const _: [(); 16] = [(); mem::offset_of!(OpenHow, resolve)];
 
 impl LinuxStatx {
-    fn zeroed() -> Self {
-        unsafe { mem::zeroed() }
-    }
-
     fn is_directory(&self) -> bool {
         self.mask & STATX_TYPE != 0 && self.mode & S_IFMT == S_IFDIR
     }
@@ -883,7 +879,7 @@ fn statx(
     mask: libc::c_uint,
 ) -> io::Result<LinuxStatx> {
     retry_interrupted(|| {
-        let mut stat = LinuxStatx::zeroed();
+        let mut stat = mem::MaybeUninit::<LinuxStatx>::uninit();
         let result = unsafe {
             libc::syscall(
                 libc::SYS_statx,
@@ -891,13 +887,14 @@ fn statx(
                 path,
                 flags,
                 mask,
-                &mut stat as *mut LinuxStatx,
+                stat.as_mut_ptr(),
             )
         };
         if result < 0 {
             Err(io::Error::last_os_error())
         } else {
-            Ok(stat)
+            // A successful Linux statx call writes the entire fixed-width result structure.
+            Ok(unsafe { stat.assume_init() })
         }
     })
 }
