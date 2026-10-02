@@ -32,7 +32,7 @@ A read-only dirent inode census found 14 duplicate non-directory paths among 1,0
 
 An ext4 inode-table experiment could batch inode metadata reads by group and table block, but it must stay isolated from the default walker. An on-disk table read is not a coherent view of a live mounted filesystem, and ext4 inode accounting has feature-specific fields and live allocation state. The [Linux ext4 inode documentation](https://github.com/torvalds/linux/blob/v6.18/Documentation/filesystems/ext4/inodes.rst) describes the inode-table layout and inode-to-group mapping. Use a read-only snapshot to test sparse and dense table access before deciding whether this can preserve the live `statx` contract.
 
-`io_uring` is enabled on this host, but asynchronous `statx` should remain a measured experiment: batch it only if latency data shows a benefit over direct syscalls, and keep the implementation within the existing `libc` dependency.
+`io_uring` is enabled on this host, but asynchronous `statx` should remain an experiment. Linux 6.18's [`io_uring/statx.c`](https://github.com/torvalds/linux/blob/v6.18/io_uring/statx.c) marks every `IORING_OP_STATX` request `REQ_F_FORCE_ASYNC`; batching could replace many user `statx` entries with fewer ring submissions, while also moving every metadata lookup through io-wq. Measure that tradeoff before adding the raw ring ABI to the scanner, and keep any implementation within the existing `libc` dependency.
 
 ## Reproducing syscall counts
 
