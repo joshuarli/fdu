@@ -808,20 +808,8 @@ fn openat2_directory(parent_fd: libc::c_int, name: &CStr) -> io::Result<File> {
         mode: 0,
         resolve: RESOLVE_NO_XDEV,
     };
-    let child_fd = unsafe {
-        libc::syscall(
-            libc::SYS_openat2,
-            parent_fd,
-            name.as_ptr(),
-            &how as *const OpenHow,
-            mem::size_of::<OpenHow>(),
-        )
-    };
-    if child_fd < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(unsafe { File::from_raw_fd(child_fd as libc::c_int) })
-    }
+    let child_fd = openat2_call(parent_fd, name, &how)?;
+    Ok(unsafe { File::from_raw_fd(child_fd) })
 }
 
 fn openat_directory(parent_fd: libc::c_int, name: &CStr) -> io::Result<File> {
@@ -980,6 +968,132 @@ fn statx_call(
     }
 }
 
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn raw_syscall3(
+    number: libc::c_long,
+    first: libc::c_long,
+    second: libc::c_long,
+    third: libc::c_long,
+) -> libc::c_long {
+    let mut result = number;
+    // SAFETY: The caller follows the syscall ABI. Any pointed-to memory stays valid for the call.
+    unsafe {
+        std::arch::asm!(
+            "syscall",
+            inlateout("rax") result,
+            in("rdi") first,
+            in("rsi") second,
+            in("rdx") third,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    result
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn raw_syscall4(
+    number: libc::c_long,
+    first: libc::c_long,
+    second: libc::c_long,
+    third: libc::c_long,
+    fourth: libc::c_long,
+) -> libc::c_long {
+    let mut result = number;
+    // SAFETY: The caller follows the syscall ABI. Any pointed-to memory stays valid for the call.
+    unsafe {
+        std::arch::asm!(
+            "syscall",
+            inlateout("rax") result,
+            in("rdi") first,
+            in("rsi") second,
+            in("rdx") third,
+            in("r10") fourth,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    result
+}
+
+fn getdents64_call(fd: libc::c_int, buffer: &mut [u8]) -> io::Result<usize> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let result = unsafe {
+            raw_syscall3(
+                libc::SYS_getdents64 as libc::c_long,
+                fd as libc::c_long,
+                buffer.as_mut_ptr() as libc::c_long,
+                buffer.len() as libc::c_long,
+            )
+        };
+        if result < 0 {
+            Err(io::Error::from_raw_os_error((-result) as i32))
+        } else {
+            Ok(result as usize)
+        }
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_getdents64,
+                fd,
+                buffer.as_mut_ptr(),
+                buffer.len(),
+            )
+        };
+        if result < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(result as usize)
+        }
+    }
+}
+
+fn openat2_call(parent_fd: libc::c_int, name: &CStr, how: &OpenHow) -> io::Result<libc::c_int> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let result = unsafe {
+            raw_syscall4(
+                libc::SYS_openat2 as libc::c_long,
+                parent_fd as libc::c_long,
+                name.as_ptr() as libc::c_long,
+                how as *const OpenHow as libc::c_long,
+                mem::size_of::<OpenHow>() as libc::c_long,
+            )
+        };
+        if result < 0 {
+            Err(io::Error::from_raw_os_error((-result) as i32))
+        } else {
+            Ok(result as libc::c_int)
+        }
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_openat2,
+                parent_fd,
+                name.as_ptr(),
+                how as *const OpenHow,
+                mem::size_of::<OpenHow>(),
+            )
+        };
+        if result < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(result as libc::c_int)
+        }
+    }
+}
+
 // Interrupted syscalls have not completed their operation, so retry before reporting an error.
 fn retry_interrupted<T>(mut operation: impl FnMut() -> io::Result<T>) -> io::Result<T> {
     loop {
@@ -998,26 +1112,15 @@ fn read_directory(fd: libc::c_int, ext4_eof_cookie: bool) -> io::Result<Director
         let mut first_batch = true;
 
         loop {
-            let result = unsafe {
-                libc::syscall(
-                    libc::SYS_getdents64,
-                    fd,
-                    buffer.as_mut_ptr(),
-                    buffer.len(),
-                )
+            let bytes_read = match getdents64_call(fd, buffer.as_mut_slice()) {
+                Ok(bytes_read) => bytes_read,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
             };
-            if result < 0 {
-                let error = io::Error::last_os_error();
-                if error.kind() == io::ErrorKind::Interrupted {
-                    continue;
-                }
-                return Err(error);
-            }
-            if result == 0 {
+            if bytes_read == 0 {
                 break;
             }
 
-            let bytes_read = result as usize;
             if bytes_read > buffer.len() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
