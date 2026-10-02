@@ -1,4 +1,4 @@
-use crate::{DirectoryContents, DiskItem, ScanReport};
+use crate::{DirectoryContents, DirectoryId, DiskItem, ScanReport, StoredDirectory};
 use rayon::prelude::*;
 use std::cell::RefCell;
 use std::ffi::CStr;
@@ -191,29 +191,36 @@ pub(super) fn scan(path: &Path, apparent: bool) -> io::Result<ScanReport> {
 
     let ext4_eof_cookie = is_ext4(root.as_raw_fd());
     let skipped_entries = AtomicUsize::new(0);
-    let root = scan_directory(
+    let arena = Mutex::new(Vec::new());
+    let root = scan_directory_contents(
         root,
         root_stat.device(),
         apparent,
         ext4_eof_cookie,
         0,
         &skipped_entries,
+        &arena,
     )?;
+    let directories = arena
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     Ok(ScanReport {
         root_name,
         root,
+        directories,
         skipped_entries: skipped_entries.load(Ordering::Relaxed),
     })
 }
 
-fn scan_directory(
+fn scan_directory_contents(
     directory: File,
     root_device: Device,
     apparent: bool,
     ext4_eof_cookie: bool,
     depth: usize,
     skipped_entries: &AtomicUsize,
+    arena: &Mutex<Vec<DirectoryContents>>,
 ) -> io::Result<DirectoryContents> {
     if depth >= MAX_RECURSIVE_DIRECTORY_DEPTH {
         return scan_directory_iterative(
@@ -222,6 +229,7 @@ fn scan_directory(
             apparent,
             ext4_eof_cookie,
             skipped_entries,
+            arena,
         );
     }
 
@@ -240,6 +248,7 @@ fn scan_directory(
                 ext4_eof_cookie,
                 child_depth,
                 skipped_entries,
+                arena,
             ) {
                 Ok(item) => Some(item),
                 Err(_) => {
@@ -250,29 +259,77 @@ fn scan_directory(
         })
         .collect::<Vec<_>>();
 
-    finish_directory(names, items)
+    finish_directory(names, items, arena)
 }
 
 fn finish_directory(
     names: Vec<u8>,
     mut items: Vec<DiskItem>,
+    arena: &Mutex<Vec<DirectoryContents>>,
 ) -> io::Result<DirectoryContents> {
     items.sort_unstable_by(|left, right| right.disk_size.cmp(&left.disk_size));
-    let disk_size = items
+    let disk_size = match items
         .iter()
         .try_fold(0u64, |total, child| total.checked_add(child.disk_size))
-        .ok_or_else(|| {
-            io::Error::new(
+    {
+        Some(disk_size) => disk_size,
+        None => {
+            discard_child_directories(arena, &items);
+            return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "directory total exceeds the supported byte-count range",
-            )
-        })?;
+            ));
+        }
+    };
 
     Ok(DirectoryContents {
         names,
         items,
         disk_size,
     })
+}
+
+// Remove stored descendants when an overflowing total causes the whole subtree to be skipped.
+fn discard_child_directories(arena: &Mutex<Vec<DirectoryContents>>, items: &[DiskItem]) {
+    let mut pending = items
+        .iter()
+        .filter_map(|item| item.children)
+        .collect::<Vec<_>>();
+    if pending.is_empty() {
+        return;
+    }
+
+    let mut directories = arena
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    while let Some(directory_id) = pending.pop() {
+        let directory = std::mem::replace(
+            &mut directories[directory_id.index()],
+            DirectoryContents {
+                names: Vec::new(),
+                items: Vec::new(),
+                disk_size: 0,
+            },
+        );
+        pending.extend(directory.items.into_iter().filter_map(|item| item.children));
+    }
+}
+
+// Vector growth may move node records, so references between directories use stable indices.
+fn store_directory(
+    arena: &Mutex<Vec<DirectoryContents>>,
+    contents: DirectoryContents,
+) -> StoredDirectory {
+    let disk_size = contents.disk_size;
+    let mut directories = arena
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let index = directories.len();
+    directories.push(contents);
+    StoredDirectory {
+        id: DirectoryId::from_index(index),
+        disk_size,
+    }
 }
 
 impl DirectoryFrame {
@@ -301,6 +358,7 @@ fn scan_directory_iterative(
     apparent: bool,
     ext4_eof_cookie: bool,
     skipped_entries: &AtomicUsize,
+    arena: &Mutex<Vec<DirectoryContents>>,
 ) -> io::Result<DirectoryContents> {
     let root = DirectoryFrame::new(directory, None, ext4_eof_cookie)?;
     let mut stack = vec![root];
@@ -357,21 +415,24 @@ fn scan_directory_iterative(
 
         let frame = stack.pop().expect("root directory frame remains present");
         let parent_name_offset = frame.parent_name_offset;
-        match finish_directory(frame.names, frame.items) {
-            Ok(contents) => match parent_name_offset {
-                Some(name_offset) => {
-                    stack
-                        .last_mut()
-                        .expect("child directory has a parent frame")
-                        .items
-                        .push(DiskItem {
-                            name_offset,
-                            disk_size: contents.disk_size,
-                            children: Some(Box::new(contents)),
-                        });
+        match finish_directory(frame.names, frame.items, arena) {
+            Ok(contents) => {
+                match parent_name_offset {
+                    Some(name_offset) => {
+                        let stored = store_directory(arena, contents);
+                        stack
+                            .last_mut()
+                            .expect("child directory has a parent frame")
+                            .items
+                            .push(DiskItem {
+                                name_offset,
+                                disk_size: stored.disk_size,
+                                children: Some(stored.id),
+                            });
+                    }
+                    None => return Ok(contents),
                 }
-                None => return Ok(contents),
-            },
+            }
             Err(error) => match parent_name_offset {
                 Some(_) => {
                     skipped_entries.fetch_add(1, Ordering::Relaxed);
@@ -391,6 +452,7 @@ fn scan_entry(
     ext4_eof_cookie: bool,
     child_depth: usize,
     skipped_entries: &AtomicUsize,
+    arena: &Mutex<Vec<DirectoryContents>>,
 ) -> io::Result<DiskItem> {
     match entry.kind {
         EntryKind::Directory => {
@@ -403,6 +465,7 @@ fn scan_entry(
                 ext4_eof_cookie,
                 child_depth,
                 skipped_entries,
+                arena,
             )
         }
         EntryKind::Other => {
@@ -435,6 +498,7 @@ fn scan_entry(
                     ext4_eof_cookie,
                     child_depth,
                     skipped_entries,
+                    arena,
                 )
             } else {
                 file_item(entry, stat, apparent)
@@ -501,6 +565,7 @@ fn scan_child_directory(
     ext4_eof_cookie: bool,
     child_depth: usize,
     skipped_entries: &AtomicUsize,
+    arena: &Mutex<Vec<DirectoryContents>>,
 ) -> io::Result<DiskItem> {
     let (child, child_ext4_eof_cookie) = open_child_directory(
         parent,
@@ -508,19 +573,21 @@ fn scan_child_directory(
         root_device,
         ext4_eof_cookie,
     )?;
-    let contents = scan_directory(
+    let contents = scan_directory_contents(
         child,
         root_device,
         apparent,
         child_ext4_eof_cookie,
         child_depth,
         skipped_entries,
+        arena,
     )?;
+    let directory = store_directory(arena, contents);
 
     Ok(DiskItem {
         name_offset: entry.name_offset,
-        disk_size: contents.disk_size,
-        children: Some(Box::new(contents)),
+        disk_size: directory.disk_size,
+        children: Some(directory.id),
     })
 }
 

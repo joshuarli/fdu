@@ -8,6 +8,7 @@ use std::error::Error;
 use std::ffi::{CStr, OsString};
 use std::io::{self, BufWriter, Write};
 use std::mem::MaybeUninit;
+use std::num::NonZeroUsize;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::process;
@@ -17,7 +18,28 @@ const MAX_DEFAULT_RAYON_THREADS: usize = 4;
 struct DiskItem {
     name_offset: usize,
     disk_size: u64,
-    children: Option<Box<DirectoryContents>>,
+    children: Option<DirectoryId>,
+}
+
+// Nonzero indices keep an optional child link to one machine word.
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+struct DirectoryId(NonZeroUsize);
+
+impl DirectoryId {
+    fn from_index(index: usize) -> Self {
+        Self(NonZeroUsize::new(index + 1).expect("directory arena index is representable"))
+    }
+
+    fn index(self) -> usize {
+        self.0.get() - 1
+    }
+}
+
+#[derive(Clone, Copy)]
+struct StoredDirectory {
+    id: DirectoryId,
+    disk_size: u64,
 }
 
 struct DirectoryContents {
@@ -26,9 +48,13 @@ struct DirectoryContents {
     disk_size: u64,
 }
 
+#[cfg(target_pointer_width = "64")]
+const _: [(); 24] = [(); std::mem::size_of::<DiskItem>()];
+
 struct ScanReport {
     root_name: OsString,
     root: DirectoryContents,
+    directories: Vec<DirectoryContents>,
     skipped_entries: usize,
 }
 
@@ -75,7 +101,12 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
     let stdout = io::stdout();
     let mut output = BufWriter::new(stdout.lock());
-    write_tree(&report.root_name, &report.root, &mut output)?;
+    write_tree(
+        &report.root_name,
+        &report.root,
+        &report.directories,
+        &mut output,
+    )?;
     Ok(())
 }
 
@@ -174,10 +205,16 @@ fn print_help() {
     println!("By default, sizes are allocated bytes; --apparent uses logical lengths.");
 }
 
+#[derive(Clone, Copy)]
+enum DirectoryReference<'a> {
+    Inline(&'a DirectoryContents),
+    Stored(DirectoryId),
+}
+
 struct OutputFrame<'a> {
     name: &'a [u8],
     disk_size: u64,
-    directory: Option<&'a DirectoryContents>,
+    directory: Option<DirectoryReference<'a>>,
     depth: usize,
     wrote_item: bool,
     next_child: usize,
@@ -186,12 +223,13 @@ struct OutputFrame<'a> {
 fn write_tree(
     root_name: &std::ffi::OsStr,
     root: &DirectoryContents,
+    directories: &[DirectoryContents],
     output: &mut impl Write,
 ) -> io::Result<()> {
     let mut stack = vec![OutputFrame {
         name: root_name.as_bytes(),
         disk_size: root.disk_size,
-        directory: Some(root),
+        directory: Some(DirectoryReference::Inline(root)),
         depth: 0,
         wrote_item: false,
         next_child: 0,
@@ -211,18 +249,26 @@ fn write_tree(
         let next_child = {
             let frame = stack.last_mut().expect("output frame is present");
             match frame.directory {
-                Some(directory) => match directory.items.get(frame.next_child) {
-                    Some(child) => {
-                        frame.next_child += 1;
-                        Some((
-                            directory.name_bytes(child.name_offset),
-                            child.disk_size,
-                            child.children.as_deref(),
-                            frame.depth + 1,
-                        ))
+                Some(directory_reference) => {
+                    let directory = match directory_reference {
+                        DirectoryReference::Inline(directory) => directory,
+                        DirectoryReference::Stored(directory_id) => {
+                            &directories[directory_id.index()]
+                        }
+                    };
+                    match directory.items.get(frame.next_child) {
+                        Some(child) => {
+                            frame.next_child += 1;
+                            Some((
+                                directory.name_bytes(child.name_offset),
+                                child.disk_size,
+                                child.children.map(DirectoryReference::Stored),
+                                frame.depth + 1,
+                            ))
+                        }
+                        None => None,
                     }
-                    None => None,
-                },
+                }
                 None => None,
             }
         };
