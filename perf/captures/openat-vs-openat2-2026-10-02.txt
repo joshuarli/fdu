@@ -1,0 +1,30 @@
+Child-directory open experiment
+Date: 2026-10-02
+Base revision: bd507f7 (release build)
+Candidate: same source with child-directory open changed from openat2(resolve=0) plus openat fallback to openat
+Host: Linux 6.18.33-0-lts, ext4 on /dev/nvme0n1p3
+Workload: perf/fixture, generated inode-heavy tree; four Rayon workers
+
+Correctness
+- Allocated stdout and stderr matched byte-for-byte.
+- Apparent stdout and stderr matched byte-for-byte.
+
+One-scan filesystem syscall counts (base -> candidate)
+- statx:       1,218,248 -> 1,218,248
+- getdents64:     85,777 -> 85,777
+- close:          85,784 -> 85,784
+- clone:               4 -> 4
+- openat2:       85,772 -> 0
+- openat:             0 -> 85,772
+
+Two alternating pairs of 39-scan release batches (base, candidate; then candidate, base)
+- Pair A elapsed: 9.644 s, 10.025 s
+- Pair B elapsed: 9.466 s, 10.158 s
+- Mean user cycles: 6.100 billion, 6.218 billion (+1.94% candidate)
+- Mean user instructions: 15.844 billion, 15.934 billion (+0.57% candidate)
+- Mean elapsed: 9.555 s, 10.092 s (+5.61% candidate)
+
+This small experiment favored keeping openat2. Timing is sensitive to host load; both observed pairs were slower with openat, while syscall totals other than the open call name were unchanged.
+
+The full perf-stat and syscall outputs are retained in the local archive at:
+~/d/fdu-perf-local-archive/openat-20261002/

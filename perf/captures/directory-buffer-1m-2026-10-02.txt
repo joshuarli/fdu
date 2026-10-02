@@ -1,0 +1,22 @@
+Directory buffer comparison
+Date: 2026-10-02
+Base revision: bd507f7, 512 KiB per scanning thread
+Candidate: same source with DIRECTORY_BUFFER_BYTES set to 1 MiB
+Host: Linux 6.18.33-0-lts, ext4 on /dev/nvme0n1p3
+Workload: perf/fixture, generated inode-heavy tree; four Rayon workers
+
+Correctness
+- Allocated stdout and stderr matched byte-for-byte.
+- Apparent stdout and stderr matched byte-for-byte.
+
+One-scan filesystem syscall counts (512 KiB -> 1 MiB)
+- getdents64: 85,777 -> 85,773
+- statx:    1,218,248 -> 1,218,248
+- openat2:     85,772 -> 85,772
+- close:       85,784 -> 85,784
+- clone:            4 -> 4
+
+The four-call reduction comes from the four 30,000-file directories requiring a second read at 512 KiB. A single measured elapsed pair was 0.255 s and 0.257 s; this is not enough to infer a throughput difference. The larger buffer would retain 2 MiB more across four worker threads. Keep 512 KiB for this workload.
+
+Full captures are in the local archive at:
+~/d/fdu-perf-local-archive/openat-20261002/
