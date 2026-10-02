@@ -497,8 +497,8 @@ fn write_name(bytes: &[u8], output: &mut impl Write) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        write_name, write_tree, DirectoryContents, DirectoryId, DirectoryItem, DirectoryNames,
-        DiskItem,
+        write_name, write_size_and_tab, write_tree, DirectoryContents, DirectoryId, DirectoryItem,
+        DirectoryNames, DiskItem,
     };
     use std::io;
 
@@ -528,6 +528,34 @@ mod tests {
             let mut output = Vec::new();
             write_name(name, &mut output)?;
             assert_eq!(&output, expected);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn formats_size_and_tab_across_decimal_boundaries() -> io::Result<()> {
+        let cases = [
+            (0, "0\t"),
+            (1, "1\t"),
+            (9, "9\t"),
+            (10, "10\t"),
+            (99, "99\t"),
+            (100, "100\t"),
+            (101, "101\t"),
+            (999, "999\t"),
+            (1000, "1000\t"),
+            (4095, "4095\t"),
+            (9999, "9999\t"),
+            (10000, "10000\t"),
+            (100_000_000, "100000000\t"),
+            (u64::MAX, "18446744073709551615\t"),
+        ];
+
+        for (size, expected) in cases {
+            let mut output = Vec::new();
+            write_size_and_tab(size, &mut output)?;
+            assert_eq!(output, expected.as_bytes());
         }
 
         Ok(())
