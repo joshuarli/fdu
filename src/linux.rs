@@ -646,7 +646,7 @@ fn open_with_nofile_retry(
     mut open: impl FnMut() -> io::Result<File>,
 ) -> io::Result<File> {
     loop {
-        match open() {
+        match retry_interrupted(&mut open) {
             Err(error) if error.raw_os_error() == Some(libc::EMFILE) => {
                 raise_soft_nofile_limit()?;
             }
@@ -669,11 +669,14 @@ fn raise_soft_nofile_limit() -> io::Result<()> {
         Err(TryLockError::Poisoned(error)) => error.into_inner(),
     };
 
-    let mut limit = mem::MaybeUninit::<libc::rlimit>::uninit();
-    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, limit.as_mut_ptr()) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let mut limit = unsafe { limit.assume_init() };
+    let mut limit = retry_interrupted(|| {
+        let mut limit = mem::MaybeUninit::<libc::rlimit>::uninit();
+        if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, limit.as_mut_ptr()) } != 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(unsafe { limit.assume_init() })
+        }
+    })?;
     if limit.rlim_cur >= limit.rlim_max {
         return Err(io::Error::new(
             io::ErrorKind::Other,
@@ -690,10 +693,13 @@ fn raise_soft_nofile_limit() -> io::Result<()> {
         ));
     }
     limit.rlim_cur = next_soft;
-    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
+    retry_interrupted(|| {
+        if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) } != 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    })
 }
 
 fn openat2_directory(parent_fd: libc::c_int, name: &CStr) -> io::Result<File> {
@@ -768,11 +774,18 @@ fn stat_at(parent_fd: libc::c_int, name: &CStr, mask: libc::c_uint) -> io::Resul
 }
 
 fn is_ext4(fd: libc::c_int) -> bool {
-    let mut filesystem = mem::MaybeUninit::<libc::statfs>::zeroed();
-    if unsafe { libc::fstatfs(fd, filesystem.as_mut_ptr()) } < 0 {
-        return false;
+    let filesystem = retry_interrupted(|| {
+        let mut filesystem = mem::MaybeUninit::<libc::statfs>::uninit();
+        if unsafe { libc::fstatfs(fd, filesystem.as_mut_ptr()) } < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(unsafe { filesystem.assume_init() })
+        }
+    });
+    match filesystem {
+        Ok(filesystem) => filesystem.f_type as u64 == EXT4_SUPER_MAGIC,
+        Err(_) => false,
     }
-    unsafe { filesystem.assume_init().f_type as u64 == EXT4_SUPER_MAGIC }
 }
 
 fn stat_fd(fd: libc::c_int, mask: libc::c_uint) -> io::Result<LinuxStatx> {
@@ -791,21 +804,33 @@ fn statx(
     flags: libc::c_int,
     mask: libc::c_uint,
 ) -> io::Result<LinuxStatx> {
-    let mut stat = LinuxStatx::zeroed();
-    let result = unsafe {
-        libc::syscall(
-            libc::SYS_statx,
-            directory_fd,
-            path,
-            flags,
-            mask,
-            &mut stat as *mut LinuxStatx,
-        )
-    };
-    if result < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(stat)
+    retry_interrupted(|| {
+        let mut stat = LinuxStatx::zeroed();
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_statx,
+                directory_fd,
+                path,
+                flags,
+                mask,
+                &mut stat as *mut LinuxStatx,
+            )
+        };
+        if result < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(stat)
+        }
+    })
+}
+
+// Interrupted syscalls have not completed their operation, so retry before reporting an error.
+fn retry_interrupted<T>(mut operation: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    loop {
+        match operation() {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            result => return result,
+        }
     }
 }
 
@@ -923,4 +948,27 @@ fn read_directory(fd: libc::c_int, ext4_eof_cookie: bool) -> io::Result<Director
 
         Ok(DirectoryEntries { names, entries })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::retry_interrupted;
+    use std::cell::Cell;
+    use std::io;
+
+    #[test]
+    fn retries_interrupted_syscalls() {
+        let attempts = Cell::new(0);
+        let result = retry_interrupted(|| {
+            attempts.set(attempts.get() + 1);
+            if attempts.get() == 1 {
+                Err(io::Error::from(io::ErrorKind::Interrupted))
+            } else {
+                Ok(17)
+            }
+        });
+
+        assert_eq!(result.unwrap(), 17);
+        assert_eq!(attempts.get(), 2);
+    }
 }

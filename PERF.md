@@ -74,6 +74,10 @@ A 100-scan profile showed samples in Rayon’s `Vec` drain producer and `memcpy`
 
 A final pass with the current scanner on `crabc` recorded four worker clones, 1,181,139 `statx` calls, 83,888 `getdents64` calls, 83,929 `openat2` calls, 83,900 closes, and 42 skipped entries. The live tree changes during capture; these counts describe this pass only. Raw counters and warning are `target/perf-initial/fdu-final-crabc-syscalls.txt` and `target/perf-initial/fdu-final-crabc-errors.txt`.
 
+## Interrupted filesystem calls
+
+Treating `EINTR` from a metadata call as a per-entry failure omitted paths even though the operation had not completed. `retry_interrupted` now retries the raw `statx`, `openat2`/`openat`, filesystem type, and file-limit calls; `getdents64` retains its read loop retry. The focused `linux::tests::retries_interrupted_syscalls` regression failed before the retry loop and passes afterward. `strace` fault injection interrupted `statx` four times, `openat2` four times, and `getdents64` once; each run produced byte-identical output and stderr to an uninjected scan. Captures are `target/perf-initial/fdu-eintr-{statx,openat2,getdents64}-after.{out,err,strace}`.
+
 ## One directory-open syscall
 
 `open_child_directory` now uses `openat2` with `RESOLVE_NO_XDEV`. The entry name is a single directory component and `O_NOFOLLOW` prevents following a symlink. A successful open cannot cross a mount, so the child inherits its already-validated parent's device and needs no follow-up `File::metadata()` call. The [`openat2(2)` documentation](https://man7.org/linux/man-pages/man2/openat2.2.html) specifies that `RESOLVE_NO_XDEV` blocks mount crossings, including bind mounts, and returns `EXDEV` for one. On `EXDEV`, `ENOSYS`, or `EPERM`, `fdu` falls back to `openat` plus the explicit device check; this preserves traversal into same-device bind mounts and supports restricted syscall environments.
