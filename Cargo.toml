@@ -5,6 +5,9 @@ edition = "2021"
 license = "MIT"
 description = "A minimal Linux disk usage scanner"
 
+[features]
+allocation-profile = []
+
 [dependencies]
 libc = "0.2"
 rayon = "1.5.1"

@@ -2,6 +2,8 @@
 compile_error!("fdu supports Linux only");
 
 mod linux;
+#[cfg(feature = "allocation-profile")]
+mod allocation_profile;
 
 use std::env;
 use std::error::Error;
@@ -30,7 +32,10 @@ struct Options {
 }
 
 fn main() {
-    if let Err(error) = run() {
+    let result = run();
+    #[cfg(feature = "allocation-profile")]
+    allocation_profile::report();
+    if let Err(error) = result {
         eprintln!("fdu: {error}");
         process::exit(1);
     }

@@ -1,0 +1,59 @@
+Optimization goal reference measurements
+Date: 2026-10-02
+Scanner source: bd507f7; same scanner code as baeb0af
+Host: Linux 6.18.33-0-lts; /dev/nvme0n1p3, ext4, rw,relatime
+Build: cargo build --locked --release; thin LTO; incremental; default codegen units; four Rayon workers
+Compiler:
+rustc 1.100.0-nightly (574ff7d98 2026-09-14)
+binary: rustc
+commit-hash: 574ff7d98bd6d037e5236a8453029173b32631fd
+commit-date: 2026-09-14
+host: x86_64-unknown-linux-musl
+release: 1.100.0-nightly
+LLVM version: 23.1.1
+Fixture: scripts/generate_inode_fixture.py defaults; 1,304,020 entries
+Binary SHA256: 6a401d151cf8fab0a3ac55424db8100aa6e389896870df79db36f88a77d28911
+
+Two 39-scan warm release batches, 78 scans in total:
+Elapsed: 19.110133677 seconds
+Reported task-clock: 71.91286 CPU-seconds
+User instructions: 31,687,306,178
+User cycles: 12,200,422,604
+
+Memory reference: fdu-memory-baseline-2026-10-02.json
+Memory measurements use five fresh processes per mode, with Rust allocations
+measured separately from uninstrumented process RSS.
+
+Raw perf-stat reports follow.
+
+# started on Fri Oct  2 16:36:02 2026
+
+
+ Performance counter stats for 'env RAYON_NUM_THREADS=4 /home/josh/d/fdu-perf-local-archive/openat-20261002/run-39.sh /home/josh/d/fdu-perf-local-archive/openat-20261002/fdu-before-openat /home/josh/d/fdu/perf/fixture':
+
+          36528.92 msec task-clock:u                                                          
+        6114995871      cycles:u                                                              
+       15842062797      instructions:u                                                        
+
+       9.643802217 seconds time elapsed
+
+       1.658651000 seconds user
+      34.828047000 seconds sys
+
+
+
+# started on Fri Oct  2 16:36:39 2026
+
+
+ Performance counter stats for 'env RAYON_NUM_THREADS=4 /home/josh/d/fdu-perf-local-archive/openat-20261002/run-39.sh /home/josh/d/fdu-perf-local-archive/openat-20261002/fdu-before-openat /home/josh/d/fdu/perf/fixture':
+
+          35383.94 msec task-clock:u                                                          
+        6085426733      cycles:u                                                              
+       15845243381      instructions:u                                                        
+
+       9.466331460 seconds time elapsed
+
+       1.576282000 seconds user
+      33.762205000 seconds sys
+
+

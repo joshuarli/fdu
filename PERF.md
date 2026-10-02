@@ -1,4 +1,4 @@
-# Performance handoff
+# Performance goals and measurements
 
 ## Current scope
 
@@ -7,6 +7,30 @@ FDU scans a Linux 6.0+ directory tree and reports one row for each immediate chi
 The scan assumes a single filesystem. It does not detect or stop at mount boundaries. Symlinks are counted without following them, and hardlinked paths are counted separately. Allocated bytes are the default; apparent mode uses logical lengths. Per-entry failures omit that entry and increment the incomplete-total warning.
 
 The scanner returns aggregate sizes only. It does not retain or render a full tree.
+
+## Quantified optimization goal
+
+The replacement objective for the paused goal is: **double FDU's throughput on the default ext4 fixture, halve CPU work and allocation traffic, and reduce peak memory while preserving its current accounting, four default Rayon workers, and libc-plus-Rayon dependency boundary.** The targets below define success; they are aspirations, not measured improvements.
+
+Use the default `scripts/generate_inode_fixture.py` tree: 1,304,020 entries, including 85,772 directories and 1,218,248 files. The reference scanner is `bd507f7`, whose scanning code is unchanged in `baeb0af`. Timing and CPU baselines below sum two 39-scan release batches. Memory baselines use five fresh processes per size mode. Source, commands, and binary hashes are recorded in `perf/captures/fdu-goal-baseline-2026-10-02.txt` and `perf/captures/fdu-memory-baseline-2026-10-02.json`.
+
+| Metric | Current baseline | Aspirational target |
+| --- | --- | --- |
+| Allocated-mode elapsed time, 78 scans | 19.11 s, about 5.32 million entries/s | At most 9.5 s, about 10.71 million entries/s, and at most 50% of the paired baseline |
+| Allocated-mode task-clock, 78 scans | 71.91 CPU-s | At most 36 CPU-s and at most 50% of the paired baseline |
+| Allocated-mode user instructions, 78 scans | 31.69 billion, about 406 million/scan | At most 15.6 billion, or 200 million/scan |
+| Successful allocation plus reallocation calls/scan, median | 2,089 allocated; 2,149 apparent | At most 1,000 in each mode |
+| Cumulative requested Rust heap bytes/scan, median | 12.09 MiB allocated; 12.10 MiB apparent | At most 6 MiB in every memory sample, in each mode |
+| Peak live requested Rust heap bytes/scan, median | 3.59 MiB allocated; 4.57 MiB apparent | At most 2 MiB in every memory sample, in each mode |
+| Process peak RSS/scan, median | 2,248 KiB allocated; 2,868 KiB apparent | At least 25% below each mode's paired baseline: currently at most 1,686 KiB and 2,151 KiB respectively |
+
+These absolute budgets apply to the reference host and fixture. On a different host, establish a fresh reference measurement and retain the relative throughput, CPU, and RSS targets. Report median and maximum memory measurements; the candidate's worst observed RSS must also stay at or below the matched reference's worst observed RSS. The five reference samples reached 2,836 KiB in allocated mode and 3,656 KiB in apparent mode.
+
+Correctness and scope are hard requirements. Preserve the same immediate-directory-to-byte-count mapping in allocated and apparent modes, descending size order, root-file exclusion, hardlink path accounting, symlink behavior, and incomplete-total diagnostics. Preserve the existing behavior checks for sparse files, unusual names, large directory batches, interrupted calls, and deep trees. Apparent-mode elapsed time and task-clock must not regress by more than 5% against its paired reference.
+
+Retain one file-metadata operation per non-directory path or fewer, and no extra child-directory opens. The reference counts are 1,218,248 metadata operations and 85,772 child opens. Account for equivalent operations submitted through other interfaces. Directory reads may rise by at most 1% above 85,777 if a smaller buffer helps meet the CPU and memory targets. Primary success is measured on the ordinary-user live VFS backend; snapshot experiments must establish the same accounting and access contract before qualifying.
+
+The goal is achieved when all targets and requirements pass the validation procedure below and the implementation, captures, and interpretation are committed. Partial gains or exhausted experiments should be reported with their measured gap to the targets rather than described as completion.
 
 ## Implementation state
 
@@ -55,6 +79,10 @@ Build the profiling executable, set workload_dir to the generated fixture, then 
 
 For an on-CPU profile, use perf record with frame-pointer call stacks and write the data under perf/captures. The counter tracepoints describe call counts, not latency. Do not drop caches globally.
 
+### Throughput and CPU validation
+
+Keep baseline and candidate release binaries with their source revision and hash. Warm each binary on the unchanged fixture, then run at least five pairs of 78 fresh-process scans in allocated mode, alternating which binary runs first. Use `RAYON_NUM_THREADS=4`, the same output destination, toolchain, and build flags. Report every pair, the median candidate/reference ratio, and the median batch time; success requires the median ratio to satisfy the target and at least four of the five individual pairs to agree. Repeat the paired comparison in apparent mode to check its 5% regression limit. Recheck results affected by a workload change or large host-load variation.
+
 To collect a longer release batch, wrap repeated scans in perf stat. Keep the repetition count fixed when comparing revisions:
 
     RAYON_NUM_THREADS=4 perf stat -e task-clock:u,cycles:u,instructions:u -- \
@@ -62,6 +90,29 @@ To collect a longer release batch, wrap repeated scans in perf stat. Keep the re
       bash "$workload_dir"
 
 On the generated fixture, a 78-scan release batch took 21.5 seconds. A separate syscall-count pass observed 1,218,248 statx calls, 85,772 openat2 calls, 85,777 getdents64 calls, and 85,773 closes. The strace run perturbs timing; use it for call counts only.
+
+### Allocation and resident-memory validation
+
+`allocation-profile` enables `src/allocation_profile.rs`, a wrapper around Rust's `System` allocator. Build it in a separate target directory so timing captures continue to use the ordinary release executable:
+
+    CARGO_TARGET_DIR=target/allocation-profile cargo build --locked --release --features allocation-profile
+
+After scanning and rendering, the instrumented executable emits one `fdu-allocations` line to stderr. It reports successful allocation calls, successful reallocations, deallocations, cumulative requested bytes, current live requested bytes, and peak live requested bytes. Allocation calls include zeroed allocations; the goal's request count is allocation calls plus reallocations. Each successful resize adds its full new requested size to cumulative bytes. For example, a 64-byte allocation resized to 128 bytes contributes 192 cumulative requested bytes and 128 live bytes. Failed requests do not increment these counters.
+
+The allocator counters cover Rust heap requests across startup, traversal, and output, through the point just before the profiling diagnostic. They exclude allocator rounding and bookkeeping, libc's own allocations, thread stacks, and other mappings. A resize's temporary internal copy is also outside the peak-live calculation. Nonzero live bytes at the end can include idle Rayon workers and their retained buffers; they alone do not establish a leak. Counts can vary with worker assignment and buffer reuse, so preserve the sample distribution.
+
+Measure RSS with the uninstrumented release executable. `/usr/bin/time -v` reports the process's peak resident memory in KiB, covering touched heap pages, stacks, code, and other resident mappings. It measures a different quantity from requested heap capacity: reserved or untouched heap bytes need not be resident. Atomic allocation counters add overhead, so instrumented timings do not qualify for throughput or CPU targets.
+
+Warm each binary once, then record five fresh processes per mode. Run the same procedure on reference and candidate binaries, alternating order. For allocated mode:
+
+    for run in 1 2 3 4 5; do
+      /usr/bin/time -v -o "perf/captures/rss-$run.txt" \
+        env RAYON_NUM_THREADS=4 target/release/fdu perf/fixture >/dev/null
+      env RAYON_NUM_THREADS=4 target/allocation-profile/release/fdu perf/fixture \
+        >/dev/null 2>"perf/captures/allocations-$run.txt"
+    done
+
+Repeat with `--apparent` and separate capture names. Verify successful exit and absence of incomplete-total warnings; compare the directory-size mappings before accepting memory results. Summarize allocation requests, cumulative requested bytes, peak live bytes, and RSS using both median and maximum. Preserve individual samples, source revisions, binary hashes, kernel, filesystem, generator arguments, mode, and worker count. Use the same instrumentation and release flags on both sides of an allocation comparison.
 
 ## Findings and next work
 

@@ -1,0 +1,231 @@
+{
+  "date_utc": "2026-10-02",
+  "kernel": "6.18.33-0-lts",
+  "filesystem": "ext4; /dev/nvme0n1p3; rw,relatime",
+  "release_source_revision": "bd507f7 (same scanner code as baeb0af)",
+  "allocation_source_revision": "baeb0af plus allocation-profile instrumentation working tree",
+  "release_binary": "/home/josh/d/fdu-perf-local-archive/openat-20261002/fdu-before-openat",
+  "release_sha256": "6a401d151cf8fab0a3ac55424db8100aa6e389896870df79db36f88a77d28911",
+  "allocation_binary": "/home/josh/d/fdu/target/allocation-profile/release/fdu",
+  "allocation_sha256": "56dcd46cd93ef92ad360e7a21792b07f1325a3caec8aa214ecc35f8bfc841c51",
+  "allocation_build": "CARGO_TARGET_DIR=target/allocation-profile cargo build --locked --release --features allocation-profile",
+  "fixture": "/home/josh/d/fdu/perf/fixture",
+  "fixture_parameters": "generator defaults: 85772 directories excluding root; 1218248 non-directory paths; 1304020 entries",
+  "environment": {
+    "RAYON_NUM_THREADS": "4",
+    "LC_ALL": "C"
+  },
+  "rss_method": "/usr/bin/time -v on the uninstrumented release binary; fresh process per sample",
+  "allocation_method": "Successful Rust GlobalAlloc calls over the whole process through scan and rendering; snapshot before diagnostic output",
+  "records": [
+    {
+      "mode": "allocated",
+      "run": 1,
+      "peak_rss_kib": 2212,
+      "allocation_calls": 1720,
+      "reallocation_calls": 369,
+      "deallocation_calls": 1647,
+      "requested_bytes": 12676448,
+      "live_bytes": 2701624,
+      "peak_live_bytes": 3761022,
+      "allocation_requests": 2089
+    },
+    {
+      "mode": "allocated",
+      "run": 2,
+      "peak_rss_kib": 2836,
+      "allocation_calls": 1704,
+      "reallocation_calls": 374,
+      "deallocation_calls": 1631,
+      "requested_bytes": 12701216,
+      "live_bytes": 2726776,
+      "peak_live_bytes": 3769401,
+      "allocation_requests": 2078
+    },
+    {
+      "mode": "allocated",
+      "run": 3,
+      "peak_rss_kib": 2264,
+      "allocation_calls": 1794,
+      "reallocation_calls": 359,
+      "deallocation_calls": 1721,
+      "requested_bytes": 12663464,
+      "live_bytes": 2684856,
+      "peak_live_bytes": 3773608,
+      "allocation_requests": 2153
+    },
+    {
+      "mode": "allocated",
+      "run": 4,
+      "peak_rss_kib": 2248,
+      "allocation_calls": 1706,
+      "reallocation_calls": 370,
+      "deallocation_calls": 1633,
+      "requested_bytes": 12675784,
+      "live_bytes": 2701624,
+      "peak_live_bytes": 3760950,
+      "allocation_requests": 2076
+    },
+    {
+      "mode": "allocated",
+      "run": 5,
+      "peak_rss_kib": 2052,
+      "allocation_calls": 1752,
+      "reallocation_calls": 369,
+      "deallocation_calls": 1679,
+      "requested_bytes": 12712096,
+      "live_bytes": 2718392,
+      "peak_live_bytes": 3758835,
+      "allocation_requests": 2121
+    },
+    {
+      "mode": "apparent",
+      "run": 1,
+      "peak_rss_kib": 2868,
+      "allocation_calls": 1756,
+      "reallocation_calls": 364,
+      "deallocation_calls": 1682,
+      "requested_bytes": 12686058,
+      "live_bytes": 2710072,
+      "peak_live_bytes": 3793223,
+      "allocation_requests": 2120
+    },
+    {
+      "mode": "apparent",
+      "run": 2,
+      "peak_rss_kib": 3656,
+      "allocation_calls": 1813,
+      "reallocation_calls": 362,
+      "deallocation_calls": 1739,
+      "requested_bytes": 12690506,
+      "live_bytes": 2693304,
+      "peak_live_bytes": 4790399,
+      "allocation_requests": 2175
+    },
+    {
+      "mode": "apparent",
+      "run": 3,
+      "peak_rss_kib": 2760,
+      "allocation_calls": 1805,
+      "reallocation_calls": 359,
+      "deallocation_calls": 1738,
+      "requested_bytes": 12713354,
+      "live_bytes": 2726296,
+      "peak_live_bytes": 3771833,
+      "allocation_requests": 2164
+    },
+    {
+      "mode": "apparent",
+      "run": 4,
+      "peak_rss_kib": 2312,
+      "allocation_calls": 1786,
+      "reallocation_calls": 363,
+      "deallocation_calls": 1712,
+      "requested_bytes": 12688922,
+      "live_bytes": 2693304,
+      "peak_live_bytes": 4790415,
+      "allocation_requests": 2149
+    },
+    {
+      "mode": "apparent",
+      "run": 5,
+      "peak_rss_kib": 2896,
+      "allocation_calls": 1788,
+      "reallocation_calls": 361,
+      "deallocation_calls": 1720,
+      "requested_bytes": 12688354,
+      "live_bytes": 2701208,
+      "peak_live_bytes": 4790255,
+      "allocation_requests": 2149
+    }
+  ],
+  "summary": {
+    "allocated": {
+      "peak_rss_kib": {
+        "min": 2052,
+        "median": 2248,
+        "max": 2836
+      },
+      "allocation_calls": {
+        "min": 1704,
+        "median": 1720,
+        "max": 1794
+      },
+      "reallocation_calls": {
+        "min": 359,
+        "median": 369,
+        "max": 374
+      },
+      "deallocation_calls": {
+        "min": 1631,
+        "median": 1647,
+        "max": 1721
+      },
+      "requested_bytes": {
+        "min": 12663464,
+        "median": 12676448,
+        "max": 12712096
+      },
+      "live_bytes": {
+        "min": 2684856,
+        "median": 2701624,
+        "max": 2726776
+      },
+      "peak_live_bytes": {
+        "min": 3758835,
+        "median": 3761022,
+        "max": 3773608
+      },
+      "allocation_requests": {
+        "min": 2076,
+        "median": 2089,
+        "max": 2153
+      }
+    },
+    "apparent": {
+      "peak_rss_kib": {
+        "min": 2312,
+        "median": 2868,
+        "max": 3656
+      },
+      "allocation_calls": {
+        "min": 1756,
+        "median": 1788,
+        "max": 1813
+      },
+      "reallocation_calls": {
+        "min": 359,
+        "median": 362,
+        "max": 364
+      },
+      "deallocation_calls": {
+        "min": 1682,
+        "median": 1720,
+        "max": 1739
+      },
+      "requested_bytes": {
+        "min": 12686058,
+        "median": 12688922,
+        "max": 12713354
+      },
+      "live_bytes": {
+        "min": 2693304,
+        "median": 2701208,
+        "max": 2726296
+      },
+      "peak_live_bytes": {
+        "min": 3771833,
+        "median": 4790255,
+        "max": 4790415
+      },
+      "allocation_requests": {
+        "min": 2120,
+        "median": 2149,
+        "max": 2175
+      }
+    }
+  },
+  "cache_state": "warm from preceding scans; no global cache drops",
+  "rustc_verbose_version": "rustc 1.100.0-nightly (574ff7d98 2026-09-14)\nbinary: rustc\ncommit-hash: 574ff7d98bd6d037e5236a8453029173b32631fd\ncommit-date: 2026-09-14\nhost: x86_64-unknown-linux-musl\nrelease: 1.100.0-nightly\nLLVM version: 23.1.1",
+  "release_build": "cargo build --locked --release; thin LTO; incremental; default codegen units"
+}
