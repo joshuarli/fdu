@@ -16,6 +16,9 @@ const STATX_SIZE: libc::c_uint = 0x0200;
 const STATX_BLOCKS: libc::c_uint = 0x0400;
 const STATX_BASIC_STATS: libc::c_uint = 0x07ff;
 const RESOLVE_NO_XDEV: u64 = 0x01;
+const EXT4_SUPER_MAGIC: u64 = 0xef53;
+const EXT4_HTREE_EOF_32BIT: i64 = 0x7fff_ffff;
+const EXT4_HTREE_EOF_64BIT: i64 = i64::MAX;
 const S_IFMT: u16 = 0o170000;
 const S_IFDIR: u16 = 0o040000;
 
@@ -130,7 +133,8 @@ pub(super) fn scan(path: &Path, apparent: bool) -> io::Result<DiskItem> {
         ));
     }
 
-    scan_directory(name, root, root_stat.device(), apparent)
+    let ext4_eof_cookie = is_ext4(root.as_raw_fd());
+    scan_directory(name, root, root_stat.device(), apparent, ext4_eof_cookie)
 }
 
 fn scan_directory(
@@ -138,11 +142,14 @@ fn scan_directory(
     directory: File,
     root_device: Device,
     apparent: bool,
+    ext4_eof_cookie: bool,
 ) -> io::Result<DiskItem> {
-    let entries = read_directory(directory.as_raw_fd())?;
+    let entries = read_directory(directory.as_raw_fd(), ext4_eof_cookie)?;
     let mut children = entries
         .into_par_iter()
-        .filter_map(|entry| scan_entry(&directory, entry, root_device, apparent).ok())
+        .filter_map(|entry| {
+            scan_entry(&directory, entry, root_device, apparent, ext4_eof_cookie).ok()
+        })
         .collect::<Vec<_>>();
 
     children.sort_unstable_by(|left, right| right.disk_size.cmp(&left.disk_size));
@@ -160,9 +167,12 @@ fn scan_entry(
     entry: DirectoryEntry,
     root_device: Device,
     apparent: bool,
+    ext4_eof_cookie: bool,
 ) -> io::Result<DiskItem> {
     match entry.kind {
-        EntryKind::Directory => scan_child_directory(parent, entry, root_device, apparent),
+        EntryKind::Directory => {
+            scan_child_directory(parent, entry, root_device, apparent, ext4_eof_cookie)
+        }
         EntryKind::Other | EntryKind::Unknown => {
             let stat = stat_at(
                 parent.as_raw_fd(),
@@ -170,7 +180,7 @@ fn scan_entry(
                 entry_metadata_mask(apparent),
             )?;
             if stat.is_directory() {
-                scan_child_directory(parent, entry, root_device, apparent)
+                scan_child_directory(parent, entry, root_device, apparent, ext4_eof_cookie)
             } else {
                 Ok(file_item(entry, stat, apparent))
             }
@@ -193,21 +203,29 @@ fn scan_child_directory(
     entry: DirectoryEntry,
     root_device: Device,
     apparent: bool,
+    ext4_eof_cookie: bool,
 ) -> io::Result<DiskItem> {
-    let child = open_child_directory(parent, &entry.name, root_device)?;
+    let (child, child_ext4_eof_cookie) =
+        open_child_directory(parent, &entry.name, root_device, ext4_eof_cookie)?;
 
     scan_directory(
         entry.name.to_string_lossy().into_owned(),
         child,
         root_device,
         apparent,
+        child_ext4_eof_cookie,
     )
 }
 
 // A no-cross-mount open inherits the parent's device; the fallback checks st_dev explicitly.
-fn open_child_directory(parent: &File, name: &CString, root_device: Device) -> io::Result<File> {
+fn open_child_directory(
+    parent: &File,
+    name: &CString,
+    root_device: Device,
+    ext4_eof_cookie: bool,
+) -> io::Result<(File, bool)> {
     match openat2_directory(parent.as_raw_fd(), name) {
-        Ok(child) => Ok(child),
+        Ok(child) => Ok((child, ext4_eof_cookie)),
         Err(error)
             if matches!(
                 error.raw_os_error(),
@@ -222,7 +240,7 @@ fn open_child_directory(parent: &File, name: &CString, root_device: Device) -> i
                     "filesystem boundary crossed",
                 ));
             }
-            Ok(child)
+            Ok((child, false))
         }
         Err(error) => Err(error),
     }
@@ -283,6 +301,14 @@ fn stat_at(parent_fd: libc::c_int, name: &CString, mask: libc::c_uint) -> io::Re
     )
 }
 
+fn is_ext4(fd: libc::c_int) -> bool {
+    let mut filesystem = mem::MaybeUninit::<libc::statfs>::zeroed();
+    if unsafe { libc::fstatfs(fd, filesystem.as_mut_ptr()) } < 0 {
+        return false;
+    }
+    unsafe { filesystem.assume_init().f_type as u64 == EXT4_SUPER_MAGIC }
+}
+
 fn stat_fd(fd: libc::c_int, mask: libc::c_uint) -> io::Result<LinuxStatx> {
     // Query the opened root directly without resolving a second pathname.
     statx(
@@ -317,7 +343,7 @@ fn statx(
     }
 }
 
-fn read_directory(fd: libc::c_int) -> io::Result<Vec<DirectoryEntry>> {
+fn read_directory(fd: libc::c_int, ext4_eof_cookie: bool) -> io::Result<Vec<DirectoryEntry>> {
     DIRECTORY_BUFFER.with(|buffer| {
         let mut buffer = buffer.borrow_mut();
         let mut entries = Vec::new();
@@ -344,6 +370,7 @@ fn read_directory(fd: libc::c_int) -> io::Result<Vec<DirectoryEntry>> {
 
             let bytes_read = result as usize;
             let mut offset = 0;
+            let mut final_offset = 0;
             while offset < bytes_read {
                 if bytes_read - offset < 19 {
                     return Err(io::Error::new(
@@ -360,6 +387,11 @@ fn read_directory(fd: libc::c_int) -> io::Result<Vec<DirectoryEntry>> {
                         "invalid getdents64 record length",
                     ));
                 }
+                final_offset = i64::from_ne_bytes(
+                    buffer[offset + 8..offset + 16]
+                        .try_into()
+                        .expect("fixed-width directory offset"),
+                );
 
                 let kind = match buffer[offset + 18] {
                     libc::DT_DIR => EntryKind::Directory,
@@ -379,6 +411,12 @@ fn read_directory(fd: libc::c_int) -> io::Result<Vec<DirectoryEntry>> {
                     entries.push(DirectoryEntry { name, kind });
                 }
                 offset += record_length;
+            }
+            // Ext4 HTree reserves these d_off values for an exhausted directory.
+            if ext4_eof_cookie
+                && matches!(final_offset, EXT4_HTREE_EOF_32BIT | EXT4_HTREE_EOF_64BIT)
+            {
+                break;
             }
         }
 

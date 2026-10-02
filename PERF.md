@@ -26,6 +26,23 @@ On a later `crabc` snapshot, the task trace counted 70,770 `openat2`, zero `open
 
 After moving pool setup back to Rayon's lazy initialization, a paired pass over 1,124,714 readable paths counted 1,052,051 `statx`, 145,343 `getdents64`, and 72,663 directory opens in each scanner. `fdu` used `openat2`; the source scanner used `openat`. Futex counts were 701,146 for `fdu` and 736,416 for the source scanner, with context switches of 55,172 and 57,094. This single pair does not establish a timing win; the lower futex count is consistent with avoiding the synchronization spike from eager pool initialization, but needs repeated stable runs to isolate. The output paths differ: `fdu` renders every item as plain text, so wall and user time include more formatting work. Captures are `target/perf-initial/fdu-lazy-pool-syscalls.txt` and `target/perf-initial/dirstat-lazy-pool-syscalls.txt`.
 
+## ext4 HTree end-of-directory cookie
+
+Linux writes the filesystem's next directory position to each `getdents64` record's `d_off`; ext4 HTree directories set that position to a reserved EOF cookie once enumeration is complete. The [ext4 directory implementation](https://github.com/torvalds/linux/blob/v6.18/fs/ext4/dir.c) uses the 32-bit or 64-bit EOF value defined in [ext4.h](https://github.com/torvalds/linux/blob/v6.18/fs/ext4/ext4.h), and [getdents64](https://github.com/torvalds/linux/blob/v6.18/fs/readdir.c) returns that position with the final record. `fdu` detects ext4 once with `fstatfs`, then skips the otherwise empty follow-up read only when the final record carries that cookie. Directories opened through the `openat` fallback keep the conservative read-until-zero path; other filesystems do too.
+
+A read-only probe of `crabc` found the cookie in all 62,679 opened directories. It read 62,782 batches for 1,229,128 raw dirents (including `.` and `..`), with 42 directory-open errors and no read errors. The C probe and its raw output are `target/perf-initial/ext4-eof-cookie-probe.c` and `target/perf-initial/fdu-ext4-eof-cookie-probe.txt`.
+
+The paired `perf stat` scans ran 19 seconds apart while `crabc` was changing. The second snapshot had about 900 more child-directory open attempts, so these counts show per-directory syscall shape rather than a timing comparison.
+
+| Scanner path | Child `openat2` attempts | `getdents64` calls | `statx` calls | `fstatfs` calls | Elapsed seconds |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Before EOF-cookie check | 61,797 | 123,615 | 1,038,362 | 1 | 0.554 |
+| Ext4 EOF-cookie check | 62,716 | 62,778 | 1,041,041 | 2 | 0.610 |
+
+Dividing by child-directory `openat2` attempts plus one root read, the two snapshots recorded about 2.00 and 1.00 `getdents64` calls per directory. The attempt count can include entries that disappeared or became inaccessible during traversal. The extra `fstatfs` probe is once per scan in the FDU code; the trace also covers launch wrappers. Futex and elapsed-time differences are host-noisy and do not establish a speedup. Raw counters are `target/perf-initial/fdu-baseline-ext4-eof-cookie.txt` and `target/perf-initial/fdu-ext4-eof-cookie.txt`.
+
+A ten-scan on-CPU profile after this change recorded 6,977 samples with zero lost. Self samples included `ext4_file_getattr` at 6.88%, `memcpy` at 5.68%, Rayon `__lock` at 4.09%, and `__libc_free` at 3.34%. The metadata lookup and output-building costs remain visible after the directory EOF syscall reduction. Raw data and report are `target/perf-initial/fdu-ext4-eof-cookie-10.data` and `target/perf-initial/fdu-ext4-eof-cookie-10.report.txt`.
+
 ## Remaining metadata work
 
 A read-only dirent inode census found 14 duplicate non-directory paths among 1,023,593 readable paths. A shared inode metadata cache would add synchronization and memory for almost no avoided `statx` calls. The remaining per-file metadata lookup is the main syscall target.
