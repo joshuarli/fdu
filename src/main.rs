@@ -344,6 +344,13 @@ fn write_size_and_tab(mut size: u64, output: &mut impl Write) -> io::Result<()> 
 }
 
 fn write_name(bytes: &[u8], output: &mut impl Write) -> io::Result<()> {
+    if bytes
+        .iter()
+        .all(|byte| matches!(*byte, b' '..=b'~') && *byte != b'\\')
+    {
+        return output.write_all(bytes);
+    }
+
     if let Ok(text) = std::str::from_utf8(bytes) {
         let mut segment_start = 0;
         for (byte_index, character) in text.char_indices() {
@@ -397,4 +404,28 @@ fn write_name(bytes: &[u8], output: &mut impl Write) -> io::Result<()> {
         segment_start = byte_index + 1;
     }
     output.write_all(&bytes[segment_start..])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::write_name;
+    use std::io;
+
+    #[test]
+    fn writes_names_with_existing_escape_rules() -> io::Result<()> {
+        let cases: &[(&[u8], &[u8])] = &[
+            (b"plain ASCII name", b"plain ASCII name"),
+            (b"back\\slash\ttab\nline\rcarriage", b"back\\\\slash\\ttab\\nline\\rcarriage"),
+            ("é\u{85}".as_bytes(), "é\\u{85}".as_bytes()),
+            (b"bad\xffbyte", b"bad\\xffbyte"),
+        ];
+
+        for (name, expected) in cases {
+            let mut output = Vec::new();
+            write_name(name, &mut output)?;
+            assert_eq!(&output, expected);
+        }
+
+        Ok(())
+    }
 }

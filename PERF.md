@@ -48,6 +48,14 @@ Per-entry filesystem or size-overflow errors omit that item and any unreadable s
 
 Two alternating `perf stat -r 30` pairs on the flat fixture averaged 13.17 million to 11.21 million user instructions and 6.69 million to 5.83 million user cycles. Task-clock averaged 7.04 to 6.84 ms, and elapsed time 3.750 to 3.562 ms. One `perf stat -r 20` pair on the nested fixture recorded 129.48 million to 117.88 million user instructions; task-clock and elapsed time overlapped. The flat-fixture instruction reduction repeated consistently, but these warm fixtures and host activity do not establish a whole-tree throughput gain. Captures are `target/perf-initial/fdu-manual-size-before-coalesced-30{b,c}.txt`, `target/perf-initial/fdu-manual-size-after-coalesced-30{b,c}.txt`, `target/perf-initial/fdu-manual-size-before-nested-20b.txt`, and `target/perf-initial/fdu-manual-size-after-coalesced-nested-20b.txt`; measured binaries are `target/perf-initial/fdu-manual-size-before` and `target/perf-initial/fdu-manual-size-after-coalesced`.
 
+## Printable ASCII names
+
+`write_name` writes printable ASCII names without backslashes directly. Those bytes are valid UTF-8 and need no escaping; every other name keeps the existing Unicode-control and invalid-byte handling.
+
+Four alternating 20-run pairs on a warm ext4 directory of 30,000 files reduced mean user instructions from 28.53 million to 22.50 million (21.1%) and cycles from 14.84 million to 13.92 million (6.2%). Elapsed time was lower in three of four pairs. On the nested fixture with 5,000 directories and 40,000 files, mean instructions fell from 55.99 million to 50.46 million (9.9%), while cycles and task-clock were effectively unchanged. Elapsed results overlapped, so no general throughput gain is claimed. Allocated and apparent output and stderr matched byte-for-byte on flat, nested, and escaped-name fixtures. `tests::writes_names_with_existing_escape_rules` checks plain ASCII, escaped ASCII controls and backslashes, a Unicode control, and invalid UTF-8.
+
+Counter captures are `target/perf-initial/fdu-name-fast-{before,after}-{flat,nested}-20{a,b,c,d}.txt`; profiles are `target/perf-initial/fdu-name-fast-{before,after}-nested-100-user.{data,report.txt}`. The measured executables are `target/perf-initial/fdu-name-fast-{before,after}`. Output comparisons are `target/perf-initial/fdu-name-fast-{before,after}-{flat,nested,escape}-{allocated,apparent}.{out,err}`.
+
 ## Directory vector capacity estimates
 
 `read_directory` uses each `getdents64` batch size to reserve entry and name capacity before parsing. The first batch estimate excludes the `.` and `..` records. This reduces repeated growth without changing the number or order of filesystem calls.
