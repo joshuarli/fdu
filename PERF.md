@@ -70,6 +70,10 @@ Four alternating ten-run pairs pinned to CPU 0 reduced mean user instructions fr
 
 Four alternating 20-run pairs on the warm 30,000-file ext4 fixture reduced mean instructions from 21.69 to 20.94 million (3.4%), cycles from 14.14 to 14.00 million (1.0%), task-clock from 16.92 to 16.33 ms (3.4%), and elapsed time from 8.435 to 8.014 ms (5.0%). On the 5,000-directory, 40,000-file fixture, instructions fell 1.6%, cycles 2.8%, and task-clock 1.2%; elapsed time was unchanged. Allocated and apparent output and stderr matched byte-for-byte on flat, nested, and escaped-name fixtures. Captures are `target/perf-initial/fdu-output-walk-{before,after}-{flat,nested}-20{a,b,c,d}.txt`; measured executables are `target/perf-initial/fdu-output-walk-{before,after}` and output comparisons are `target/perf-initial/fdu-output-walk-{before,after}-{flat,nested,escape}-{allocated,apparent}.{out,err}`.
 
+## Larger stdout buffer
+
+Increasing the output buffer to 64 KiB reduced `write` syscall counts from 61 to 10 on the flat fixture and 109 to 10 on the nested fixture. Four alternating 20-run pairs showed no repeatable instruction, cycle, or elapsed-time gain, while the larger buffer reserves more memory for every scan. `BufWriter::new` remains in use. Captures are `target/perf-initial/fdu-output-buffer-{before,after}-{flat,nested}-20{e,f,g,h}.txt`, `target/perf-initial/fdu-output-buffer-{before,after}-{flat,nested}-strace.txt`, and the measured binaries are `target/perf-initial/fdu-output-buffer-{before,after}`.
+
 ## Directory vector capacity estimates
 
 `read_directory` uses each `getdents64` batch size to reserve entry and name capacity before parsing. The first batch estimate excludes the `.` and `..` records. This reduces repeated growth without changing the number or order of filesystem calls.
