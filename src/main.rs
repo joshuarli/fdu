@@ -41,6 +41,88 @@ impl DiskItem {
     }
 }
 
+// Keep short directory name lists inline so one-file directories need no name allocation.
+enum DirectoryNames {
+    Inline([u8; 16]),
+    Heap(Vec<u8>),
+}
+
+impl DirectoryNames {
+    fn new() -> Self {
+        Self::Inline([0; 16])
+    }
+
+    #[cfg(test)]
+    fn from_vec(names: Vec<u8>) -> Self {
+        if names.len() <= 16 {
+            let mut inline = [0; 16];
+            inline[..names.len()].copy_from_slice(&names);
+            Self::Inline(inline)
+        } else {
+            Self::Heap(names)
+        }
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Inline(bytes) => &bytes[..inline_name_bytes_len(bytes)],
+            Self::Heap(names) => names,
+        }
+    }
+
+    fn reserve(&mut self, additional: usize) {
+        if let Self::Heap(names) = self {
+            names.reserve(additional);
+        }
+    }
+
+    fn append_name(&mut self, name: &[u8], reserve_hint: usize) -> usize {
+        let additional = name
+            .len()
+            .checked_add(1)
+            .expect("directory name length is representable");
+        if let Self::Inline(bytes) = self {
+            let current_len = inline_name_bytes_len(bytes);
+            if current_len + additional <= bytes.len() {
+                bytes[current_len..current_len + name.len()].copy_from_slice(name);
+                bytes[current_len + name.len()] = 0;
+                return current_len;
+            }
+
+            let inline = *bytes;
+            let capacity = current_len
+                .saturating_add(reserve_hint)
+                .max(current_len.saturating_add(additional));
+            let mut names = Vec::with_capacity(capacity);
+            names.extend_from_slice(&inline[..current_len]);
+            names.extend_from_slice(name);
+            names.push(0);
+            *self = Self::Heap(names);
+            return current_len;
+        }
+
+        let Self::Heap(names) = self else {
+            unreachable!("inline names transition to heap storage before overflow");
+        };
+        let start = names.len();
+        names.extend_from_slice(name);
+        names.push(0);
+        start
+    }
+}
+
+// Keep inline name storage the same size as Vec<u8> on 64-bit builds.
+#[cfg(target_pointer_width = "64")]
+const _: [(); 24] = [(); std::mem::size_of::<DirectoryNames>()];
+
+// Names cannot contain NUL, and each stored name has one trailing NUL byte.
+fn inline_name_bytes_len(bytes: &[u8; 16]) -> usize {
+    bytes
+        .iter()
+        .rposition(|byte| *byte != 0)
+        .map_or(0, |last_name_byte| (last_name_byte + 2).min(bytes.len()))
+}
+
 // One outcome per entry keeps Rayon collection indexed and avoids merging filtered worker vectors.
 enum DirectoryItem {
     Scanned(DiskItem),
@@ -85,7 +167,7 @@ struct StoredDirectory {
 }
 
 struct DirectoryContents {
-    names: Vec<u8>,
+    names: DirectoryNames,
     items: Vec<DirectoryItem>,
     disk_size: u64,
 }
@@ -104,7 +186,7 @@ struct ScanReport {
 
 impl DirectoryContents {
     fn name_bytes(&self, offset: usize) -> &[u8] {
-        let name_and_terminator = &self.names[offset..];
+        let name_and_terminator = &self.names.as_slice()[offset..];
         let length = name_and_terminator
             .iter()
             .position(|byte| *byte == 0)
@@ -411,9 +493,23 @@ fn write_name(bytes: &[u8], output: &mut impl Write) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        write_name, write_tree, DirectoryContents, DirectoryId, DirectoryItem, DiskItem,
+        write_name, write_tree, DirectoryContents, DirectoryId, DirectoryItem, DirectoryNames,
+        DiskItem,
     };
     use std::io;
+
+    #[test]
+    fn directory_names_stay_inline_until_the_fixed_capacity_is_exceeded() {
+        let mut names = DirectoryNames::new();
+        names.append_name(b"first", 32);
+        names.append_name(b"123456789", 32);
+        assert_eq!(names.as_slice(), b"first\x00123456789\0");
+        assert!(matches!(&names, DirectoryNames::Inline(_)));
+
+        names.append_name(b"second", 32);
+        assert_eq!(names.as_slice(), b"first\x00123456789\0second\0");
+        assert!(matches!(&names, DirectoryNames::Heap(_)));
+    }
 
     #[test]
     fn writes_names_with_existing_escape_rules() -> io::Result<()> {
@@ -438,7 +534,7 @@ mod tests {
         let depth = 130;
         let directories = (0..depth)
             .map(|index| DirectoryContents {
-                names: b"d\0".to_vec(),
+                names: DirectoryNames::from_vec(b"d\0".to_vec()),
                 items: if index + 1 < depth {
                     vec![DirectoryItem::Scanned(DiskItem::new(
                         0,
@@ -452,7 +548,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let root = DirectoryContents {
-            names: b"d\0".to_vec(),
+            names: DirectoryNames::from_vec(b"d\0".to_vec()),
             items: vec![DirectoryItem::Scanned(DiskItem::new(
                 0,
                 0,

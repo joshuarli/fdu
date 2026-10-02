@@ -1,4 +1,7 @@
-use crate::{DirectoryContents, DirectoryId, DirectoryItem, DiskItem, ScanReport, StoredDirectory};
+use crate::{
+    DirectoryContents, DirectoryId, DirectoryItem, DirectoryNames, DiskItem, ScanReport,
+    StoredDirectory,
+};
 use rayon::prelude::*;
 use std::cell::RefCell;
 use std::ffi::CStr;
@@ -100,13 +103,13 @@ impl Drop for PooledDirectoryEntries {
 }
 
 struct DirectoryEntries {
-    names: Vec<u8>,
+    names: DirectoryNames,
     entries: PooledDirectoryEntries,
 }
 
 struct DirectoryFrame {
     directory: File,
-    names: Vec<u8>,
+    names: DirectoryNames,
     entries: PooledDirectoryEntries,
     next_entry: usize,
     items: Vec<DirectoryItem>,
@@ -292,6 +295,7 @@ fn scan_directory_contents(
 
     let DirectoryEntries { names, entries } =
         read_directory(directory.as_raw_fd(), ext4_eof_cookie)?;
+    let name_bytes = names.as_slice();
     let child_depth = depth + 1;
     let items = entries
         .par_iter()
@@ -299,7 +303,7 @@ fn scan_directory_contents(
         .map(|entry| {
             match scan_entry(
                 &directory,
-                &names,
+                name_bytes,
                 entry,
                 root_device,
                 apparent,
@@ -321,7 +325,7 @@ fn scan_directory_contents(
 }
 
 fn finish_directory(
-    names: Vec<u8>,
+    names: DirectoryNames,
     mut items: Vec<DirectoryItem>,
     arena: &Mutex<Vec<DirectoryContents>>,
 ) -> io::Result<DirectoryContents> {
@@ -364,7 +368,7 @@ fn discard_child_directories(arena: &Mutex<Vec<DirectoryContents>>, items: &[Dir
         let directory = std::mem::replace(
             &mut directories[directory_id.index()],
             DirectoryContents {
-                names: Vec::new(),
+                names: DirectoryNames::new(),
                 items: Vec::new(),
                 disk_size: 0,
             },
@@ -438,7 +442,7 @@ fn scan_directory_iterative(
                 let frame = stack.last().expect("root directory frame remains present");
                 scan_entry_iterative(
                     &frame.directory,
-                    &frame.names,
+                    frame.names.as_slice(),
                     entry,
                     root_device,
                     apparent,
@@ -912,7 +916,7 @@ fn read_directory(fd: libc::c_int, ext4_eof_cookie: bool) -> io::Result<Director
     DIRECTORY_BUFFER.with(|buffer| {
         let mut buffer = buffer.borrow_mut();
         let mut entries = PooledDirectoryEntries::take();
-        let mut names = Vec::new();
+        let mut names = DirectoryNames::new();
         let mut first_batch = true;
 
         loop {
@@ -1004,9 +1008,7 @@ fn read_directory(fd: libc::c_int, ext4_eof_cookie: bool) -> io::Result<Director
                             "directory entry name exceeds the supported length",
                         )
                     })?;
-                    let start = names.len();
-                    names.extend_from_slice(name_bytes);
-                    names.push(0);
+                    let start = names.append_name(name_bytes, bytes_read / 4);
                     entries.push(DirectoryEntry {
                         name_offset: start,
                         name_length: length,
@@ -1031,7 +1033,7 @@ fn read_directory(fd: libc::c_int, ext4_eof_cookie: bool) -> io::Result<Director
 mod tests {
     use super::{
         file_device_with_retry, retry_interrupted, scan, Device, DirectoryContents, DirectoryItem,
-        DiskItem, DIRECTORY_ENTRY_POOL, MAX_CACHED_DIRECTORY_ENTRY_CAPACITY,
+        DirectoryNames, DiskItem, DIRECTORY_ENTRY_POOL, MAX_CACHED_DIRECTORY_ENTRY_CAPACITY,
     };
     use std::cell::Cell;
     use std::error::Error;
@@ -1155,9 +1157,9 @@ mod tests {
 
     #[test]
     fn skipped_directory_items_do_not_contribute_to_totals_or_output() -> io::Result<()> {
-        let mut names = b"unreadable\0".to_vec();
-        let readable_offset = names.len();
-        names.extend_from_slice(b"readable\0");
+        let mut names = DirectoryNames::new();
+        names.append_name(b"unreadable", 0);
+        let readable_offset = names.append_name(b"readable", 0);
         let items = vec![
             DirectoryItem::Skipped,
             DirectoryItem::Scanned(DiskItem::new(readable_offset, 7, None)),
