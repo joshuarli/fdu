@@ -1,0 +1,2190 @@
+{
+  "purpose": "Exploratory parser selection. Final qualification uses the separate five paired 78-scan validation; these short probes are not goal completion.",
+  "reference": "c8e6cd8 streaming scanner; statx interface unchanged for all these parser probes.",
+  "contract_checks": "Both size-mode mappings, descending output order, successful exits, and no incomplete-total warnings were checked on the unchanged default fixture. The source passed raw-name, name-terminator, record-boundary, sparse-file, symlink, hardlink, root-file-exclusion, large-directory and deep-descent tests.",
+  "probe_descriptions": {
+    "vector-names-trial": "Use bounded SSE2 loads on x86-64 to locate the first NUL and reject earlier path separators. Scalar handling covers short tails and other architectures. Reuse the existing file_size inline trial.",
+    "size-mode-trial": "Dispatch size mode once at scan entry and root-only filtering once at enumeration entry. Const parameters specialize the recursive and iterative walks, masks and size fields. Reuse the validated CStr directly for narrow metadata calls.",
+    "batch-mode-trial": "Dispatch serial versus parallel metadata once per initialized getdents64 batch, separating the batch parser from directory reads.",
+    "record-slice-trial": "Make one checked record slice and index header fields relative to that bounded slice.",
+    "single-mask-trial": "Combine the NUL and slash comparison masks, then inspect the first special byte. This retains exact terminator and padding behavior with fewer scalar operations."
+  },
+  "interpretation": "Bounded vector validation removes roughly a third of user instructions versus the inlined streaming scanner. Constant mode dispatch and a combined vector mask reduce allocated-mode instructions below 200 million/scan in short probes. These changes do not establish lower total CPU or elapsed time. Keep syscall counts, memory and accounting validation separate.",
+  "probes": {
+    "vector-names-trial": {
+      "reference_source": "c8e6cd8 with file_size inlined",
+      "candidate_source": "c8e6cd8 with file_size inlined and SSE2 record-bounded name validation",
+      "binary_paths": {
+        "reference": "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-statx-inline-trial",
+        "candidate": "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-names-trial"
+      },
+      "binary_hashes": {
+        "reference": "eb58c231006849da06842f7c37c6022facb044f2d6b2064882d4736a239a44f2",
+        "candidate": "6cbcf26f5a79069e0492dd5564d6060f116f2bf3f73d533351f75412bafe4d7f"
+      },
+      "fixture": "/home/josh/d/fdu/perf/fixture",
+      "kernel": "6.18.33-0-lts",
+      "filesystem": "ext4; /dev/nvme0n1p3; rw,relatime",
+      "workers": 4,
+      "cache_state": "warm; no global cache drops",
+      "build": "cargo build --locked --release; thin LTO; incremental; default codegen units",
+      "rustc_verbose_version": "rustc 1.100.0-nightly (574ff7d98 2026-09-14)\nbinary: rustc\ncommit-hash: 574ff7d98bd6d037e5236a8453029173b32631fd\ncommit-date: 2026-09-14\nhost: x86_64-unknown-linux-musl\nrelease: 1.100.0-nightly\nLLVM version: 23.1.1",
+      "method": {
+        "metrics": "timing",
+        "pairs": 2,
+        "repetitions": 39,
+        "memory_samples": 5
+      },
+      "commands": [
+        [
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-statx-inline-trial",
+          "/home/josh/d/fdu/perf/fixture"
+        ],
+        [
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-names-trial",
+          "/home/josh/d/fdu/perf/fixture"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/vector-names-trial.allocated-reference-0-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-statx-inline-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "39"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/vector-names-trial.allocated-candidate-0-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-names-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "39"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/vector-names-trial.allocated-candidate-1-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-names-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "39"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/vector-names-trial.allocated-reference-1-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-statx-inline-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "39"
+        ],
+        [
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-statx-inline-trial",
+          "--apparent",
+          "/home/josh/d/fdu/perf/fixture"
+        ],
+        [
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-names-trial",
+          "--apparent",
+          "/home/josh/d/fdu/perf/fixture"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/vector-names-trial.apparent-reference-0-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-statx-inline-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "39",
+          "--apparent"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/vector-names-trial.apparent-candidate-0-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-names-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "39",
+          "--apparent"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/vector-names-trial.apparent-candidate-1-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-names-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "39",
+          "--apparent"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/vector-names-trial.apparent-reference-1-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-statx-inline-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "39",
+          "--apparent"
+        ]
+      ],
+      "records": {
+        "allocated-timing": {
+          "reference": [
+            {
+              "run": 1,
+              "task_clock_ms": 34873.97,
+              "cycles": 5232686178,
+              "instructions": 13832477957,
+              "elapsed_s": 9.192410712
+            },
+            {
+              "run": 2,
+              "task_clock_ms": 35107.02,
+              "cycles": 5206772318,
+              "instructions": 13827950905,
+              "elapsed_s": 9.28270223
+            }
+          ],
+          "candidate": [
+            {
+              "run": 1,
+              "task_clock_ms": 34914.07,
+              "cycles": 4603761478,
+              "instructions": 9109269756,
+              "elapsed_s": 9.247241743
+            },
+            {
+              "run": 2,
+              "task_clock_ms": 34957.68,
+              "cycles": 4624275890,
+              "instructions": 9105454527,
+              "elapsed_s": 9.257676298
+            }
+          ]
+        },
+        "apparent-timing": {
+          "reference": [
+            {
+              "run": 1,
+              "task_clock_ms": 35085.42,
+              "cycles": 5151338290,
+              "instructions": 13602436284,
+              "elapsed_s": 9.328251533
+            },
+            {
+              "run": 2,
+              "task_clock_ms": 35135.45,
+              "cycles": 5173035907,
+              "instructions": 13604441555,
+              "elapsed_s": 9.315186897
+            }
+          ],
+          "candidate": [
+            {
+              "run": 1,
+              "task_clock_ms": 35097.06,
+              "cycles": 4551810932,
+              "instructions": 8874905512,
+              "elapsed_s": 9.301036792
+            },
+            {
+              "run": 2,
+              "task_clock_ms": 35026.82,
+              "cycles": 4535340883,
+              "instructions": 8882954440,
+              "elapsed_s": 9.256467584
+            }
+          ]
+        }
+      },
+      "summary": {
+        "allocated-timing": {
+          "reference": {
+            "task_clock_ms": {
+              "min": 34873.97,
+              "median": 34990.494999999995,
+              "max": 35107.02
+            },
+            "cycles": {
+              "min": 5206772318,
+              "median": 5219729248.0,
+              "max": 5232686178
+            },
+            "instructions": {
+              "min": 13827950905,
+              "median": 13830214431.0,
+              "max": 13832477957
+            },
+            "elapsed_s": {
+              "min": 9.192410712,
+              "median": 9.237556471,
+              "max": 9.28270223
+            }
+          },
+          "candidate": {
+            "task_clock_ms": {
+              "min": 34914.07,
+              "median": 34935.875,
+              "max": 34957.68
+            },
+            "cycles": {
+              "min": 4603761478,
+              "median": 4614018684.0,
+              "max": 4624275890
+            },
+            "instructions": {
+              "min": 9105454527,
+              "median": 9107362141.5,
+              "max": 9109269756
+            },
+            "elapsed_s": {
+              "min": 9.247241743,
+              "median": 9.2524590205,
+              "max": 9.257676298
+            }
+          }
+        },
+        "allocated-ratios": {
+          "task_clock_ms": 0.9984480023318573,
+          "cycles": 0.883967799337342,
+          "instructions": 0.658511993337473,
+          "elapsed_s": 1.0016344201540561
+        },
+        "apparent-timing": {
+          "reference": {
+            "task_clock_ms": {
+              "min": 35085.42,
+              "median": 35110.435,
+              "max": 35135.45
+            },
+            "cycles": {
+              "min": 5151338290,
+              "median": 5162187098.5,
+              "max": 5173035907
+            },
+            "instructions": {
+              "min": 13602436284,
+              "median": 13603438919.5,
+              "max": 13604441555
+            },
+            "elapsed_s": {
+              "min": 9.315186897,
+              "median": 9.321719215,
+              "max": 9.328251533
+            }
+          },
+          "candidate": {
+            "task_clock_ms": {
+              "min": 35026.82,
+              "median": 35061.94,
+              "max": 35097.06
+            },
+            "cycles": {
+              "min": 4535340883,
+              "median": 4543575907.5,
+              "max": 4551810932
+            },
+            "instructions": {
+              "min": 8874905512,
+              "median": 8878929976.0,
+              "max": 8882954440
+            },
+            "elapsed_s": {
+              "min": 9.256467584,
+              "median": 9.278752187999999,
+              "max": 9.301036792
+            }
+          }
+        },
+        "apparent-ratios": {
+          "task_clock_ms": 0.9986200062620498,
+          "cycles": 0.8801721431589644,
+          "instructions": 0.6526974377695488,
+          "elapsed_s": 0.9953894677862901
+        }
+      },
+      "raw_perf_stat": {
+        "vector-names-trial.allocated-candidate-0-perf.txt": "# started on Fri Oct  2 18:41:52 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-names-trial /home/josh/d/fdu/perf/fixture 39':\n\n          34914.07 msec task-clock:u                                                          \n        4603761478      cycles:u                                                              \n        9109269756      instructions:u                                                        \n\n       9.247241743 seconds time elapsed\n\n       1.277941000 seconds user\n      33.588923000 seconds sys\n\n\n",
+        "vector-names-trial.allocated-candidate-1-perf.txt": "# started on Fri Oct  2 18:42:01 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-names-trial /home/josh/d/fdu/perf/fixture 39':\n\n          34957.68 msec task-clock:u                                                          \n        4624275890      cycles:u                                                              \n        9105454527      instructions:u                                                        \n\n       9.257676298 seconds time elapsed\n\n       1.420198000 seconds user\n      33.485708000 seconds sys\n\n\n",
+        "vector-names-trial.allocated-reference-0-perf.txt": "# started on Fri Oct  2 18:41:43 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-statx-inline-trial /home/josh/d/fdu/perf/fixture 39':\n\n          34873.97 msec task-clock:u                                                          \n        5232686178      cycles:u                                                              \n       13832477957      instructions:u                                                        \n\n       9.192410712 seconds time elapsed\n\n       1.501791000 seconds user\n      33.328401000 seconds sys\n\n\n",
+        "vector-names-trial.allocated-reference-1-perf.txt": "# started on Fri Oct  2 18:42:10 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-statx-inline-trial /home/josh/d/fdu/perf/fixture 39':\n\n          35107.02 msec task-clock:u                                                          \n        5206772318      cycles:u                                                              \n       13827950905      instructions:u                                                        \n\n       9.282702230 seconds time elapsed\n\n       1.428963000 seconds user\n      33.627956000 seconds sys\n\n\n",
+        "vector-names-trial.apparent-candidate-0-perf.txt": "# started on Fri Oct  2 18:42:30 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-names-trial /home/josh/d/fdu/perf/fixture 39 --apparent':\n\n          35097.06 msec task-clock:u                                                          \n        4551810932      cycles:u                                                              \n        8874905512      instructions:u                                                        \n\n       9.301036792 seconds time elapsed\n\n       1.312554000 seconds user\n      33.739723000 seconds sys\n\n\n",
+        "vector-names-trial.apparent-candidate-1-perf.txt": "# started on Fri Oct  2 18:42:39 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-names-trial /home/josh/d/fdu/perf/fixture 39 --apparent':\n\n          35026.82 msec task-clock:u                                                          \n        4535340883      cycles:u                                                              \n        8882954440      instructions:u                                                        \n\n       9.256467584 seconds time elapsed\n\n       1.360421000 seconds user\n      33.619037000 seconds sys\n\n\n",
+        "vector-names-trial.apparent-reference-0-perf.txt": "# started on Fri Oct  2 18:42:20 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-statx-inline-trial /home/josh/d/fdu/perf/fixture 39 --apparent':\n\n          35085.42 msec task-clock:u                                                          \n        5151338290      cycles:u                                                              \n       13602436284      instructions:u                                                        \n\n       9.328251533 seconds time elapsed\n\n       1.423208000 seconds user\n      33.610801000 seconds sys\n\n\n",
+        "vector-names-trial.apparent-reference-1-perf.txt": "# started on Fri Oct  2 18:42:48 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-statx-inline-trial /home/josh/d/fdu/perf/fixture 39 --apparent':\n\n          35135.45 msec task-clock:u                                                          \n        5173035907      cycles:u                                                              \n       13604441555      instructions:u                                                        \n\n       9.315186897 seconds time elapsed\n\n       1.479457000 seconds user\n      33.610417000 seconds sys\n\n\n"
+      }
+    },
+    "size-mode-trial": {
+      "reference_source": "c8e6cd8 with vector names and file_size inlined",
+      "candidate_source": "c8e6cd8 with vector names, borrowed CStr reuse, and const size-mode/directory-only dispatch",
+      "binary_paths": {
+        "reference": "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-names-trial",
+        "candidate": "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-size-mode-trial"
+      },
+      "binary_hashes": {
+        "reference": "6cbcf26f5a79069e0492dd5564d6060f116f2bf3f73d533351f75412bafe4d7f",
+        "candidate": "0d415b924cceddfc94e471be1032bc52ecf1c7e8f0b36921521197477b732634"
+      },
+      "fixture": "/home/josh/d/fdu/perf/fixture",
+      "kernel": "6.18.33-0-lts",
+      "filesystem": "ext4; /dev/nvme0n1p3; rw,relatime",
+      "workers": 4,
+      "cache_state": "warm; no global cache drops",
+      "build": "cargo build --locked --release; thin LTO; incremental; default codegen units",
+      "rustc_verbose_version": "rustc 1.100.0-nightly (574ff7d98 2026-09-14)\nbinary: rustc\ncommit-hash: 574ff7d98bd6d037e5236a8453029173b32631fd\ncommit-date: 2026-09-14\nhost: x86_64-unknown-linux-musl\nrelease: 1.100.0-nightly\nLLVM version: 23.1.1",
+      "method": {
+        "metrics": "timing",
+        "pairs": 2,
+        "repetitions": 39,
+        "memory_samples": 5
+      },
+      "commands": [
+        [
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-names-trial",
+          "/home/josh/d/fdu/perf/fixture"
+        ],
+        [
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-size-mode-trial",
+          "/home/josh/d/fdu/perf/fixture"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/size-mode-trial.allocated-reference-0-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-names-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "39"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/size-mode-trial.allocated-candidate-0-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-size-mode-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "39"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/size-mode-trial.allocated-candidate-1-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-size-mode-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "39"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/size-mode-trial.allocated-reference-1-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-names-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "39"
+        ],
+        [
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-names-trial",
+          "--apparent",
+          "/home/josh/d/fdu/perf/fixture"
+        ],
+        [
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-size-mode-trial",
+          "--apparent",
+          "/home/josh/d/fdu/perf/fixture"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/size-mode-trial.apparent-reference-0-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-names-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "39",
+          "--apparent"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/size-mode-trial.apparent-candidate-0-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-size-mode-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "39",
+          "--apparent"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/size-mode-trial.apparent-candidate-1-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-size-mode-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "39",
+          "--apparent"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/size-mode-trial.apparent-reference-1-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-names-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "39",
+          "--apparent"
+        ]
+      ],
+      "records": {
+        "allocated-timing": {
+          "reference": [
+            {
+              "run": 1,
+              "task_clock_ms": 34927.79,
+              "cycles": 4735077415,
+              "instructions": 9097119856,
+              "elapsed_s": 9.327771859
+            },
+            {
+              "run": 2,
+              "task_clock_ms": 35043.76,
+              "cycles": 4739138291,
+              "instructions": 9107676694,
+              "elapsed_s": 9.345367289
+            }
+          ],
+          "candidate": [
+            {
+              "run": 1,
+              "task_clock_ms": 35096.2,
+              "cycles": 4949851001,
+              "instructions": 8292314815,
+              "elapsed_s": 9.304677196
+            },
+            {
+              "run": 2,
+              "task_clock_ms": 35189.3,
+              "cycles": 4924112002,
+              "instructions": 8294886549,
+              "elapsed_s": 9.288311455
+            }
+          ]
+        },
+        "apparent-timing": {
+          "reference": [
+            {
+              "run": 1,
+              "task_clock_ms": 35084.51,
+              "cycles": 4667137373,
+              "instructions": 8877569279,
+              "elapsed_s": 9.358705303
+            },
+            {
+              "run": 2,
+              "task_clock_ms": 35213.88,
+              "cycles": 4660002712,
+              "instructions": 8879043502,
+              "elapsed_s": 9.370241338
+            }
+          ],
+          "candidate": [
+            {
+              "run": 1,
+              "task_clock_ms": 35011.19,
+              "cycles": 4755695596,
+              "instructions": 7977897034,
+              "elapsed_s": 9.23841249
+            },
+            {
+              "run": 2,
+              "task_clock_ms": 35232.8,
+              "cycles": 4731297216,
+              "instructions": 7980476009,
+              "elapsed_s": 9.392009775
+            }
+          ]
+        }
+      },
+      "summary": {
+        "allocated-timing": {
+          "reference": {
+            "task_clock_ms": {
+              "min": 34927.79,
+              "median": 34985.775,
+              "max": 35043.76
+            },
+            "cycles": {
+              "min": 4735077415,
+              "median": 4737107853.0,
+              "max": 4739138291
+            },
+            "instructions": {
+              "min": 9097119856,
+              "median": 9102398275.0,
+              "max": 9107676694
+            },
+            "elapsed_s": {
+              "min": 9.327771859,
+              "median": 9.336569574,
+              "max": 9.345367289
+            }
+          },
+          "candidate": {
+            "task_clock_ms": {
+              "min": 35096.2,
+              "median": 35142.75,
+              "max": 35189.3
+            },
+            "cycles": {
+              "min": 4924112002,
+              "median": 4936981501.5,
+              "max": 4949851001
+            },
+            "instructions": {
+              "min": 8292314815,
+              "median": 8293600682.0,
+              "max": 8294886549
+            },
+            "elapsed_s": {
+              "min": 9.288311455,
+              "median": 9.2964943255,
+              "max": 9.304677196
+            }
+          }
+        },
+        "allocated-ratios": {
+          "task_clock_ms": 1.004487377612298,
+          "cycles": 1.042194536813328,
+          "instructions": 0.9111447856609163,
+          "elapsed_s": 0.9957094216253477
+        },
+        "apparent-timing": {
+          "reference": {
+            "task_clock_ms": {
+              "min": 35084.51,
+              "median": 35149.195,
+              "max": 35213.88
+            },
+            "cycles": {
+              "min": 4660002712,
+              "median": 4663570042.5,
+              "max": 4667137373
+            },
+            "instructions": {
+              "min": 8877569279,
+              "median": 8878306390.5,
+              "max": 8879043502
+            },
+            "elapsed_s": {
+              "min": 9.358705303,
+              "median": 9.3644733205,
+              "max": 9.370241338
+            }
+          },
+          "candidate": {
+            "task_clock_ms": {
+              "min": 35011.19,
+              "median": 35121.995,
+              "max": 35232.8
+            },
+            "cycles": {
+              "min": 4731297216,
+              "median": 4743496406.0,
+              "max": 4755695596
+            },
+            "instructions": {
+              "min": 7977897034,
+              "median": 7979186521.5,
+              "max": 7980476009
+            },
+            "elapsed_s": {
+              "min": 9.23841249,
+              "median": 9.3152111325,
+              "max": 9.392009775
+            }
+          }
+        },
+        "apparent-ratios": {
+          "task_clock_ms": 0.9992237384964713,
+          "cycles": 1.017137044521407,
+          "instructions": 0.8987284419447289,
+          "elapsed_s": 0.9947347858116709
+        }
+      },
+      "raw_perf_stat": {
+        "size-mode-trial.allocated-candidate-0-perf.txt": "# started on Fri Oct  2 18:44:17 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-size-mode-trial /home/josh/d/fdu/perf/fixture 39':\n\n          35096.20 msec task-clock:u                                                          \n        4949851001      cycles:u                                                              \n        8292314815      instructions:u                                                        \n\n       9.304677196 seconds time elapsed\n\n       1.410948000 seconds user\n      33.640968000 seconds sys\n\n\n",
+        "size-mode-trial.allocated-candidate-1-perf.txt": "# started on Fri Oct  2 18:44:26 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-size-mode-trial /home/josh/d/fdu/perf/fixture 39':\n\n          35189.30 msec task-clock:u                                                          \n        4924112002      cycles:u                                                              \n        8294886549      instructions:u                                                        \n\n       9.288311455 seconds time elapsed\n\n       1.513653000 seconds user\n      33.630930000 seconds sys\n\n\n",
+        "size-mode-trial.allocated-reference-0-perf.txt": "# started on Fri Oct  2 18:44:07 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-names-trial /home/josh/d/fdu/perf/fixture 39':\n\n          34927.79 msec task-clock:u                                                          \n        4735077415      cycles:u                                                              \n        9097119856      instructions:u                                                        \n\n       9.327771859 seconds time elapsed\n\n       1.387942000 seconds user\n      33.494842000 seconds sys\n\n\n",
+        "size-mode-trial.allocated-reference-1-perf.txt": "# started on Fri Oct  2 18:44:35 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-names-trial /home/josh/d/fdu/perf/fixture 39':\n\n          35043.76 msec task-clock:u                                                          \n        4739138291      cycles:u                                                              \n        9107676694      instructions:u                                                        \n\n       9.345367289 seconds time elapsed\n\n       1.407856000 seconds user\n      33.589803000 seconds sys\n\n\n",
+        "size-mode-trial.apparent-candidate-0-perf.txt": "# started on Fri Oct  2 18:44:55 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-size-mode-trial /home/josh/d/fdu/perf/fixture 39 --apparent':\n\n          35011.19 msec task-clock:u                                                          \n        4755695596      cycles:u                                                              \n        7977897034      instructions:u                                                        \n\n       9.238412490 seconds time elapsed\n\n       1.381561000 seconds user\n      33.583113000 seconds sys\n\n\n",
+        "size-mode-trial.apparent-candidate-1-perf.txt": "# started on Fri Oct  2 18:45:04 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-size-mode-trial /home/josh/d/fdu/perf/fixture 39 --apparent':\n\n          35232.80 msec task-clock:u                                                          \n        4731297216      cycles:u                                                              \n        7980476009      instructions:u                                                        \n\n       9.392009775 seconds time elapsed\n\n       1.380780000 seconds user\n      33.799654000 seconds sys\n\n\n",
+        "size-mode-trial.apparent-reference-0-perf.txt": "# started on Fri Oct  2 18:44:45 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-names-trial /home/josh/d/fdu/perf/fixture 39 --apparent':\n\n          35084.51 msec task-clock:u                                                          \n        4667137373      cycles:u                                                              \n        8877569279      instructions:u                                                        \n\n       9.358705303 seconds time elapsed\n\n       1.340793000 seconds user\n      33.698897000 seconds sys\n\n\n",
+        "size-mode-trial.apparent-reference-1-perf.txt": "# started on Fri Oct  2 18:45:13 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-names-trial /home/josh/d/fdu/perf/fixture 39 --apparent':\n\n          35213.88 msec task-clock:u                                                          \n        4660002712      cycles:u                                                              \n        8879043502      instructions:u                                                        \n\n       9.370241338 seconds time elapsed\n\n       1.379485000 seconds user\n      33.788028000 seconds sys\n\n\n"
+      }
+    },
+    "batch-mode-trial": {
+      "reference_source": "c8e6cd8 with vector names and const size/root modes",
+      "candidate_source": "c8e6cd8 with vector names and const size/root/batch metadata modes",
+      "binary_paths": {
+        "reference": "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-size-mode-trial",
+        "candidate": "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-batch-mode-trial"
+      },
+      "binary_hashes": {
+        "reference": "0d415b924cceddfc94e471be1032bc52ecf1c7e8f0b36921521197477b732634",
+        "candidate": "5de410507608e242638d50e7a636edf91f26edbbd263120a15ee79bf9542b54b"
+      },
+      "fixture": "/home/josh/d/fdu/perf/fixture",
+      "kernel": "6.18.33-0-lts",
+      "filesystem": "ext4; /dev/nvme0n1p3; rw,relatime",
+      "workers": 4,
+      "cache_state": "warm; no global cache drops",
+      "build": "cargo build --locked --release; thin LTO; incremental; default codegen units",
+      "rustc_verbose_version": "rustc 1.100.0-nightly (574ff7d98 2026-09-14)\nbinary: rustc\ncommit-hash: 574ff7d98bd6d037e5236a8453029173b32631fd\ncommit-date: 2026-09-14\nhost: x86_64-unknown-linux-musl\nrelease: 1.100.0-nightly\nLLVM version: 23.1.1",
+      "method": {
+        "metrics": "timing",
+        "pairs": 2,
+        "repetitions": 39,
+        "memory_samples": 5
+      },
+      "commands": [
+        [
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-size-mode-trial",
+          "/home/josh/d/fdu/perf/fixture"
+        ],
+        [
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-batch-mode-trial",
+          "/home/josh/d/fdu/perf/fixture"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/batch-mode-trial.allocated-reference-0-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-size-mode-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "39"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/batch-mode-trial.allocated-candidate-0-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-batch-mode-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "39"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/batch-mode-trial.allocated-candidate-1-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-batch-mode-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "39"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/batch-mode-trial.allocated-reference-1-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-size-mode-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "39"
+        ],
+        [
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-size-mode-trial",
+          "--apparent",
+          "/home/josh/d/fdu/perf/fixture"
+        ],
+        [
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-batch-mode-trial",
+          "--apparent",
+          "/home/josh/d/fdu/perf/fixture"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/batch-mode-trial.apparent-reference-0-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-size-mode-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "39",
+          "--apparent"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/batch-mode-trial.apparent-candidate-0-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-batch-mode-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "39",
+          "--apparent"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/batch-mode-trial.apparent-candidate-1-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-batch-mode-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "39",
+          "--apparent"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/batch-mode-trial.apparent-reference-1-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-size-mode-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "39",
+          "--apparent"
+        ]
+      ],
+      "records": {
+        "allocated-timing": {
+          "reference": [
+            {
+              "run": 1,
+              "task_clock_ms": 34953.09,
+              "cycles": 4964656000,
+              "instructions": 8294893709,
+              "elapsed_s": 9.316303546
+            },
+            {
+              "run": 2,
+              "task_clock_ms": 36324.52,
+              "cycles": 4966376638,
+              "instructions": 8299918775,
+              "elapsed_s": 9.687760805
+            }
+          ],
+          "candidate": [
+            {
+              "run": 1,
+              "task_clock_ms": 35260.82,
+              "cycles": 4724722493,
+              "instructions": 8192732508,
+              "elapsed_s": 9.339921627
+            },
+            {
+              "run": 2,
+              "task_clock_ms": 35938.99,
+              "cycles": 4740430046,
+              "instructions": 8195402024,
+              "elapsed_s": 9.630588643
+            }
+          ]
+        },
+        "apparent-timing": {
+          "reference": [
+            {
+              "run": 1,
+              "task_clock_ms": 36634.12,
+              "cycles": 4755407231,
+              "instructions": 7970858336,
+              "elapsed_s": 9.61743293
+            },
+            {
+              "run": 2,
+              "task_clock_ms": 38134.68,
+              "cycles": 4767518607,
+              "instructions": 7973001445,
+              "elapsed_s": 10.047668736
+            }
+          ],
+          "candidate": [
+            {
+              "run": 1,
+              "task_clock_ms": 37386.24,
+              "cycles": 4841172977,
+              "instructions": 8169217949,
+              "elapsed_s": 9.840261015
+            },
+            {
+              "run": 2,
+              "task_clock_ms": 37653.52,
+              "cycles": 4833007058,
+              "instructions": 8168893239,
+              "elapsed_s": 10.06194037
+            }
+          ]
+        }
+      },
+      "summary": {
+        "allocated-timing": {
+          "reference": {
+            "task_clock_ms": {
+              "min": 34953.09,
+              "median": 35638.80499999999,
+              "max": 36324.52
+            },
+            "cycles": {
+              "min": 4964656000,
+              "median": 4965516319.0,
+              "max": 4966376638
+            },
+            "instructions": {
+              "min": 8294893709,
+              "median": 8297406242.0,
+              "max": 8299918775
+            },
+            "elapsed_s": {
+              "min": 9.316303546,
+              "median": 9.5020321755,
+              "max": 9.687760805
+            }
+          },
+          "candidate": {
+            "task_clock_ms": {
+              "min": 35260.82,
+              "median": 35599.905,
+              "max": 35938.99
+            },
+            "cycles": {
+              "min": 4724722493,
+              "median": 4732576269.5,
+              "max": 4740430046
+            },
+            "instructions": {
+              "min": 8192732508,
+              "median": 8194067266.0,
+              "max": 8195402024
+            },
+            "elapsed_s": {
+              "min": 9.339921627,
+              "median": 9.485255135,
+              "max": 9.630588643
+            }
+          }
+        },
+        "allocated-ratios": {
+          "task_clock_ms": 0.9990952968856552,
+          "cycles": 0.9530882081126719,
+          "instructions": 0.9875456708011947,
+          "elapsed_s": 0.998316825342566
+        },
+        "apparent-timing": {
+          "reference": {
+            "task_clock_ms": {
+              "min": 36634.12,
+              "median": 37384.4,
+              "max": 38134.68
+            },
+            "cycles": {
+              "min": 4755407231,
+              "median": 4761462919.0,
+              "max": 4767518607
+            },
+            "instructions": {
+              "min": 7970858336,
+              "median": 7971929890.5,
+              "max": 7973001445
+            },
+            "elapsed_s": {
+              "min": 9.61743293,
+              "median": 9.832550832999999,
+              "max": 10.047668736
+            }
+          },
+          "candidate": {
+            "task_clock_ms": {
+              "min": 37386.24,
+              "median": 37519.88,
+              "max": 37653.52
+            },
+            "cycles": {
+              "min": 4833007058,
+              "median": 4837090017.5,
+              "max": 4841172977
+            },
+            "instructions": {
+              "min": 8168893239,
+              "median": 8169055594.0,
+              "max": 8169217949
+            },
+            "elapsed_s": {
+              "min": 9.840261015,
+              "median": 9.951100692499999,
+              "max": 10.06194037
+            }
+          }
+        },
+        "apparent-ratios": {
+          "task_clock_ms": 1.0039566003717255,
+          "cycles": 1.015885898219449,
+          "instructions": 1.0247274970586013,
+          "elapsed_s": 1.0122947888994844
+        }
+      },
+      "raw_perf_stat": {
+        "batch-mode-trial.allocated-candidate-0-perf.txt": "# started on Fri Oct  2 18:47:38 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-batch-mode-trial /home/josh/d/fdu/perf/fixture 39':\n\n          35260.82 msec task-clock:u                                                          \n        4724722493      cycles:u                                                              \n        8192732508      instructions:u                                                        \n\n       9.339921627 seconds time elapsed\n\n       1.407526000 seconds user\n      33.808048000 seconds sys\n\n\n",
+        "batch-mode-trial.allocated-candidate-1-perf.txt": "# started on Fri Oct  2 18:47:47 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-batch-mode-trial /home/josh/d/fdu/perf/fixture 39':\n\n          35938.99 msec task-clock:u                                                          \n        4740430046      cycles:u                                                              \n        8195402024      instructions:u                                                        \n\n       9.630588643 seconds time elapsed\n\n       1.452255000 seconds user\n      34.433465000 seconds sys\n\n\n",
+        "batch-mode-trial.allocated-reference-0-perf.txt": "# started on Fri Oct  2 18:47:28 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-size-mode-trial /home/josh/d/fdu/perf/fixture 39':\n\n          34953.09 msec task-clock:u                                                          \n        4964656000      cycles:u                                                              \n        8294893709      instructions:u                                                        \n\n       9.316303546 seconds time elapsed\n\n       1.407579000 seconds user\n      33.500617000 seconds sys\n\n\n",
+        "batch-mode-trial.allocated-reference-1-perf.txt": "# started on Fri Oct  2 18:47:57 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-size-mode-trial /home/josh/d/fdu/perf/fixture 39':\n\n          36324.52 msec task-clock:u                                                          \n        4966376638      cycles:u                                                              \n        8299918775      instructions:u                                                        \n\n       9.687760805 seconds time elapsed\n\n       1.497947000 seconds user\n      34.776472000 seconds sys\n\n\n",
+        "batch-mode-trial.apparent-candidate-0-perf.txt": "# started on Fri Oct  2 18:48:16 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-batch-mode-trial /home/josh/d/fdu/perf/fixture 39 --apparent':\n\n          37386.24 msec task-clock:u                                                          \n        4841172977      cycles:u                                                              \n        8169217949      instructions:u                                                        \n\n       9.840261015 seconds time elapsed\n\n       1.488595000 seconds user\n      35.819980000 seconds sys\n\n\n",
+        "batch-mode-trial.apparent-candidate-1-perf.txt": "# started on Fri Oct  2 18:48:26 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-batch-mode-trial /home/josh/d/fdu/perf/fixture 39 --apparent':\n\n          37653.52 msec task-clock:u                                                          \n        4833007058      cycles:u                                                              \n        8168893239      instructions:u                                                        \n\n      10.061940370 seconds time elapsed\n\n       1.414755000 seconds user\n      36.186824000 seconds sys\n\n\n",
+        "batch-mode-trial.apparent-reference-0-perf.txt": "# started on Fri Oct  2 18:48:07 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-size-mode-trial /home/josh/d/fdu/perf/fixture 39 --apparent':\n\n          36634.12 msec task-clock:u                                                          \n        4755407231      cycles:u                                                              \n        7970858336      instructions:u                                                        \n\n       9.617432930 seconds time elapsed\n\n       1.451529000 seconds user\n      35.130147000 seconds sys\n\n\n",
+        "batch-mode-trial.apparent-reference-1-perf.txt": "# started on Fri Oct  2 18:48:36 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-size-mode-trial /home/josh/d/fdu/perf/fixture 39 --apparent':\n\n          38134.68 msec task-clock:u                                                          \n        4767518607      cycles:u                                                              \n        7973001445      instructions:u                                                        \n\n      10.047668736 seconds time elapsed\n\n       1.412211000 seconds user\n      36.670363000 seconds sys\n\n\n"
+      }
+    },
+    "record-slice-trial": {
+      "reference_source": "c8e6cd8 with vector names and const size/root/batch modes",
+      "candidate_source": "c8e6cd8 with vector names, const dispatch and one bounded slice per record",
+      "binary_paths": {
+        "reference": "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-batch-mode-trial",
+        "candidate": "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-record-slice-trial"
+      },
+      "binary_hashes": {
+        "reference": "5de410507608e242638d50e7a636edf91f26edbbd263120a15ee79bf9542b54b",
+        "candidate": "00e5d9dc7566153a74a95c4381d6d17a9f4d8d487e263327f3d51449a3b53458"
+      },
+      "fixture": "/home/josh/d/fdu/perf/fixture",
+      "kernel": "6.18.33-0-lts",
+      "filesystem": "ext4; /dev/nvme0n1p3; rw,relatime",
+      "workers": 4,
+      "cache_state": "warm; no global cache drops",
+      "build": "cargo build --locked --release; thin LTO; incremental; default codegen units",
+      "rustc_verbose_version": "rustc 1.100.0-nightly (574ff7d98 2026-09-14)\nbinary: rustc\ncommit-hash: 574ff7d98bd6d037e5236a8453029173b32631fd\ncommit-date: 2026-09-14\nhost: x86_64-unknown-linux-musl\nrelease: 1.100.0-nightly\nLLVM version: 23.1.1",
+      "method": {
+        "metrics": "timing",
+        "pairs": 2,
+        "repetitions": 13,
+        "memory_samples": 5
+      },
+      "commands": [
+        [
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-batch-mode-trial",
+          "/home/josh/d/fdu/perf/fixture"
+        ],
+        [
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-record-slice-trial",
+          "/home/josh/d/fdu/perf/fixture"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/record-slice-trial.allocated-reference-0-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-batch-mode-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "13"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/record-slice-trial.allocated-candidate-0-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-record-slice-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "13"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/record-slice-trial.allocated-candidate-1-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-record-slice-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "13"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/record-slice-trial.allocated-reference-1-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-batch-mode-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "13"
+        ],
+        [
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-batch-mode-trial",
+          "--apparent",
+          "/home/josh/d/fdu/perf/fixture"
+        ],
+        [
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-record-slice-trial",
+          "--apparent",
+          "/home/josh/d/fdu/perf/fixture"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/record-slice-trial.apparent-reference-0-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-batch-mode-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "13",
+          "--apparent"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/record-slice-trial.apparent-candidate-0-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-record-slice-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "13",
+          "--apparent"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/record-slice-trial.apparent-candidate-1-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-record-slice-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "13",
+          "--apparent"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/record-slice-trial.apparent-reference-1-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-batch-mode-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "13",
+          "--apparent"
+        ]
+      ],
+      "records": {
+        "allocated-timing": {
+          "reference": [
+            {
+              "run": 1,
+              "task_clock_ms": 13006.69,
+              "cycles": 1583619041,
+              "instructions": 2738191533,
+              "elapsed_s": 3.410608731
+            },
+            {
+              "run": 2,
+              "task_clock_ms": 13035.9,
+              "cycles": 1581080679,
+              "instructions": 2734826187,
+              "elapsed_s": 3.405741032
+            }
+          ],
+          "candidate": [
+            {
+              "run": 1,
+              "task_clock_ms": 13037.13,
+              "cycles": 1552821875,
+              "instructions": 2693074911,
+              "elapsed_s": 3.435579325
+            },
+            {
+              "run": 2,
+              "task_clock_ms": 13028.98,
+              "cycles": 1555548023,
+              "instructions": 2688907002,
+              "elapsed_s": 3.415435685
+            }
+          ]
+        },
+        "apparent-timing": {
+          "reference": [
+            {
+              "run": 1,
+              "task_clock_ms": 13071.47,
+              "cycles": 1620034752,
+              "instructions": 2726761439,
+              "elapsed_s": 3.482664544
+            },
+            {
+              "run": 2,
+              "task_clock_ms": 13074.8,
+              "cycles": 1608030350,
+              "instructions": 2726628158,
+              "elapsed_s": 3.424338052
+            }
+          ],
+          "candidate": [
+            {
+              "run": 1,
+              "task_clock_ms": 13068.75,
+              "cycles": 1575076607,
+              "instructions": 2567112858,
+              "elapsed_s": 3.421612718
+            },
+            {
+              "run": 2,
+              "task_clock_ms": 13030.47,
+              "cycles": 1545682749,
+              "instructions": 2567910939,
+              "elapsed_s": 3.41748219
+            }
+          ]
+        }
+      },
+      "summary": {
+        "allocated-timing": {
+          "reference": {
+            "task_clock_ms": {
+              "min": 13006.69,
+              "median": 13021.295,
+              "max": 13035.9
+            },
+            "cycles": {
+              "min": 1581080679,
+              "median": 1582349860.0,
+              "max": 1583619041
+            },
+            "instructions": {
+              "min": 2734826187,
+              "median": 2736508860.0,
+              "max": 2738191533
+            },
+            "elapsed_s": {
+              "min": 3.405741032,
+              "median": 3.4081748815,
+              "max": 3.410608731
+            }
+          },
+          "candidate": {
+            "task_clock_ms": {
+              "min": 13028.98,
+              "median": 13033.055,
+              "max": 13037.13
+            },
+            "cycles": {
+              "min": 1552821875,
+              "median": 1554184949.0,
+              "max": 1555548023
+            },
+            "instructions": {
+              "min": 2688907002,
+              "median": 2690990956.5,
+              "max": 2693074911
+            },
+            "elapsed_s": {
+              "min": 3.415435685,
+              "median": 3.4255075049999997,
+              "max": 3.435579325
+            }
+          }
+        },
+        "allocated-ratios": {
+          "task_clock_ms": 1.0009047461686096,
+          "cycles": 0.9822019020351804,
+          "instructions": 0.9833663365308992,
+          "elapsed_s": 1.0050840049302323
+        },
+        "apparent-timing": {
+          "reference": {
+            "task_clock_ms": {
+              "min": 13071.47,
+              "median": 13073.134999999998,
+              "max": 13074.8
+            },
+            "cycles": {
+              "min": 1608030350,
+              "median": 1614032551.0,
+              "max": 1620034752
+            },
+            "instructions": {
+              "min": 2726628158,
+              "median": 2726694798.5,
+              "max": 2726761439
+            },
+            "elapsed_s": {
+              "min": 3.424338052,
+              "median": 3.453501298,
+              "max": 3.482664544
+            }
+          },
+          "candidate": {
+            "task_clock_ms": {
+              "min": 13030.47,
+              "median": 13049.61,
+              "max": 13068.75
+            },
+            "cycles": {
+              "min": 1545682749,
+              "median": 1560379678.0,
+              "max": 1575076607
+            },
+            "instructions": {
+              "min": 2567112858,
+              "median": 2567511898.5,
+              "max": 2567910939
+            },
+            "elapsed_s": {
+              "min": 3.41748219,
+              "median": 3.419547454,
+              "max": 3.421612718
+            }
+          }
+        },
+        "apparent-ratios": {
+          "task_clock_ms": 0.9982007107975284,
+          "cycles": 0.9667380010314819,
+          "instructions": 0.9416205697823627,
+          "elapsed_s": 0.9902338478883906
+        }
+      },
+      "raw_perf_stat": {
+        "record-slice-trial.allocated-candidate-0-perf.txt": "# started on Fri Oct  2 18:50:33 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-record-slice-trial /home/josh/d/fdu/perf/fixture 13':\n\n          13037.13 msec task-clock:u                                                          \n        1552821875      cycles:u                                                              \n        2693074911      instructions:u                                                        \n\n       3.435579325 seconds time elapsed\n\n       0.502767000 seconds user\n      12.517589000 seconds sys\n\n\n",
+        "record-slice-trial.allocated-candidate-1-perf.txt": "# started on Fri Oct  2 18:50:36 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-record-slice-trial /home/josh/d/fdu/perf/fixture 13':\n\n          13028.98 msec task-clock:u                                                          \n        1555548023      cycles:u                                                              \n        2688907002      instructions:u                                                        \n\n       3.415435685 seconds time elapsed\n\n       0.450917000 seconds user\n      12.560863000 seconds sys\n\n\n",
+        "record-slice-trial.allocated-reference-0-perf.txt": "# started on Fri Oct  2 18:50:29 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-batch-mode-trial /home/josh/d/fdu/perf/fixture 13':\n\n          13006.69 msec task-clock:u                                                          \n        1583619041      cycles:u                                                              \n        2738191533      instructions:u                                                        \n\n       3.410608731 seconds time elapsed\n\n       0.460722000 seconds user\n      12.529551000 seconds sys\n\n\n",
+        "record-slice-trial.allocated-reference-1-perf.txt": "# started on Fri Oct  2 18:50:39 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-batch-mode-trial /home/josh/d/fdu/perf/fixture 13':\n\n          13035.90 msec task-clock:u                                                          \n        1581080679      cycles:u                                                              \n        2734826187      instructions:u                                                        \n\n       3.405741032 seconds time elapsed\n\n       0.439189000 seconds user\n      12.580680000 seconds sys\n\n\n",
+        "record-slice-trial.apparent-candidate-0-perf.txt": "# started on Fri Oct  2 18:50:47 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-record-slice-trial /home/josh/d/fdu/perf/fixture 13 --apparent':\n\n          13068.75 msec task-clock:u                                                          \n        1575076607      cycles:u                                                              \n        2567112858      instructions:u                                                        \n\n       3.421612718 seconds time elapsed\n\n       0.476850000 seconds user\n      12.575225000 seconds sys\n\n\n",
+        "record-slice-trial.apparent-candidate-1-perf.txt": "# started on Fri Oct  2 18:50:50 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-record-slice-trial /home/josh/d/fdu/perf/fixture 13 --apparent':\n\n          13030.47 msec task-clock:u                                                          \n        1545682749      cycles:u                                                              \n        2567910939      instructions:u                                                        \n\n       3.417482190 seconds time elapsed\n\n       0.473373000 seconds user\n      12.539848000 seconds sys\n\n\n",
+        "record-slice-trial.apparent-reference-0-perf.txt": "# started on Fri Oct  2 18:50:43 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-batch-mode-trial /home/josh/d/fdu/perf/fixture 13 --apparent':\n\n          13071.47 msec task-clock:u                                                          \n        1620034752      cycles:u                                                              \n        2726761439      instructions:u                                                        \n\n       3.482664544 seconds time elapsed\n\n       0.418882000 seconds user\n      12.636254000 seconds sys\n\n\n",
+        "record-slice-trial.apparent-reference-1-perf.txt": "# started on Fri Oct  2 18:50:54 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-batch-mode-trial /home/josh/d/fdu/perf/fixture 13 --apparent':\n\n          13074.80 msec task-clock:u                                                          \n        1608030350      cycles:u                                                              \n        2726628158      instructions:u                                                        \n\n       3.424338052 seconds time elapsed\n\n       0.472557000 seconds user\n      12.585944000 seconds sys\n\n\n"
+      }
+    },
+    "single-mask-trial": {
+      "reference_source": "c8e6cd8 with vector names, const modes, bounded record slices",
+      "candidate_source": "c8e6cd8 with vector names using one first-special-byte mask, const dispatch, bounded record slices",
+      "binary_paths": {
+        "reference": "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-record-slice-trial",
+        "candidate": "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-single-mask-trial"
+      },
+      "binary_hashes": {
+        "reference": "00e5d9dc7566153a74a95c4381d6d17a9f4d8d487e263327f3d51449a3b53458",
+        "candidate": "28e6bb0380dc6c583a5c50fc4112f8cc56e85d7e80dccb44ce099c0ba28fab0f"
+      },
+      "fixture": "/home/josh/d/fdu/perf/fixture",
+      "kernel": "6.18.33-0-lts",
+      "filesystem": "ext4; /dev/nvme0n1p3; rw,relatime",
+      "workers": 4,
+      "cache_state": "warm; no global cache drops",
+      "build": "cargo build --locked --release; thin LTO; incremental; default codegen units",
+      "rustc_verbose_version": "rustc 1.100.0-nightly (574ff7d98 2026-09-14)\nbinary: rustc\ncommit-hash: 574ff7d98bd6d037e5236a8453029173b32631fd\ncommit-date: 2026-09-14\nhost: x86_64-unknown-linux-musl\nrelease: 1.100.0-nightly\nLLVM version: 23.1.1",
+      "method": {
+        "metrics": "timing",
+        "pairs": 2,
+        "repetitions": 13,
+        "memory_samples": 5
+      },
+      "commands": [
+        [
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-record-slice-trial",
+          "/home/josh/d/fdu/perf/fixture"
+        ],
+        [
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-single-mask-trial",
+          "/home/josh/d/fdu/perf/fixture"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/single-mask-trial.allocated-reference-0-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-record-slice-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "13"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/single-mask-trial.allocated-candidate-0-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-single-mask-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "13"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/single-mask-trial.allocated-candidate-1-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-single-mask-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "13"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/single-mask-trial.allocated-reference-1-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-record-slice-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "13"
+        ],
+        [
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-record-slice-trial",
+          "--apparent",
+          "/home/josh/d/fdu/perf/fixture"
+        ],
+        [
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-single-mask-trial",
+          "--apparent",
+          "/home/josh/d/fdu/perf/fixture"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/single-mask-trial.apparent-reference-0-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-record-slice-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "13",
+          "--apparent"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/single-mask-trial.apparent-candidate-0-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-single-mask-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "13",
+          "--apparent"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/single-mask-trial.apparent-candidate-1-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-single-mask-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "13",
+          "--apparent"
+        ],
+        [
+          "doas",
+          "-n",
+          "perf",
+          "stat",
+          "-e",
+          "task-clock:u,cycles:u,instructions:u",
+          "-o",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/single-mask-trial.apparent-reference-1-perf.txt",
+          "--",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--init-groups",
+          "env",
+          "RAYON_NUM_THREADS=4",
+          "LC_ALL=C",
+          "bash",
+          "-c",
+          "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+          "bash",
+          "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-record-slice-trial",
+          "/home/josh/d/fdu/perf/fixture",
+          "13",
+          "--apparent"
+        ]
+      ],
+      "records": {
+        "allocated-timing": {
+          "reference": [
+            {
+              "run": 1,
+              "task_clock_ms": 13050.28,
+              "cycles": 1586500846,
+              "instructions": 2691729992,
+              "elapsed_s": 3.442117397
+            },
+            {
+              "run": 2,
+              "task_clock_ms": 13097.99,
+              "cycles": 1587316433,
+              "instructions": 2691579069,
+              "elapsed_s": 3.450015126
+            }
+          ],
+          "candidate": [
+            {
+              "run": 1,
+              "task_clock_ms": 13044.08,
+              "cycles": 1547725722,
+              "instructions": 2554289938,
+              "elapsed_s": 3.487172045
+            },
+            {
+              "run": 2,
+              "task_clock_ms": 13098.79,
+              "cycles": 1553866685,
+              "instructions": 2556834918,
+              "elapsed_s": 3.471119415
+            }
+          ]
+        },
+        "apparent-timing": {
+          "reference": [
+            {
+              "run": 1,
+              "task_clock_ms": 13160.83,
+              "cycles": 1647386838,
+              "instructions": 2566991776,
+              "elapsed_s": 3.452501848
+            },
+            {
+              "run": 2,
+              "task_clock_ms": 13169.17,
+              "cycles": 1628230061,
+              "instructions": 2565320868,
+              "elapsed_s": 3.433396399
+            }
+          ],
+          "candidate": [
+            {
+              "run": 1,
+              "task_clock_ms": 13118.02,
+              "cycles": 1559405555,
+              "instructions": 2427590651,
+              "elapsed_s": 3.444894088
+            },
+            {
+              "run": 2,
+              "task_clock_ms": 13149.5,
+              "cycles": 1556850228,
+              "instructions": 2429517340,
+              "elapsed_s": 3.468005262
+            }
+          ]
+        }
+      },
+      "summary": {
+        "allocated-timing": {
+          "reference": {
+            "task_clock_ms": {
+              "min": 13050.28,
+              "median": 13074.135,
+              "max": 13097.99
+            },
+            "cycles": {
+              "min": 1586500846,
+              "median": 1586908639.5,
+              "max": 1587316433
+            },
+            "instructions": {
+              "min": 2691579069,
+              "median": 2691654530.5,
+              "max": 2691729992
+            },
+            "elapsed_s": {
+              "min": 3.442117397,
+              "median": 3.4460662615,
+              "max": 3.450015126
+            }
+          },
+          "candidate": {
+            "task_clock_ms": {
+              "min": 13044.08,
+              "median": 13071.435000000001,
+              "max": 13098.79
+            },
+            "cycles": {
+              "min": 1547725722,
+              "median": 1550796203.5,
+              "max": 1553866685
+            },
+            "instructions": {
+              "min": 2554289938,
+              "median": 2555562428.0,
+              "max": 2556834918
+            },
+            "elapsed_s": {
+              "min": 3.471119415,
+              "median": 3.47914573,
+              "max": 3.487172045
+            }
+          }
+        },
+        "allocated-ratios": {
+          "task_clock_ms": 0.9997929962408891,
+          "cycles": 0.9772430991134863,
+          "instructions": 0.949439252595547,
+          "elapsed_s": 1.0096031915411054
+        },
+        "apparent-timing": {
+          "reference": {
+            "task_clock_ms": {
+              "min": 13160.83,
+              "median": 13165.0,
+              "max": 13169.17
+            },
+            "cycles": {
+              "min": 1628230061,
+              "median": 1637808449.5,
+              "max": 1647386838
+            },
+            "instructions": {
+              "min": 2565320868,
+              "median": 2566156322.0,
+              "max": 2566991776
+            },
+            "elapsed_s": {
+              "min": 3.433396399,
+              "median": 3.4429491235,
+              "max": 3.452501848
+            }
+          },
+          "candidate": {
+            "task_clock_ms": {
+              "min": 13118.02,
+              "median": 13133.76,
+              "max": 13149.5
+            },
+            "cycles": {
+              "min": 1556850228,
+              "median": 1558127891.5,
+              "max": 1559405555
+            },
+            "instructions": {
+              "min": 2427590651,
+              "median": 2428553995.5,
+              "max": 2429517340
+            },
+            "elapsed_s": {
+              "min": 3.444894088,
+              "median": 3.456449675,
+              "max": 3.468005262
+            }
+          }
+        },
+        "apparent-ratios": {
+          "task_clock_ms": 0.9976267627861687,
+          "cycles": 0.9513772586529836,
+          "instructions": 0.9463782645363252,
+          "elapsed_s": 1.003938258165813
+        }
+      },
+      "raw_perf_stat": {
+        "single-mask-trial.allocated-candidate-0-perf.txt": "# started on Fri Oct  2 18:51:53 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-single-mask-trial /home/josh/d/fdu/perf/fixture 13':\n\n          13044.08 msec task-clock:u                                                          \n        1547725722      cycles:u                                                              \n        2554289938      instructions:u                                                        \n\n       3.487172045 seconds time elapsed\n\n       0.459429000 seconds user\n      12.567947000 seconds sys\n\n\n",
+        "single-mask-trial.allocated-candidate-1-perf.txt": "# started on Fri Oct  2 18:51:56 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-single-mask-trial /home/josh/d/fdu/perf/fixture 13':\n\n          13098.79 msec task-clock:u                                                          \n        1553866685      cycles:u                                                              \n        2556834918      instructions:u                                                        \n\n       3.471119415 seconds time elapsed\n\n       0.483206000 seconds user\n      12.598889000 seconds sys\n\n\n",
+        "single-mask-trial.allocated-reference-0-perf.txt": "# started on Fri Oct  2 18:51:49 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-record-slice-trial /home/josh/d/fdu/perf/fixture 13':\n\n          13050.28 msec task-clock:u                                                          \n        1586500846      cycles:u                                                              \n        2691729992      instructions:u                                                        \n\n       3.442117397 seconds time elapsed\n\n       0.487603000 seconds user\n      12.546332000 seconds sys\n\n\n",
+        "single-mask-trial.allocated-reference-1-perf.txt": "# started on Fri Oct  2 18:52:00 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-record-slice-trial /home/josh/d/fdu/perf/fixture 13':\n\n          13097.99 msec task-clock:u                                                          \n        1587316433      cycles:u                                                              \n        2691579069      instructions:u                                                        \n\n       3.450015126 seconds time elapsed\n\n       0.509607000 seconds user\n      12.571815000 seconds sys\n\n\n",
+        "single-mask-trial.apparent-candidate-0-perf.txt": "# started on Fri Oct  2 18:52:07 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-single-mask-trial /home/josh/d/fdu/perf/fixture 13 --apparent':\n\n          13118.02 msec task-clock:u                                                          \n        1559405555      cycles:u                                                              \n        2427590651      instructions:u                                                        \n\n       3.444894088 seconds time elapsed\n\n       0.510537000 seconds user\n      12.588086000 seconds sys\n\n\n",
+        "single-mask-trial.apparent-candidate-1-perf.txt": "# started on Fri Oct  2 18:52:11 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-single-mask-trial /home/josh/d/fdu/perf/fixture 13 --apparent':\n\n          13149.50 msec task-clock:u                                                          \n        1556850228      cycles:u                                                              \n        2429517340      instructions:u                                                        \n\n       3.468005262 seconds time elapsed\n\n       0.463180000 seconds user\n      12.668672000 seconds sys\n\n\n",
+        "single-mask-trial.apparent-reference-0-perf.txt": "# started on Fri Oct  2 18:52:04 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-record-slice-trial /home/josh/d/fdu/perf/fixture 13 --apparent':\n\n          13160.83 msec task-clock:u                                                          \n        1647386838      cycles:u                                                              \n        2566991776      instructions:u                                                        \n\n       3.452501848 seconds time elapsed\n\n       0.486781000 seconds user\n      12.657479000 seconds sys\n\n\n",
+        "single-mask-trial.apparent-reference-1-perf.txt": "# started on Fri Oct  2 18:52:14 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-record-slice-trial /home/josh/d/fdu/perf/fixture 13 --apparent':\n\n          13169.17 msec task-clock:u                                                          \n        1628230061      cycles:u                                                              \n        2565320868      instructions:u                                                        \n\n       3.433396399 seconds time elapsed\n\n       0.446065000 seconds user\n      12.705398000 seconds sys\n\n\n"
+      }
+    }
+  }
+}

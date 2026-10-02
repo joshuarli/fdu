@@ -1,0 +1,1616 @@
+{
+  "reference_source": "9b4bd1e",
+  "candidate_source": "c8e6cd8 worktree with bounded vector names and constant mode/batch dispatch",
+  "binary_paths": {
+    "reference": "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-reference",
+    "candidate": "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-final",
+    "reference-allocations": "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-reference-allocations",
+    "candidate-allocations": "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-final-allocations"
+  },
+  "binary_hashes": {
+    "reference": "9caf0b58391164707c0710ec20b3bd4d1cd6fe53ff13643a32d3940be57008e1",
+    "candidate": "0a10186a38b3c649c2ea9c877d3d61289043e9e8def607086d8cff1d987a4cea",
+    "reference-allocations": "56dcd46cd93ef92ad360e7a21792b07f1325a3caec8aa214ecc35f8bfc841c51",
+    "candidate-allocations": "44cacaf9cfaa125fc7e13873b5df30dc666919f77a91abb26038e0d28fd35410"
+  },
+  "fixture": "/home/josh/d/fdu/perf/fixture",
+  "kernel": "6.18.33-0-lts",
+  "filesystem": "ext4; /dev/nvme0n1p3; rw,relatime",
+  "workers": 4,
+  "cache_state": "warm; no global cache drops",
+  "build": "cargo build --locked --release; thin LTO; incremental; default codegen units",
+  "rustc_verbose_version": "rustc 1.100.0-nightly (574ff7d98 2026-09-14)\nbinary: rustc\ncommit-hash: 574ff7d98bd6d037e5236a8453029173b32631fd\ncommit-date: 2026-09-14\nhost: x86_64-unknown-linux-musl\nrelease: 1.100.0-nightly\nLLVM version: 23.1.1",
+  "method": {
+    "metrics": "five paired 78-scan timing recheck plus five fresh memory samples per mode",
+    "pairs": 5,
+    "repetitions": 78,
+    "memory_samples": 5,
+    "memory_source": "vector-validation-loaded-host-2026-10-02.json; identical binaries and source; these memory samples are reused explicitly, not counted as a second independent set"
+  },
+  "commands": [
+    [
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-reference",
+      "/home/josh/d/fdu/perf/fixture"
+    ],
+    [
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-final",
+      "/home/josh/d/fdu/perf/fixture"
+    ],
+    [
+      "doas",
+      "-n",
+      "perf",
+      "stat",
+      "-e",
+      "task-clock:u,cycles:u,instructions:u",
+      "-o",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/vector-validation-quiet.allocated-reference-0-perf.txt",
+      "--",
+      "setpriv",
+      "--reuid=1000",
+      "--regid=1000",
+      "--init-groups",
+      "env",
+      "RAYON_NUM_THREADS=4",
+      "LC_ALL=C",
+      "bash",
+      "-c",
+      "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+      "bash",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-reference",
+      "/home/josh/d/fdu/perf/fixture",
+      "78"
+    ],
+    [
+      "doas",
+      "-n",
+      "perf",
+      "stat",
+      "-e",
+      "task-clock:u,cycles:u,instructions:u",
+      "-o",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/vector-validation-quiet.allocated-candidate-0-perf.txt",
+      "--",
+      "setpriv",
+      "--reuid=1000",
+      "--regid=1000",
+      "--init-groups",
+      "env",
+      "RAYON_NUM_THREADS=4",
+      "LC_ALL=C",
+      "bash",
+      "-c",
+      "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+      "bash",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-final",
+      "/home/josh/d/fdu/perf/fixture",
+      "78"
+    ],
+    [
+      "doas",
+      "-n",
+      "perf",
+      "stat",
+      "-e",
+      "task-clock:u,cycles:u,instructions:u",
+      "-o",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/vector-validation-quiet.allocated-candidate-1-perf.txt",
+      "--",
+      "setpriv",
+      "--reuid=1000",
+      "--regid=1000",
+      "--init-groups",
+      "env",
+      "RAYON_NUM_THREADS=4",
+      "LC_ALL=C",
+      "bash",
+      "-c",
+      "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+      "bash",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-final",
+      "/home/josh/d/fdu/perf/fixture",
+      "78"
+    ],
+    [
+      "doas",
+      "-n",
+      "perf",
+      "stat",
+      "-e",
+      "task-clock:u,cycles:u,instructions:u",
+      "-o",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/vector-validation-quiet.allocated-reference-1-perf.txt",
+      "--",
+      "setpriv",
+      "--reuid=1000",
+      "--regid=1000",
+      "--init-groups",
+      "env",
+      "RAYON_NUM_THREADS=4",
+      "LC_ALL=C",
+      "bash",
+      "-c",
+      "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+      "bash",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-reference",
+      "/home/josh/d/fdu/perf/fixture",
+      "78"
+    ],
+    [
+      "doas",
+      "-n",
+      "perf",
+      "stat",
+      "-e",
+      "task-clock:u,cycles:u,instructions:u",
+      "-o",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/vector-validation-quiet.allocated-reference-2-perf.txt",
+      "--",
+      "setpriv",
+      "--reuid=1000",
+      "--regid=1000",
+      "--init-groups",
+      "env",
+      "RAYON_NUM_THREADS=4",
+      "LC_ALL=C",
+      "bash",
+      "-c",
+      "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+      "bash",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-reference",
+      "/home/josh/d/fdu/perf/fixture",
+      "78"
+    ],
+    [
+      "doas",
+      "-n",
+      "perf",
+      "stat",
+      "-e",
+      "task-clock:u,cycles:u,instructions:u",
+      "-o",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/vector-validation-quiet.allocated-candidate-2-perf.txt",
+      "--",
+      "setpriv",
+      "--reuid=1000",
+      "--regid=1000",
+      "--init-groups",
+      "env",
+      "RAYON_NUM_THREADS=4",
+      "LC_ALL=C",
+      "bash",
+      "-c",
+      "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+      "bash",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-final",
+      "/home/josh/d/fdu/perf/fixture",
+      "78"
+    ],
+    [
+      "doas",
+      "-n",
+      "perf",
+      "stat",
+      "-e",
+      "task-clock:u,cycles:u,instructions:u",
+      "-o",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/vector-validation-quiet.allocated-candidate-3-perf.txt",
+      "--",
+      "setpriv",
+      "--reuid=1000",
+      "--regid=1000",
+      "--init-groups",
+      "env",
+      "RAYON_NUM_THREADS=4",
+      "LC_ALL=C",
+      "bash",
+      "-c",
+      "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+      "bash",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-final",
+      "/home/josh/d/fdu/perf/fixture",
+      "78"
+    ],
+    [
+      "doas",
+      "-n",
+      "perf",
+      "stat",
+      "-e",
+      "task-clock:u,cycles:u,instructions:u",
+      "-o",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/vector-validation-quiet.allocated-reference-3-perf.txt",
+      "--",
+      "setpriv",
+      "--reuid=1000",
+      "--regid=1000",
+      "--init-groups",
+      "env",
+      "RAYON_NUM_THREADS=4",
+      "LC_ALL=C",
+      "bash",
+      "-c",
+      "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+      "bash",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-reference",
+      "/home/josh/d/fdu/perf/fixture",
+      "78"
+    ],
+    [
+      "doas",
+      "-n",
+      "perf",
+      "stat",
+      "-e",
+      "task-clock:u,cycles:u,instructions:u",
+      "-o",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/vector-validation-quiet.allocated-reference-4-perf.txt",
+      "--",
+      "setpriv",
+      "--reuid=1000",
+      "--regid=1000",
+      "--init-groups",
+      "env",
+      "RAYON_NUM_THREADS=4",
+      "LC_ALL=C",
+      "bash",
+      "-c",
+      "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+      "bash",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-reference",
+      "/home/josh/d/fdu/perf/fixture",
+      "78"
+    ],
+    [
+      "doas",
+      "-n",
+      "perf",
+      "stat",
+      "-e",
+      "task-clock:u,cycles:u,instructions:u",
+      "-o",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/vector-validation-quiet.allocated-candidate-4-perf.txt",
+      "--",
+      "setpriv",
+      "--reuid=1000",
+      "--regid=1000",
+      "--init-groups",
+      "env",
+      "RAYON_NUM_THREADS=4",
+      "LC_ALL=C",
+      "bash",
+      "-c",
+      "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+      "bash",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-final",
+      "/home/josh/d/fdu/perf/fixture",
+      "78"
+    ],
+    [
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-reference",
+      "--apparent",
+      "/home/josh/d/fdu/perf/fixture"
+    ],
+    [
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-final",
+      "--apparent",
+      "/home/josh/d/fdu/perf/fixture"
+    ],
+    [
+      "doas",
+      "-n",
+      "perf",
+      "stat",
+      "-e",
+      "task-clock:u,cycles:u,instructions:u",
+      "-o",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/vector-validation-quiet.apparent-reference-0-perf.txt",
+      "--",
+      "setpriv",
+      "--reuid=1000",
+      "--regid=1000",
+      "--init-groups",
+      "env",
+      "RAYON_NUM_THREADS=4",
+      "LC_ALL=C",
+      "bash",
+      "-c",
+      "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+      "bash",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-reference",
+      "/home/josh/d/fdu/perf/fixture",
+      "78",
+      "--apparent"
+    ],
+    [
+      "doas",
+      "-n",
+      "perf",
+      "stat",
+      "-e",
+      "task-clock:u,cycles:u,instructions:u",
+      "-o",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/vector-validation-quiet.apparent-candidate-0-perf.txt",
+      "--",
+      "setpriv",
+      "--reuid=1000",
+      "--regid=1000",
+      "--init-groups",
+      "env",
+      "RAYON_NUM_THREADS=4",
+      "LC_ALL=C",
+      "bash",
+      "-c",
+      "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+      "bash",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-final",
+      "/home/josh/d/fdu/perf/fixture",
+      "78",
+      "--apparent"
+    ],
+    [
+      "doas",
+      "-n",
+      "perf",
+      "stat",
+      "-e",
+      "task-clock:u,cycles:u,instructions:u",
+      "-o",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/vector-validation-quiet.apparent-candidate-1-perf.txt",
+      "--",
+      "setpriv",
+      "--reuid=1000",
+      "--regid=1000",
+      "--init-groups",
+      "env",
+      "RAYON_NUM_THREADS=4",
+      "LC_ALL=C",
+      "bash",
+      "-c",
+      "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+      "bash",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-final",
+      "/home/josh/d/fdu/perf/fixture",
+      "78",
+      "--apparent"
+    ],
+    [
+      "doas",
+      "-n",
+      "perf",
+      "stat",
+      "-e",
+      "task-clock:u,cycles:u,instructions:u",
+      "-o",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/vector-validation-quiet.apparent-reference-1-perf.txt",
+      "--",
+      "setpriv",
+      "--reuid=1000",
+      "--regid=1000",
+      "--init-groups",
+      "env",
+      "RAYON_NUM_THREADS=4",
+      "LC_ALL=C",
+      "bash",
+      "-c",
+      "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+      "bash",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-reference",
+      "/home/josh/d/fdu/perf/fixture",
+      "78",
+      "--apparent"
+    ],
+    [
+      "doas",
+      "-n",
+      "perf",
+      "stat",
+      "-e",
+      "task-clock:u,cycles:u,instructions:u",
+      "-o",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/vector-validation-quiet.apparent-reference-2-perf.txt",
+      "--",
+      "setpriv",
+      "--reuid=1000",
+      "--regid=1000",
+      "--init-groups",
+      "env",
+      "RAYON_NUM_THREADS=4",
+      "LC_ALL=C",
+      "bash",
+      "-c",
+      "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+      "bash",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-reference",
+      "/home/josh/d/fdu/perf/fixture",
+      "78",
+      "--apparent"
+    ],
+    [
+      "doas",
+      "-n",
+      "perf",
+      "stat",
+      "-e",
+      "task-clock:u,cycles:u,instructions:u",
+      "-o",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/vector-validation-quiet.apparent-candidate-2-perf.txt",
+      "--",
+      "setpriv",
+      "--reuid=1000",
+      "--regid=1000",
+      "--init-groups",
+      "env",
+      "RAYON_NUM_THREADS=4",
+      "LC_ALL=C",
+      "bash",
+      "-c",
+      "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+      "bash",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-final",
+      "/home/josh/d/fdu/perf/fixture",
+      "78",
+      "--apparent"
+    ],
+    [
+      "doas",
+      "-n",
+      "perf",
+      "stat",
+      "-e",
+      "task-clock:u,cycles:u,instructions:u",
+      "-o",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/vector-validation-quiet.apparent-candidate-3-perf.txt",
+      "--",
+      "setpriv",
+      "--reuid=1000",
+      "--regid=1000",
+      "--init-groups",
+      "env",
+      "RAYON_NUM_THREADS=4",
+      "LC_ALL=C",
+      "bash",
+      "-c",
+      "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+      "bash",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-final",
+      "/home/josh/d/fdu/perf/fixture",
+      "78",
+      "--apparent"
+    ],
+    [
+      "doas",
+      "-n",
+      "perf",
+      "stat",
+      "-e",
+      "task-clock:u,cycles:u,instructions:u",
+      "-o",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/vector-validation-quiet.apparent-reference-3-perf.txt",
+      "--",
+      "setpriv",
+      "--reuid=1000",
+      "--regid=1000",
+      "--init-groups",
+      "env",
+      "RAYON_NUM_THREADS=4",
+      "LC_ALL=C",
+      "bash",
+      "-c",
+      "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+      "bash",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-reference",
+      "/home/josh/d/fdu/perf/fixture",
+      "78",
+      "--apparent"
+    ],
+    [
+      "doas",
+      "-n",
+      "perf",
+      "stat",
+      "-e",
+      "task-clock:u,cycles:u,instructions:u",
+      "-o",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/vector-validation-quiet.apparent-reference-4-perf.txt",
+      "--",
+      "setpriv",
+      "--reuid=1000",
+      "--regid=1000",
+      "--init-groups",
+      "env",
+      "RAYON_NUM_THREADS=4",
+      "LC_ALL=C",
+      "bash",
+      "-c",
+      "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+      "bash",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-reference",
+      "/home/josh/d/fdu/perf/fixture",
+      "78",
+      "--apparent"
+    ],
+    [
+      "doas",
+      "-n",
+      "perf",
+      "stat",
+      "-e",
+      "task-clock:u,cycles:u,instructions:u",
+      "-o",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/vector-validation-quiet.apparent-candidate-4-perf.txt",
+      "--",
+      "setpriv",
+      "--reuid=1000",
+      "--regid=1000",
+      "--init-groups",
+      "env",
+      "RAYON_NUM_THREADS=4",
+      "LC_ALL=C",
+      "bash",
+      "-c",
+      "for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done",
+      "bash",
+      "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-final",
+      "/home/josh/d/fdu/perf/fixture",
+      "78",
+      "--apparent"
+    ]
+  ],
+  "records": {
+    "allocated-timing": {
+      "reference": [
+        {
+          "run": 1,
+          "task_clock_ms": 93650.25,
+          "cycles": 14079368469,
+          "instructions": 31692753995,
+          "elapsed_s": 24.415950489
+        },
+        {
+          "run": 2,
+          "task_clock_ms": 97604.71,
+          "cycles": 14621741559,
+          "instructions": 31691184638,
+          "elapsed_s": 25.320407404
+        },
+        {
+          "run": 3,
+          "task_clock_ms": 101980.39,
+          "cycles": 15821639937,
+          "instructions": 31693344744,
+          "elapsed_s": 26.466494547
+        },
+        {
+          "run": 4,
+          "task_clock_ms": 96567.05,
+          "cycles": 13238754190,
+          "instructions": 31694661495,
+          "elapsed_s": 25.208840441
+        },
+        {
+          "run": 5,
+          "task_clock_ms": 86880.25,
+          "cycles": 12052408256,
+          "instructions": 31694518219,
+          "elapsed_s": 22.794059766
+        }
+      ],
+      "candidate": [
+        {
+          "run": 1,
+          "task_clock_ms": 82498.95,
+          "cycles": 9416241472,
+          "instructions": 15324578458,
+          "elapsed_s": 21.727003644
+        },
+        {
+          "run": 2,
+          "task_clock_ms": 86925.8,
+          "cycles": 9541419786,
+          "instructions": 15324573036,
+          "elapsed_s": 22.862003441
+        },
+        {
+          "run": 3,
+          "task_clock_ms": 97915.08,
+          "cycles": 11220899878,
+          "instructions": 15330385130,
+          "elapsed_s": 25.486670915
+        },
+        {
+          "run": 4,
+          "task_clock_ms": 98767.84,
+          "cycles": 11350612471,
+          "instructions": 15327330669,
+          "elapsed_s": 25.59567589
+        },
+        {
+          "run": 5,
+          "task_clock_ms": 85598.75,
+          "cycles": 9424798048,
+          "instructions": 15320403114,
+          "elapsed_s": 22.57657346
+        }
+      ]
+    },
+    "apparent-timing": {
+      "reference": [
+        {
+          "run": 1,
+          "task_clock_ms": 88343.59,
+          "cycles": 12017784188,
+          "instructions": 31223074147,
+          "elapsed_s": 23.171362923
+        },
+        {
+          "run": 2,
+          "task_clock_ms": 83721.82,
+          "cycles": 11978682389,
+          "instructions": 31224811098,
+          "elapsed_s": 21.938638825
+        },
+        {
+          "run": 3,
+          "task_clock_ms": 88406.05,
+          "cycles": 12619840918,
+          "instructions": 31226946148,
+          "elapsed_s": 23.103840253
+        },
+        {
+          "run": 4,
+          "task_clock_ms": 99050.05,
+          "cycles": 14967889554,
+          "instructions": 31226497212,
+          "elapsed_s": 25.819005404
+        },
+        {
+          "run": 5,
+          "task_clock_ms": 96848.88,
+          "cycles": 14097652070,
+          "instructions": 31229493840,
+          "elapsed_s": 25.176828617
+        }
+      ],
+      "candidate": [
+        {
+          "run": 1,
+          "task_clock_ms": 87081.08,
+          "cycles": 9449487244,
+          "instructions": 14576285971,
+          "elapsed_s": 22.892602817
+        },
+        {
+          "run": 2,
+          "task_clock_ms": 85644.65,
+          "cycles": 9449723039,
+          "instructions": 14584789446,
+          "elapsed_s": 22.602822666
+        },
+        {
+          "run": 3,
+          "task_clock_ms": 97182.14,
+          "cycles": 11067926473,
+          "instructions": 14574089959,
+          "elapsed_s": 25.246740281
+        },
+        {
+          "run": 4,
+          "task_clock_ms": 95221.37,
+          "cycles": 10949547548,
+          "instructions": 14581364802,
+          "elapsed_s": 24.784719697
+        },
+        {
+          "run": 5,
+          "task_clock_ms": 86407.43,
+          "cycles": 9511983512,
+          "instructions": 14573852307,
+          "elapsed_s": 22.754024645
+        }
+      ]
+    },
+    "allocated-memory": {
+      "reference": [
+        {
+          "allocation_calls": 1804,
+          "reallocation_calls": 361,
+          "deallocation_calls": 1731,
+          "requested_bytes": 12681226,
+          "live_bytes": 2701624,
+          "peak_live_bytes": 3801268,
+          "allocation_requests": 2165,
+          "peak_rss_kib": 2880,
+          "run": 1
+        },
+        {
+          "allocation_calls": 1768,
+          "reallocation_calls": 366,
+          "deallocation_calls": 1694,
+          "requested_bytes": 12696274,
+          "live_bytes": 2701688,
+          "peak_live_bytes": 4790279,
+          "allocation_requests": 2134,
+          "peak_rss_kib": 2904,
+          "run": 2
+        },
+        {
+          "allocation_calls": 1812,
+          "reallocation_calls": 364,
+          "deallocation_calls": 1737,
+          "requested_bytes": 12707394,
+          "live_bytes": 2718520,
+          "peak_live_bytes": 4790399,
+          "allocation_requests": 2176,
+          "peak_rss_kib": 2528,
+          "run": 3
+        },
+        {
+          "allocation_calls": 1763,
+          "reallocation_calls": 367,
+          "deallocation_calls": 1690,
+          "requested_bytes": 12704322,
+          "live_bytes": 2710008,
+          "peak_live_bytes": 4790415,
+          "allocation_requests": 2130,
+          "peak_rss_kib": 2372,
+          "run": 4
+        },
+        {
+          "allocation_calls": 1789,
+          "reallocation_calls": 364,
+          "deallocation_calls": 1715,
+          "requested_bytes": 12689354,
+          "live_bytes": 2701688,
+          "peak_live_bytes": 4790399,
+          "allocation_requests": 2153,
+          "peak_rss_kib": 2220,
+          "run": 5
+        }
+      ],
+      "candidate": [
+        {
+          "allocation_calls": 800,
+          "reallocation_calls": 69,
+          "deallocation_calls": 749,
+          "requested_bytes": 2602215,
+          "live_bytes": 397688,
+          "peak_live_bytes": 542564,
+          "allocation_requests": 869,
+          "peak_rss_kib": 852,
+          "run": 1
+        },
+        {
+          "allocation_calls": 821,
+          "reallocation_calls": 67,
+          "deallocation_calls": 769,
+          "requested_bytes": 2611575,
+          "live_bytes": 406136,
+          "peak_live_bytes": 637986,
+          "allocation_requests": 888,
+          "peak_rss_kib": 852,
+          "run": 2
+        },
+        {
+          "allocation_calls": 788,
+          "reallocation_calls": 67,
+          "deallocation_calls": 735,
+          "requested_bytes": 2617167,
+          "live_bytes": 414584,
+          "peak_live_bytes": 577184,
+          "allocation_requests": 855,
+          "peak_rss_kib": 860,
+          "run": 3
+        },
+        {
+          "allocation_calls": 810,
+          "reallocation_calls": 69,
+          "deallocation_calls": 757,
+          "requested_bytes": 2619783,
+          "live_bytes": 414584,
+          "peak_live_bytes": 570102,
+          "allocation_requests": 879,
+          "peak_rss_kib": 844,
+          "run": 4
+        },
+        {
+          "allocation_calls": 739,
+          "reallocation_calls": 76,
+          "deallocation_calls": 687,
+          "requested_bytes": 2607759,
+          "live_bytes": 406136,
+          "peak_live_bytes": 624388,
+          "allocation_requests": 815,
+          "peak_rss_kib": 556,
+          "run": 5
+        }
+      ]
+    },
+    "apparent-memory": {
+      "reference": [
+        {
+          "allocation_calls": 1813,
+          "reallocation_calls": 361,
+          "deallocation_calls": 1740,
+          "requested_bytes": 12681932,
+          "live_bytes": 2701624,
+          "peak_live_bytes": 3801700,
+          "allocation_requests": 2174,
+          "peak_rss_kib": 2364,
+          "run": 1
+        },
+        {
+          "allocation_calls": 1839,
+          "reallocation_calls": 359,
+          "deallocation_calls": 1766,
+          "requested_bytes": 12683348,
+          "live_bytes": 2701624,
+          "peak_live_bytes": 3793688,
+          "allocation_requests": 2198,
+          "peak_rss_kib": 2696,
+          "run": 2
+        },
+        {
+          "allocation_calls": 1804,
+          "reallocation_calls": 363,
+          "deallocation_calls": 1730,
+          "requested_bytes": 12698244,
+          "live_bytes": 2710072,
+          "peak_live_bytes": 4790407,
+          "allocation_requests": 2167,
+          "peak_rss_kib": 2208,
+          "run": 3
+        },
+        {
+          "allocation_calls": 1833,
+          "reallocation_calls": 362,
+          "deallocation_calls": 1760,
+          "requested_bytes": 12700404,
+          "live_bytes": 2701624,
+          "peak_live_bytes": 3759387,
+          "allocation_requests": 2195,
+          "peak_rss_kib": 2124,
+          "run": 4
+        },
+        {
+          "allocation_calls": 1816,
+          "reallocation_calls": 362,
+          "deallocation_calls": 1742,
+          "requested_bytes": 12690804,
+          "live_bytes": 2701688,
+          "peak_live_bytes": 4790263,
+          "allocation_requests": 2178,
+          "peak_rss_kib": 2112,
+          "run": 5
+        }
+      ],
+      "candidate": [
+        {
+          "allocation_calls": 764,
+          "reallocation_calls": 71,
+          "deallocation_calls": 713,
+          "requested_bytes": 2665105,
+          "live_bytes": 397688,
+          "peak_live_bytes": 613387,
+          "allocation_requests": 835,
+          "peak_rss_kib": 1088,
+          "run": 1
+        },
+        {
+          "allocation_calls": 764,
+          "reallocation_calls": 70,
+          "deallocation_calls": 712,
+          "requested_bytes": 2607505,
+          "live_bytes": 406136,
+          "peak_live_bytes": 539800,
+          "allocation_requests": 834,
+          "peak_rss_kib": 1088,
+          "run": 2
+        },
+        {
+          "allocation_calls": 825,
+          "reallocation_calls": 70,
+          "deallocation_calls": 770,
+          "requested_bytes": 2637977,
+          "live_bytes": 431480,
+          "peak_live_bytes": 624388,
+          "allocation_requests": 895,
+          "peak_rss_kib": 576,
+          "run": 3
+        },
+        {
+          "allocation_calls": 737,
+          "reallocation_calls": 76,
+          "deallocation_calls": 684,
+          "requested_bytes": 2615649,
+          "live_bytes": 414584,
+          "peak_live_bytes": 536361,
+          "allocation_requests": 813,
+          "peak_rss_kib": 832,
+          "run": 4
+        },
+        {
+          "allocation_calls": 750,
+          "reallocation_calls": 75,
+          "deallocation_calls": 698,
+          "requested_bytes": 2608377,
+          "live_bytes": 406136,
+          "peak_live_bytes": 624108,
+          "allocation_requests": 825,
+          "peak_rss_kib": 576,
+          "run": 5
+        }
+      ]
+    }
+  },
+  "summary": {
+    "allocated-timing": {
+      "reference": {
+        "task_clock_ms": {
+          "min": 86880.25,
+          "median": 96567.05,
+          "max": 101980.39
+        },
+        "cycles": {
+          "min": 12052408256,
+          "median": 14079368469,
+          "max": 15821639937
+        },
+        "instructions": {
+          "min": 31691184638,
+          "median": 31693344744,
+          "max": 31694661495
+        },
+        "elapsed_s": {
+          "min": 22.794059766,
+          "median": 25.208840441,
+          "max": 26.466494547
+        }
+      },
+      "candidate": {
+        "task_clock_ms": {
+          "min": 82498.95,
+          "median": 86925.8,
+          "max": 98767.84
+        },
+        "cycles": {
+          "min": 9416241472,
+          "median": 9541419786,
+          "max": 11350612471
+        },
+        "instructions": {
+          "min": 15320403114,
+          "median": 15324578458,
+          "max": 15330385130
+        },
+        "elapsed_s": {
+          "min": 21.727003644,
+          "median": 22.862003441,
+          "max": 25.59567589
+        }
+      }
+    },
+    "allocated-ratios": {
+      "task_clock_ms": 0.9601363556268024,
+      "cycles": 0.7092121880336278,
+      "instructions": 0.48355948857856007,
+      "elapsed_s": 0.9629787152106601
+    },
+    "apparent-timing": {
+      "reference": {
+        "task_clock_ms": {
+          "min": 83721.82,
+          "median": 88406.05,
+          "max": 99050.05
+        },
+        "cycles": {
+          "min": 11978682389,
+          "median": 12619840918,
+          "max": 14967889554
+        },
+        "instructions": {
+          "min": 31223074147,
+          "median": 31226497212,
+          "max": 31229493840
+        },
+        "elapsed_s": {
+          "min": 21.938638825,
+          "median": 23.171362923,
+          "max": 25.819005404
+        }
+      },
+      "candidate": {
+        "task_clock_ms": {
+          "min": 85644.65,
+          "median": 87081.08,
+          "max": 97182.14
+        },
+        "cycles": {
+          "min": 9449487244,
+          "median": 9511983512,
+          "max": 11067926473
+        },
+        "instructions": {
+          "min": 14573852307,
+          "median": 14576285971,
+          "max": 14584789446
+        },
+        "elapsed_s": {
+          "min": 22.602822666,
+          "median": 22.892602817,
+          "max": 25.246740281
+        }
+      }
+    },
+    "apparent-ratios": {
+      "task_clock_ms": 0.985709093325277,
+      "cycles": 0.7862919733103132,
+      "instructions": 0.4668433960850242,
+      "elapsed_s": 0.9879696284190819
+    },
+    "allocated-memory": {
+      "reference": {
+        "allocation_calls": {
+          "min": 1763,
+          "median": 1789,
+          "max": 1812
+        },
+        "reallocation_calls": {
+          "min": 361,
+          "median": 364,
+          "max": 367
+        },
+        "deallocation_calls": {
+          "min": 1690,
+          "median": 1715,
+          "max": 1737
+        },
+        "requested_bytes": {
+          "min": 12681226,
+          "median": 12696274,
+          "max": 12707394
+        },
+        "live_bytes": {
+          "min": 2701624,
+          "median": 2701688,
+          "max": 2718520
+        },
+        "peak_live_bytes": {
+          "min": 3801268,
+          "median": 4790399,
+          "max": 4790415
+        },
+        "allocation_requests": {
+          "min": 2130,
+          "median": 2153,
+          "max": 2176
+        },
+        "peak_rss_kib": {
+          "min": 2220,
+          "median": 2528,
+          "max": 2904
+        }
+      },
+      "candidate": {
+        "allocation_calls": {
+          "min": 739,
+          "median": 800,
+          "max": 821
+        },
+        "reallocation_calls": {
+          "min": 67,
+          "median": 69,
+          "max": 76
+        },
+        "deallocation_calls": {
+          "min": 687,
+          "median": 749,
+          "max": 769
+        },
+        "requested_bytes": {
+          "min": 2602215,
+          "median": 2611575,
+          "max": 2619783
+        },
+        "live_bytes": {
+          "min": 397688,
+          "median": 406136,
+          "max": 414584
+        },
+        "peak_live_bytes": {
+          "min": 542564,
+          "median": 577184,
+          "max": 637986
+        },
+        "allocation_requests": {
+          "min": 815,
+          "median": 869,
+          "max": 888
+        },
+        "peak_rss_kib": {
+          "min": 556,
+          "median": 852,
+          "max": 860
+        }
+      }
+    },
+    "apparent-memory": {
+      "reference": {
+        "allocation_calls": {
+          "min": 1804,
+          "median": 1816,
+          "max": 1839
+        },
+        "reallocation_calls": {
+          "min": 359,
+          "median": 362,
+          "max": 363
+        },
+        "deallocation_calls": {
+          "min": 1730,
+          "median": 1742,
+          "max": 1766
+        },
+        "requested_bytes": {
+          "min": 12681932,
+          "median": 12690804,
+          "max": 12700404
+        },
+        "live_bytes": {
+          "min": 2701624,
+          "median": 2701624,
+          "max": 2710072
+        },
+        "peak_live_bytes": {
+          "min": 3759387,
+          "median": 3801700,
+          "max": 4790407
+        },
+        "allocation_requests": {
+          "min": 2167,
+          "median": 2178,
+          "max": 2198
+        },
+        "peak_rss_kib": {
+          "min": 2112,
+          "median": 2208,
+          "max": 2696
+        }
+      },
+      "candidate": {
+        "allocation_calls": {
+          "min": 737,
+          "median": 764,
+          "max": 825
+        },
+        "reallocation_calls": {
+          "min": 70,
+          "median": 71,
+          "max": 76
+        },
+        "deallocation_calls": {
+          "min": 684,
+          "median": 712,
+          "max": 770
+        },
+        "requested_bytes": {
+          "min": 2607505,
+          "median": 2615649,
+          "max": 2665105
+        },
+        "live_bytes": {
+          "min": 397688,
+          "median": 406136,
+          "max": 431480
+        },
+        "peak_live_bytes": {
+          "min": 536361,
+          "median": 613387,
+          "max": 624388
+        },
+        "allocation_requests": {
+          "min": 813,
+          "median": 834,
+          "max": 895
+        },
+        "peak_rss_kib": {
+          "min": 576,
+          "median": 832,
+          "max": 1088
+        }
+      }
+    }
+  },
+  "host_load_observations": [
+    {
+      "mode": "allocated",
+      "binary": "reference",
+      "pair": 1,
+      "phase": "before",
+      "loadavg": "2.35 10.78 8.63 2/774 10379",
+      "cpu_pressure": null
+    },
+    {
+      "mode": "allocated",
+      "binary": "reference",
+      "pair": 1,
+      "phase": "after",
+      "loadavg": "7.38 11.24 8.84 5/808 12393",
+      "cpu_pressure": null
+    },
+    {
+      "mode": "allocated",
+      "binary": "candidate",
+      "pair": 1,
+      "phase": "before",
+      "loadavg": "7.38 11.24 8.84 5/808 12393",
+      "cpu_pressure": null
+    },
+    {
+      "mode": "allocated",
+      "binary": "candidate",
+      "pair": 1,
+      "phase": "after",
+      "loadavg": "7.04 10.85 8.77 3/805 13149",
+      "cpu_pressure": null
+    },
+    {
+      "mode": "allocated",
+      "binary": "candidate",
+      "pair": 2,
+      "phase": "before",
+      "loadavg": "7.04 10.85 8.77 4/805 13149",
+      "cpu_pressure": null
+    },
+    {
+      "mode": "allocated",
+      "binary": "candidate",
+      "pair": 2,
+      "phase": "after",
+      "loadavg": "7.91 10.80 8.80 7/813 15075",
+      "cpu_pressure": null
+    },
+    {
+      "mode": "allocated",
+      "binary": "reference",
+      "pair": 2,
+      "phase": "before",
+      "loadavg": "7.91 10.80 8.80 8/813 15075",
+      "cpu_pressure": null
+    },
+    {
+      "mode": "allocated",
+      "binary": "reference",
+      "pair": 2,
+      "phase": "after",
+      "loadavg": "11.62 11.41 9.05 18/825 16453",
+      "cpu_pressure": null
+    },
+    {
+      "mode": "allocated",
+      "binary": "reference",
+      "pair": 3,
+      "phase": "before",
+      "loadavg": "11.62 11.41 9.05 19/825 16453",
+      "cpu_pressure": null
+    },
+    {
+      "mode": "allocated",
+      "binary": "reference",
+      "pair": 3,
+      "phase": "after",
+      "loadavg": "15.27 12.31 9.43 19/825 17023",
+      "cpu_pressure": null
+    },
+    {
+      "mode": "allocated",
+      "binary": "candidate",
+      "pair": 3,
+      "phase": "before",
+      "loadavg": "15.27 12.31 9.43 20/825 17023",
+      "cpu_pressure": null
+    },
+    {
+      "mode": "allocated",
+      "binary": "candidate",
+      "pair": 3,
+      "phase": "after",
+      "loadavg": "17.15 13.00 9.73 16/823 17576",
+      "cpu_pressure": null
+    },
+    {
+      "mode": "allocated",
+      "binary": "candidate",
+      "pair": 4,
+      "phase": "before",
+      "loadavg": "17.15 13.00 9.73 18/823 17576",
+      "cpu_pressure": null
+    },
+    {
+      "mode": "allocated",
+      "binary": "candidate",
+      "pair": 4,
+      "phase": "after",
+      "loadavg": "18.05 13.54 10.00 17/856 18890",
+      "cpu_pressure": null
+    },
+    {
+      "mode": "allocated",
+      "binary": "reference",
+      "pair": 4,
+      "phase": "before",
+      "loadavg": "18.05 13.54 10.00 18/856 18890",
+      "cpu_pressure": null
+    },
+    {
+      "mode": "allocated",
+      "binary": "reference",
+      "pair": 4,
+      "phase": "after",
+      "loadavg": "17.02 13.69 10.15 4/818 21229",
+      "cpu_pressure": null
+    },
+    {
+      "mode": "allocated",
+      "binary": "reference",
+      "pair": 5,
+      "phase": "before",
+      "loadavg": "17.02 13.69 10.15 5/818 21229",
+      "cpu_pressure": null
+    },
+    {
+      "mode": "allocated",
+      "binary": "reference",
+      "pair": 5,
+      "phase": "after",
+      "loadavg": "14.26 13.27 10.08 3/811 22724",
+      "cpu_pressure": null
+    },
+    {
+      "mode": "allocated",
+      "binary": "candidate",
+      "pair": 5,
+      "phase": "before",
+      "loadavg": "14.26 13.27 10.08 4/811 22724",
+      "cpu_pressure": null
+    },
+    {
+      "mode": "allocated",
+      "binary": "candidate",
+      "pair": 5,
+      "phase": "after",
+      "loadavg": "11.67 12.73 9.99 4/840 25133",
+      "cpu_pressure": null
+    },
+    {
+      "mode": "apparent",
+      "binary": "reference",
+      "pair": 1,
+      "phase": "before",
+      "loadavg": "11.67 12.73 9.99 4/848 25226",
+      "cpu_pressure": null
+    },
+    {
+      "mode": "apparent",
+      "binary": "reference",
+      "pair": 1,
+      "phase": "after",
+      "loadavg": "10.48 12.37 9.94 6/874 29388",
+      "cpu_pressure": null
+    },
+    {
+      "mode": "apparent",
+      "binary": "candidate",
+      "pair": 1,
+      "phase": "before",
+      "loadavg": "10.48 12.37 9.94 7/874 29388",
+      "cpu_pressure": null
+    },
+    {
+      "mode": "apparent",
+      "binary": "candidate",
+      "pair": 1,
+      "phase": "after",
+      "loadavg": "9.68 12.07 9.89 5/851 32657",
+      "cpu_pressure": null
+    },
+    {
+      "mode": "apparent",
+      "binary": "candidate",
+      "pair": 2,
+      "phase": "before",
+      "loadavg": "9.68 12.07 9.89 6/851 32657",
+      "cpu_pressure": null
+    },
+    {
+      "mode": "apparent",
+      "binary": "candidate",
+      "pair": 2,
+      "phase": "after",
+      "loadavg": "8.69 11.64 9.81 3/818 3174",
+      "cpu_pressure": null
+    },
+    {
+      "mode": "apparent",
+      "binary": "reference",
+      "pair": 2,
+      "phase": "before",
+      "loadavg": "8.69 11.64 9.81 4/818 3174",
+      "cpu_pressure": null
+    },
+    {
+      "mode": "apparent",
+      "binary": "reference",
+      "pair": 2,
+      "phase": "after",
+      "loadavg": "8.09 11.31 9.74 7/792 4088",
+      "cpu_pressure": null
+    },
+    {
+      "mode": "apparent",
+      "binary": "reference",
+      "pair": 3,
+      "phase": "before",
+      "loadavg": "8.09 11.31 9.74 10/792 4088",
+      "cpu_pressure": null
+    },
+    {
+      "mode": "apparent",
+      "binary": "reference",
+      "pair": 3,
+      "phase": "after",
+      "loadavg": "10.05 11.48 9.84 16/802 4571",
+      "cpu_pressure": null
+    },
+    {
+      "mode": "apparent",
+      "binary": "candidate",
+      "pair": 3,
+      "phase": "before",
+      "loadavg": "10.05 11.48 9.84 18/802 4571",
+      "cpu_pressure": null
+    },
+    {
+      "mode": "apparent",
+      "binary": "candidate",
+      "pair": 3,
+      "phase": "after",
+      "loadavg": "13.59 12.20 10.12 17/798 5555",
+      "cpu_pressure": null
+    },
+    {
+      "mode": "apparent",
+      "binary": "candidate",
+      "pair": 4,
+      "phase": "before",
+      "loadavg": "13.59 12.20 10.12 18/798 5555",
+      "cpu_pressure": null
+    },
+    {
+      "mode": "apparent",
+      "binary": "candidate",
+      "pair": 4,
+      "phase": "after",
+      "loadavg": "15.78 12.83 10.38 17/831 6901",
+      "cpu_pressure": null
+    },
+    {
+      "mode": "apparent",
+      "binary": "reference",
+      "pair": 4,
+      "phase": "before",
+      "loadavg": "15.78 12.83 10.38 18/831 6901",
+      "cpu_pressure": null
+    },
+    {
+      "mode": "apparent",
+      "binary": "reference",
+      "pair": 4,
+      "phase": "after",
+      "loadavg": "17.21 13.41 10.64 17/825 10697",
+      "cpu_pressure": null
+    },
+    {
+      "mode": "apparent",
+      "binary": "reference",
+      "pair": 5,
+      "phase": "before",
+      "loadavg": "17.21 13.41 10.64 18/825 10697",
+      "cpu_pressure": null
+    },
+    {
+      "mode": "apparent",
+      "binary": "reference",
+      "pair": 5,
+      "phase": "after",
+      "loadavg": "17.42 13.77 10.84 10/856 12265",
+      "cpu_pressure": null
+    },
+    {
+      "mode": "apparent",
+      "binary": "candidate",
+      "pair": 5,
+      "phase": "before",
+      "loadavg": "17.42 13.77 10.84 11/856 12265",
+      "cpu_pressure": null
+    },
+    {
+      "mode": "apparent",
+      "binary": "candidate",
+      "pair": 5,
+      "phase": "after",
+      "loadavg": "14.03 13.29 10.75 2/816 15248",
+      "cpu_pressure": null
+    }
+  ],
+  "raw_perf_stat": {
+    "vector-validation-quiet.allocated-candidate-0-perf.txt": "# started on Fri Oct  2 19:08:13 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-final /home/josh/d/fdu/perf/fixture 78':\n\n          82498.95 msec task-clock:u                                                          \n        9416241472      cycles:u                                                              \n       15324578458      instructions:u                                                        \n\n      21.727003644 seconds time elapsed\n\n       3.192710000 seconds user\n      79.211454000 seconds sys\n\n\n",
+    "vector-validation-quiet.allocated-candidate-1-perf.txt": "# started on Fri Oct  2 19:08:35 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-final /home/josh/d/fdu/perf/fixture 78':\n\n          86925.80 msec task-clock:u                                                          \n        9541419786      cycles:u                                                              \n       15324573036      instructions:u                                                        \n\n      22.862003441 seconds time elapsed\n\n       3.331046000 seconds user\n      83.461774000 seconds sys\n\n\n",
+    "vector-validation-quiet.allocated-candidate-2-perf.txt": "# started on Fri Oct  2 19:09:50 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-final /home/josh/d/fdu/perf/fixture 78':\n\n          97915.08 msec task-clock:u                                                          \n       11220899878      cycles:u                                                              \n       15330385130      instructions:u                                                        \n\n      25.486670915 seconds time elapsed\n\n       3.736371000 seconds user\n      94.010042000 seconds sys\n\n\n",
+    "vector-validation-quiet.allocated-candidate-3-perf.txt": "# started on Fri Oct  2 19:10:15 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-final /home/josh/d/fdu/perf/fixture 78':\n\n          98767.84 msec task-clock:u                                                          \n       11350612471      cycles:u                                                              \n       15327330669      instructions:u                                                        \n\n      25.595675890 seconds time elapsed\n\n       3.810206000 seconds user\n      94.784700000 seconds sys\n\n\n",
+    "vector-validation-quiet.allocated-candidate-4-perf.txt": "# started on Fri Oct  2 19:11:29 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-final /home/josh/d/fdu/perf/fixture 78':\n\n          85598.75 msec task-clock:u                                                          \n        9424798048      cycles:u                                                              \n       15320403114      instructions:u                                                        \n\n      22.576573460 seconds time elapsed\n\n       3.357249000 seconds user\n      82.124455000 seconds sys\n\n\n",
+    "vector-validation-quiet.allocated-reference-0-perf.txt": "# started on Fri Oct  2 19:07:49 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-reference /home/josh/d/fdu/perf/fixture 78':\n\n          93650.25 msec task-clock:u                                                          \n       14079368469      cycles:u                                                              \n       31692753995      instructions:u                                                        \n\n      24.415950489 seconds time elapsed\n\n       4.182340000 seconds user\n      89.315886000 seconds sys\n\n\n",
+    "vector-validation-quiet.allocated-reference-1-perf.txt": "# started on Fri Oct  2 19:08:58 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-reference /home/josh/d/fdu/perf/fixture 78':\n\n          97604.71 msec task-clock:u                                                          \n       14621741559      cycles:u                                                              \n       31691184638      instructions:u                                                        \n\n      25.320407404 seconds time elapsed\n\n       4.348494000 seconds user\n      93.105923000 seconds sys\n\n\n",
+    "vector-validation-quiet.allocated-reference-2-perf.txt": "# started on Fri Oct  2 19:09:23 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-reference /home/josh/d/fdu/perf/fixture 78':\n\n         101980.39 msec task-clock:u                                                          \n       15821639937      cycles:u                                                              \n       31693344744      instructions:u                                                        \n\n      26.466494547 seconds time elapsed\n\n       4.644264000 seconds user\n      97.158894000 seconds sys\n\n\n",
+    "vector-validation-quiet.allocated-reference-3-perf.txt": "# started on Fri Oct  2 19:10:41 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-reference /home/josh/d/fdu/perf/fixture 78':\n\n          96567.05 msec task-clock:u                                                          \n       13238754190      cycles:u                                                              \n       31694661495      instructions:u                                                        \n\n      25.208840441 seconds time elapsed\n\n       4.262766000 seconds user\n      92.140883000 seconds sys\n\n\n",
+    "vector-validation-quiet.allocated-reference-4-perf.txt": "# started on Fri Oct  2 19:11:06 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-reference /home/josh/d/fdu/perf/fixture 78':\n\n          86880.25 msec task-clock:u                                                          \n       12052408256      cycles:u                                                              \n       31694518219      instructions:u                                                        \n\n      22.794059766 seconds time elapsed\n\n       3.793494000 seconds user\n      82.973829000 seconds sys\n\n\n",
+    "vector-validation-quiet.apparent-candidate-0-perf.txt": "# started on Fri Oct  2 19:12:15 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-final /home/josh/d/fdu/perf/fixture 78 --apparent':\n\n          87081.08 msec task-clock:u                                                          \n        9449487244      cycles:u                                                              \n       14576285971      instructions:u                                                        \n\n      22.892602817 seconds time elapsed\n\n       3.468254000 seconds user\n      83.491344000 seconds sys\n\n\n",
+    "vector-validation-quiet.apparent-candidate-1-perf.txt": "# started on Fri Oct  2 19:12:38 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-final /home/josh/d/fdu/perf/fixture 78 --apparent':\n\n          85644.65 msec task-clock:u                                                          \n        9449723039      cycles:u                                                              \n       14584789446      instructions:u                                                        \n\n      22.602822666 seconds time elapsed\n\n       3.339060000 seconds user\n      82.185974000 seconds sys\n\n\n",
+    "vector-validation-quiet.apparent-candidate-2-perf.txt": "# started on Fri Oct  2 19:13:46 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-final /home/josh/d/fdu/perf/fixture 78 --apparent':\n\n          97182.14 msec task-clock:u                                                          \n       11067926473      cycles:u                                                              \n       14574089959      instructions:u                                                        \n\n      25.246740281 seconds time elapsed\n\n       3.673093000 seconds user\n      93.352711000 seconds sys\n\n\n",
+    "vector-validation-quiet.apparent-candidate-3-perf.txt": "# started on Fri Oct  2 19:14:11 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-final /home/josh/d/fdu/perf/fixture 78 --apparent':\n\n          95221.37 msec task-clock:u                                                          \n       10949547548      cycles:u                                                              \n       14581364802      instructions:u                                                        \n\n      24.784719697 seconds time elapsed\n\n       3.735288000 seconds user\n      91.322950000 seconds sys\n\n\n",
+    "vector-validation-quiet.apparent-candidate-4-perf.txt": "# started on Fri Oct  2 19:15:27 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-final /home/josh/d/fdu/perf/fixture 78 --apparent':\n\n          86407.43 msec task-clock:u                                                          \n        9511983512      cycles:u                                                              \n       14573852307      instructions:u                                                        \n\n      22.754024645 seconds time elapsed\n\n       3.231275000 seconds user\n      83.050664000 seconds sys\n\n\n",
+    "vector-validation-quiet.apparent-reference-0-perf.txt": "# started on Fri Oct  2 19:11:52 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-reference /home/josh/d/fdu/perf/fixture 78 --apparent':\n\n          88343.59 msec task-clock:u                                                          \n       12017784188      cycles:u                                                              \n       31223074147      instructions:u                                                        \n\n      23.171362923 seconds time elapsed\n\n       3.898620000 seconds user\n      84.328255000 seconds sys\n\n\n",
+    "vector-validation-quiet.apparent-reference-1-perf.txt": "# started on Fri Oct  2 19:13:01 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-reference /home/josh/d/fdu/perf/fixture 78 --apparent':\n\n          83721.82 msec task-clock:u                                                          \n       11978682389      cycles:u                                                              \n       31224811098      instructions:u                                                        \n\n      21.938638825 seconds time elapsed\n\n       3.634801000 seconds user\n      79.981745000 seconds sys\n\n\n",
+    "vector-validation-quiet.apparent-reference-2-perf.txt": "# started on Fri Oct  2 19:13:23 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-reference /home/josh/d/fdu/perf/fixture 78 --apparent':\n\n          88406.05 msec task-clock:u                                                          \n       12619840918      cycles:u                                                              \n       31226946148      instructions:u                                                        \n\n      23.103840253 seconds time elapsed\n\n       3.672827000 seconds user\n      84.605108000 seconds sys\n\n\n",
+    "vector-validation-quiet.apparent-reference-3-perf.txt": "# started on Fri Oct  2 19:14:36 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-reference /home/josh/d/fdu/perf/fixture 78 --apparent':\n\n          99050.05 msec task-clock:u                                                          \n       14967889554      cycles:u                                                              \n       31226497212      instructions:u                                                        \n\n      25.819005404 seconds time elapsed\n\n       4.525641000 seconds user\n      94.354770000 seconds sys\n\n\n",
+    "vector-validation-quiet.apparent-reference-4-perf.txt": "# started on Fri Oct  2 19:15:02 2026\n\n\n Performance counter stats for 'setpriv --reuid=1000 --regid=1000 --init-groups env RAYON_NUM_THREADS=4 LC_ALL=C bash -c for ((run=0; run<\"$3\"; run++)); do \"$1\" \"${@:4}\" \"$2\" >/dev/null || exit; done bash /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-reference /home/josh/d/fdu/perf/fixture 78 --apparent':\n\n          96848.88 msec task-clock:u                                                          \n       14097652070      cycles:u                                                              \n       31229493840      instructions:u                                                        \n\n      25.176828617 seconds time elapsed\n\n       4.266584000 seconds user\n      92.417755000 seconds sys\n\n\n"
+  },
+  "raw_rss": {
+    "vector-validation.allocated-candidate-0-rss.txt": "\tCommand being timed: \"/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-final /home/josh/d/fdu/perf/fixture\"\n\tUser time (seconds): 0.05\n\tSystem time (seconds): 1.17\n\tPercent of CPU this job got: 382%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0m 0.32s\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 852\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 448\n\tVoluntary context switches: 64\n\tInvoluntary context switches: 61\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 0\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n",
+    "vector-validation.allocated-candidate-1-rss.txt": "\tCommand being timed: \"/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-final /home/josh/d/fdu/perf/fixture\"\n\tUser time (seconds): 0.03\n\tSystem time (seconds): 1.02\n\tPercent of CPU this job got: 378%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0m 0.28s\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 852\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 433\n\tVoluntary context switches: 58\n\tInvoluntary context switches: 32\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 0\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n",
+    "vector-validation.allocated-candidate-2-rss.txt": "\tCommand being timed: \"/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-final /home/josh/d/fdu/perf/fixture\"\n\tUser time (seconds): 0.03\n\tSystem time (seconds): 0.96\n\tPercent of CPU this job got: 383%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0m 0.26s\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 860\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 423\n\tVoluntary context switches: 56\n\tInvoluntary context switches: 17\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 0\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n",
+    "vector-validation.allocated-candidate-3-rss.txt": "\tCommand being timed: \"/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-final /home/josh/d/fdu/perf/fixture\"\n\tUser time (seconds): 0.03\n\tSystem time (seconds): 0.96\n\tPercent of CPU this job got: 371%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0m 0.26s\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 844\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 465\n\tVoluntary context switches: 59\n\tInvoluntary context switches: 17\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 0\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n",
+    "vector-validation.allocated-candidate-4-rss.txt": "\tCommand being timed: \"/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-final /home/josh/d/fdu/perf/fixture\"\n\tUser time (seconds): 0.03\n\tSystem time (seconds): 0.97\n\tPercent of CPU this job got: 389%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0m 0.25s\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 556\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 461\n\tVoluntary context switches: 54\n\tInvoluntary context switches: 15\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 0\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n",
+    "vector-validation.allocated-reference-0-rss.txt": "\tCommand being timed: \"/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-reference /home/josh/d/fdu/perf/fixture\"\n\tUser time (seconds): 0.05\n\tSystem time (seconds): 1.13\n\tPercent of CPU this job got: 365%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0m 0.32s\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 2880\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 1540\n\tVoluntary context switches: 52\n\tInvoluntary context switches: 39\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 0\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n",
+    "vector-validation.allocated-reference-1-rss.txt": "\tCommand being timed: \"/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-reference /home/josh/d/fdu/perf/fixture\"\n\tUser time (seconds): 0.04\n\tSystem time (seconds): 1.03\n\tPercent of CPU this job got: 366%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0m 0.29s\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 2904\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 1599\n\tVoluntary context switches: 48\n\tInvoluntary context switches: 122\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 0\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n",
+    "vector-validation.allocated-reference-2-rss.txt": "\tCommand being timed: \"/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-reference /home/josh/d/fdu/perf/fixture\"\n\tUser time (seconds): 0.04\n\tSystem time (seconds): 0.98\n\tPercent of CPU this job got: 382%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0m 0.26s\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 2528\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 1395\n\tVoluntary context switches: 37\n\tInvoluntary context switches: 11\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 0\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n",
+    "vector-validation.allocated-reference-3-rss.txt": "\tCommand being timed: \"/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-reference /home/josh/d/fdu/perf/fixture\"\n\tUser time (seconds): 0.02\n\tSystem time (seconds): 0.98\n\tPercent of CPU this job got: 388%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0m 0.26s\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 2372\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 1390\n\tVoluntary context switches: 27\n\tInvoluntary context switches: 14\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 0\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n",
+    "vector-validation.allocated-reference-4-rss.txt": "\tCommand being timed: \"/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-reference /home/josh/d/fdu/perf/fixture\"\n\tUser time (seconds): 0.05\n\tSystem time (seconds): 0.95\n\tPercent of CPU this job got: 382%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0m 0.26s\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 2220\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 1388\n\tVoluntary context switches: 38\n\tInvoluntary context switches: 11\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 0\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n",
+    "vector-validation.apparent-candidate-0-rss.txt": "\tCommand being timed: \"/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-final --apparent /home/josh/d/fdu/perf/fixture\"\n\tUser time (seconds): 0.04\n\tSystem time (seconds): 1.08\n\tPercent of CPU this job got: 383%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0m 0.29s\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 1088\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 460\n\tVoluntary context switches: 118\n\tInvoluntary context switches: 21\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 0\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n",
+    "vector-validation.apparent-candidate-1-rss.txt": "\tCommand being timed: \"/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-final --apparent /home/josh/d/fdu/perf/fixture\"\n\tUser time (seconds): 0.04\n\tSystem time (seconds): 1.11\n\tPercent of CPU this job got: 375%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0m 0.30s\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 1088\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 448\n\tVoluntary context switches: 79\n\tInvoluntary context switches: 37\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 0\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n",
+    "vector-validation.apparent-candidate-2-rss.txt": "\tCommand being timed: \"/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-final --apparent /home/josh/d/fdu/perf/fixture\"\n\tUser time (seconds): 0.03\n\tSystem time (seconds): 1.08\n\tPercent of CPU this job got: 385%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0m 0.29s\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 576\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 475\n\tVoluntary context switches: 54\n\tInvoluntary context switches: 26\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 0\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n",
+    "vector-validation.apparent-candidate-3-rss.txt": "\tCommand being timed: \"/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-final --apparent /home/josh/d/fdu/perf/fixture\"\n\tUser time (seconds): 0.05\n\tSystem time (seconds): 1.06\n\tPercent of CPU this job got: 380%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0m 0.29s\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 832\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 467\n\tVoluntary context switches: 79\n\tInvoluntary context switches: 35\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 0\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n",
+    "vector-validation.apparent-candidate-4-rss.txt": "\tCommand being timed: \"/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-final --apparent /home/josh/d/fdu/perf/fixture\"\n\tUser time (seconds): 0.04\n\tSystem time (seconds): 1.15\n\tPercent of CPU this job got: 387%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0m 0.30s\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 576\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 455\n\tVoluntary context switches: 37\n\tInvoluntary context switches: 28\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 0\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n",
+    "vector-validation.apparent-reference-0-rss.txt": "\tCommand being timed: \"/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-reference --apparent /home/josh/d/fdu/perf/fixture\"\n\tUser time (seconds): 0.05\n\tSystem time (seconds): 1.10\n\tPercent of CPU this job got: 385%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0m 0.30s\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 2364\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 1383\n\tVoluntary context switches: 66\n\tInvoluntary context switches: 31\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 0\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n",
+    "vector-validation.apparent-reference-1-rss.txt": "\tCommand being timed: \"/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-reference --apparent /home/josh/d/fdu/perf/fixture\"\n\tUser time (seconds): 0.05\n\tSystem time (seconds): 1.11\n\tPercent of CPU this job got: 374%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0m 0.31s\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 2696\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 1501\n\tVoluntary context switches: 32\n\tInvoluntary context switches: 35\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 0\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n",
+    "vector-validation.apparent-reference-2-rss.txt": "\tCommand being timed: \"/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-reference --apparent /home/josh/d/fdu/perf/fixture\"\n\tUser time (seconds): 0.04\n\tSystem time (seconds): 1.07\n\tPercent of CPU this job got: 360%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0m 0.31s\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 2208\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 1415\n\tVoluntary context switches: 40\n\tInvoluntary context switches: 20\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 0\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n",
+    "vector-validation.apparent-reference-3-rss.txt": "\tCommand being timed: \"/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-reference --apparent /home/josh/d/fdu/perf/fixture\"\n\tUser time (seconds): 0.05\n\tSystem time (seconds): 1.09\n\tPercent of CPU this job got: 385%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0m 0.29s\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 2124\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 1395\n\tVoluntary context switches: 62\n\tInvoluntary context switches: 19\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 0\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n",
+    "vector-validation.apparent-reference-4-rss.txt": "\tCommand being timed: \"/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-reference --apparent /home/josh/d/fdu/perf/fixture\"\n\tUser time (seconds): 0.06\n\tSystem time (seconds): 1.15\n\tPercent of CPU this job got: 387%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0m 0.31s\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 2112\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 1406\n\tVoluntary context switches: 76\n\tInvoluntary context switches: 36\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 0\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n"
+  },
+  "source_file_sha256": {
+    "src/linux.rs": "da1fd0a03de9491d264d043959e61f2d748e13107cfb0e3656fd127ac4333981",
+    "src/main.rs": "8a3142b240c53f0846512aaa2d17390880ae1b943640d7a6504ff3935275491d",
+    "src/allocation_profile.rs": "80458d14dc1873b5972b2d01daa9ab70a45c2d58049a975571fcd2063a86efc2",
+    "Cargo.toml": "548105a12ab229c018ec1668da66fb997aba4576610d4361aae7750d4dd8d5da"
+  },
+  "timing_validity": "Host work fluctuated again during the recheck. Keep the per-batch load observations and every pair. Instruction and memory budgets pass; elapsed and CPU targets remain unmet, and these timing variations do not qualify a speedup claim.",
+  "checks": {
+    "allocated": {
+      "median_allocation_requests_at_most_1000": true,
+      "all_requested_bytes_at_most_6_mib": true,
+      "all_peak_heap_bytes_at_most_2_mib": true,
+      "median_rss_at_most_75_percent_reference": true,
+      "maximum_rss_no_reference_regression": true,
+      "all_78_scan_instruction_counts_at_most_15_6_billion": true,
+      "elapsed_budget_established": false,
+      "task_clock_budget_established": false
+    },
+    "apparent": {
+      "median_allocation_requests_at_most_1000": true,
+      "all_requested_bytes_at_most_6_mib": true,
+      "all_peak_heap_bytes_at_most_2_mib": true,
+      "median_rss_at_most_75_percent_reference": true,
+      "maximum_rss_no_reference_regression": true
+    }
+  }
+}

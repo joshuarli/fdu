@@ -32,12 +32,17 @@ Retain one file-metadata operation per non-directory path or fewer, and no extra
 
 The goal is achieved when all targets and requirements pass the validation procedure below and the implementation, captures, and interpretation are committed. Partial gains or exhausted experiments should be reported with their measured gap to the targets rather than described as completion.
 
+Work is paused at the user's request. The settled implementation meets the measured memory and user-instruction budgets; throughput and total CPU targets remain unmet. The investigation handoff below records the remaining checks and hypotheses.
+
 ## Implementation state
 
 - Linux 6.0 or newer; direct Rust dependencies are libc and Rayon.
 - Four Rayon workers by default. RAYON_NUM_THREADS remains an explicit override.
+- Size accounting is selected before traversal. `scan_mode` specializes the recursive and iterative walks so each metadata call has a fixed request mask and size field.
+- Name validation stays inside each directory record and ends at its first NUL. `directory_record_name` uses bounded SSE2 comparisons on x86-64, with scalar handling for short tails and other architectures. Bytes after the terminator are padding and are not validated as part of the name.
 - Directory entries are read with getdents64 into a reusable 64 KiB buffer. `DirectoryBuffer` leases storage from TLS, so a worker can enumerate another directory while a metadata batch yields to Rayon. Each thread retains at most one enumeration buffer.
 - The first getdents64 batch estimates directory width. Below 128 estimated entries, known non-directory entries are statted directly during enumeration. Wider directories parallelize metadata calls over records for the current read batch; those records borrow the buffer's name bytes and finish before the next read. Only directories and unknown types remain in `DirectoryEntries` after enumeration.
+- Serial versus parallel metadata work is selected once per batch. `parse_directory_batch` checks each record's bounds before reading its name, and completes any borrowed-name metadata work before the enumeration buffer is reused.
 - Names stay inline for short name lists. `DirectoryEntryStorage` keeps up to two child records inline; larger lists use a bounded per-thread vector pool. Directories with no retained children return their already-computed subtotal without an empty Rayon reduction.
 - File sizes use narrow statx requests and count each hardlinked path independently. On x86-64, statx, getdents64, and openat2 use the Linux syscall ABI directly; other Linux architectures use libc wrappers.
 - Child directories use parent-relative openat2 with O_NOFOLLOW and fall back to openat when openat2 is unavailable or denied.
@@ -84,6 +89,8 @@ For an on-CPU profile, use perf record with frame-pointer call stacks and write 
 
 Keep baseline and candidate release binaries with their source revision and hash. Warm each binary on the unchanged fixture, then run at least five pairs of 78 fresh-process scans in allocated mode, alternating which binary runs first. Use `RAYON_NUM_THREADS=4`, the same output destination, toolchain, and build flags. Report every pair, the median candidate/reference ratio, and the median batch time; success requires the median ratio to satisfy the target and at least four of the five individual pairs to agree. Repeat the paired comparison in apparent mode to check its 5% regression limit. Recheck results affected by a workload change or large host-load variation.
 
+Record the host load and runnable-task count before and after each batch. Preserve interrupted or noisy experiments with their limitation stated; changing host load cannot establish an elapsed-time or CPU improvement merely because the runs alternate. Allocation and instruction counts can still be reported separately when their distributions remain stable.
+
 To collect a longer release batch, wrap repeated scans in perf stat. Keep the repetition count fixed when comparing revisions:
 
     RAYON_NUM_THREADS=4 perf stat -e task-clock:u,cycles:u,instructions:u -- \
@@ -117,15 +124,57 @@ Repeat with `--apparent` and separate capture names. Verify successful exit and 
 
 ## Findings and next work
 
+### Investigation handoff
+
+Work is settled and paused. The candidate keeps direct statx, four Rayon workers, the existing accounting and error behavior, and the libc-plus-Rayon dependencies. The accepted changes are bounded streaming metadata batches and inline child storage, followed by bounded name validation and constant accounting/batch selection. Experimental metadata interfaces and inode sorting were reverted.
+
+| Completion requirement | Settled evidence | Remaining work |
+| --- | --- | --- |
+| Allocated user instructions | All five 78-scan batches at or below 15.331 billion, below 15.6 billion | Recheck after any further scanner change |
+| Allocation requests and requested heap | Medians 869 allocated / 834 apparent; maximum requested heap 2.55 MiB and peak live heap 0.61 MiB | Retain five fresh samples per mode after changes |
+| RSS | Medians 852 KiB allocated / 832 KiB apparent; maxima 860 / 1,088 KiB; all paired and absolute budgets met | Retain paired reference and worst-sample checks |
+| Throughput and total CPU | Targets unmet; latest allocated medians 22.86 s and 86.93 CPU-s per 78 scans on a variable-load host | Establish at most 9.5 s and 36 CPU-s, each at most 50% of paired reference, on a stable host |
+| Apparent-mode regression guard | Four of five recheck pairs were within 5%; one exceeded 9% during changing host load | Recheck elapsed time and task-clock under stable load before accepting the guard |
+| Accounting and operation bounds | Both size mappings match the reference; metadata/open counts unchanged; directory reads up 0.061% | Preserve all invariants in subsequent candidates |
+
+The last source validation passed `cargo test --locked` (12 unit tests and one CLI integration test), `cargo test --locked --all-features` (14 unit tests and one CLI integration test), the ordinary release build, and the separate allocation-profile release build. Full-fixture comparisons checked both directory-size mappings, descending order, successful exit, and absence of incomplete-total warnings. No formatter, linter, commit hook, or remote push was run.
+
+Resume in this order:
+
+1. Establish a stable host interval before changing the scanner. Reproduce five alternating pairs of 78 fresh-process scans in both modes, recording load and runnable tasks around each batch. Use the same unchanged ext4 fixture, ordinary-user permissions, four workers, warm caches, output destination, compiler, and release flags. Check the apparent-mode guard first; preserve noisy pairs without treating their ratios as a gain. Use the throughput and memory procedures above for the complete acceptance gate.
+2. Investigate kernel metadata cost with the precise profile in `perf/captures/vector-precise-profile-2026-10-02.txt`. Pathname lookup and VFS/ext4 attributes dominate its samples. A next prototype needs a concrete hypothesis about reducing full-scanner total CPU, rather than merely reducing user instructions or syscall entries. Compare supported metadata APIs or batching only when the design preserves parent-directory handle lifetime, file-descriptor bounds, symlink behavior, requested-field availability, no-follow/dont-sync semantics, overflow handling, and omission of failed entries or subtrees.
+3. Keep rejected trials as evidence: raw newfstatat, inode sorting, and io_uring with bounded workers did not establish a qualifying improvement. Do not repeat them unchanged. The direct-call microbenchmark used less than half the CPU of bounded io-wq; an asynchronous prototype needs a different, testable reason to improve whole-scan work.
+4. Require every original target before declaring completion. A snapshot, raw inode reader, or persistent index needs an explicit accounting and access contract and cannot qualify the ordinary-user live-VFS goal by assumption. Keep the four-worker and dependency boundaries; consult the user before adding any dependency.
+
+The full validation JSON captures contain reference/candidate commands, binary hashes, source-file hashes, raw perf counters, and raw RSS reports. They identify the reference as `9b4bd1e` and the candidate as the `c8e6cd8` worktree settled in this commit; `src/linux.rs` SHA-256 is `da1fd0a03de9491d264d043959e61f2d748e13107cfb0e3656fd127ac4333981`. Local immutable binaries and rejected trial sources are retained outside Git in `/home/josh/d/fdu-perf-local-archive/streaming-20261002`: `fdu-reference`, `fdu-reference-allocations`, `fdu-vector-final`, and `fdu-vector-final-allocations`. The archive's `measure.py` is a local capture helper, not a repository interface; the documented commands above remain the reproducible measurement procedure. Do not run measurements concurrently with compilation, profiling, or another benchmark.
+
+### Bounded vector validation and constant traversal modes
+
+The name parser finds the first NUL or path separator using a single vector mask on x86-64. It reads only inside the current record, rejects separators before the terminator, and permits arbitrary bytes in the name and padding. Size accounting, root-only filtering, and serial versus parallel metadata work are selected outside the per-entry loop. The accounting tests cover both size modes, including iterative descent; isolated parser tests cover every name length through 255 bytes, raw non-UTF-8 bytes, separators, padding, and every truncated prefix of a synthetic directory batch.
+
+Short paired probes brought allocated-mode instructions below 200 million per scan. The parser-selection comparisons and raw counters are in `perf/captures/parser-selection-2026-10-02.json`. The first five paired 78-scan runs used at most 15.331 billion allocated-mode user instructions, below the 15.6-billion budget. Allocation-request medians were 869 allocated and 834 apparent; requested heap stayed below 2.55 MiB, peak live heap below 0.61 MiB, and maximum RSS at most 1,088 KiB. Every memory sample met the budgets and each mode's paired RSS reduction requirement.
+
+Unrelated compilation saturated the host during that first validation: load average reached 38.44 on 32 logical CPUs, and later reference and candidate task-clock values rose together. The stable memory and instruction distributions are retained in `perf/captures/vector-validation-loaded-host-2026-10-02.json`; its timing results do not qualify a throughput or CPU improvement. A second complete five-pair, 78-scan comparison is recorded in `perf/captures/vector-validation-2026-10-02.json`, with host observations before and after every batch. Unrelated work fluctuated again, so that recheck also cannot establish a timing gain. Allocated-mode instructions stayed below 15.331 billion in all five batches, about 196.5 million per scan and 48.4% of the paired reference. The second capture explicitly reuses the first capture's five memory samples per mode; it is not a second independent memory set. The 2x throughput and 50% total-CPU targets remain unmet.
+
+A precise on-CPU capture attributes most sampled work to pathname lookup, VFS attributes, and ext4 attributes. Its report and exact command are in `perf/captures/vector-precise-profile-2026-10-02.txt`. On this AMD host, `cycles:p` uses IBS rather than ordinary core-PMU sampling, whose instruction pointers can skid. This profile includes kernel and user work; it is separate from the user-only instruction counters used for the budget. See the [Linux IBS documentation](https://github.com/torvalds/linux/blob/v6.18/tools/perf/Documentation/perf-amd-ibs.txt).
+
+### Rejected metadata interfaces and inode ordering
+
+A full-scanner raw `newfstatat` trial preserved allocated and apparent mappings on the reference host but produced essentially unchanged total CPU and elapsed time. Inlining its size inspector reduced user instructions in one exploratory pair, while the ordinary statx interface also benefited from inlining; the interface replacement did not establish a performance gain. Native-result adaptation was already optimized away for some call sites, so the results do not establish adapter copying as the cause.
+
+Sorting retained child directories by inode used about 6% more user instructions; additionally sorting file batches used roughly 30% more. Both saved only about 1% task-clock and failed to improve elapsed time. These trials were rejected. Their commands, binary hashes, individual paired counters, and interpretations are in `perf/captures/metadata-interface-and-ordering-2026-10-02.json`.
+
+A follow-up io_uring microbenchmark bounded both io-wq worker classes to one. Across three alternating runs per interface, direct statx used a median 155 ms task-clock for 330,000 metadata operations, versus 361 ms with bounded io-wq and 651 ms with the default worker limit. Checksums agreed, but bounded io-wq still produced about 64,600 context switches versus four for direct calls. This is a metadata-only probe, not a full-scanner qualification, and it does not justify an asynchronous backend. The records are in `perf/captures/uring-worker-limit-2026-10-02.json`.
+
 ### Bounded streaming metadata batches
 
 File names and records now live only for one enumeration batch. Two retained child records fit inline, and reusable buffers are leased from TLS while Rayon consumes a batch. A serial 8 KiB prototype met the memory budgets but slowed a single 30,000-file child directory from about 6.1 ms to 10.9 ms. Parallel metadata batches restored most of that throughput; 64 KiB batches measured about 5.9 ms against a 6.1 ms reference across six alternating 30-scan pairs. These small timing differences do not establish a flat-directory speedup.
 
 Five fresh-process samples per mode met every memory target. Allocated-mode medians were 890 allocation requests, 2.51 MiB requested heap, 0.60 MiB peak live heap, and 812 KiB peak RSS. Apparent-mode medians were 827 requests, 2.49 MiB requested heap, 0.51 MiB peak live heap, and 800 KiB peak RSS. Maximum requested heap stayed below 2.61 MiB, maximum peak live heap below 0.68 MiB, and maximum RSS below the matched reference in each mode. The records, paired references, binary hashes, and measurement methods are in `perf/captures/streaming-memory-2026-10-02.json`.
 
-The current syscall counts are 1,218,248 metadata calls, 85,772 child-directory opens, 85,829 directory reads, and 85,773 closes. The 52 additional reads are about 0.061% above the reference, within the 1% allowance. The traced report is in `perf/captures/streaming-syscalls-2026-10-02.txt`.
+The current syscall counts are 1,218,248 metadata calls, 85,772 child-directory opens, 85,829 directory reads, and 85,773 closes. The 52 additional reads are about 0.061% above the reference, within the 1% allowance. The original streaming report is in `perf/captures/streaming-syscalls-2026-10-02.txt`. The settled vector-parser candidate has identical counts, recorded in `perf/captures/vector-syscalls-2026-10-02.txt`.
 
-Across two alternating 39-scan pairs, allocated-mode elapsed time fell from a summed 18.92 s to 18.47 s, task-clock from 71.40 CPU-s to 70.00 CPU-s, and user instructions from 31.69 billion to 28.18 billion. Apparent-mode elapsed rose about 2.8% and task-clock about 2.1%. These are exploratory samples, fewer than the five 78-scan pairs required for throughput validation. They show a memory improvement and an 11% instruction reduction; the 2x throughput, 50% CPU, and 200-million-instruction targets remain unmet. The commands and raw counters are in `perf/captures/streaming-counters-2026-10-02.json`.
+Across two alternating 39-scan pairs, allocated-mode elapsed time fell from a summed 18.92 s to 18.47 s, task-clock from 71.40 CPU-s to 70.00 CPU-s, and user instructions from 31.69 billion to 28.18 billion. Apparent-mode elapsed rose about 2.8% and task-clock about 2.1%. These are exploratory samples, fewer than the five 78-scan pairs required for throughput validation. At that stage they showed a memory improvement and an 11% instruction reduction; the throughput, CPU, and instruction targets were still unmet. The later vector-parser candidate meets the instruction budget as described above. The commands and raw counters are in `perf/captures/streaming-counters-2026-10-02.json`.
 
 The next measurements should focus on kernel metadata work. Keep the ordinary-user accounting contract and compare full-scanner total CPU cost when evaluating metadata interfaces; user-only instruction counts cannot establish a kernel-time improvement.
 

@@ -1,0 +1,29 @@
+Settled candidate syscall-count validation; traced timing does not qualify for performance targets.
+Source: c8e6cd8 worktree with bounded vector names and constant mode/batch dispatch; settled in the accompanying commit.
+Linux source SHA-256: da1fd0a03de9491d264d043959e61f2d748e13107cfb0e3656fd127ac4333981
+Binary SHA-256: 0a10186a38b3c649c2ea9c877d3d61289043e9e8def607086d8cff1d987a4cea
+Kernel: 6.18.33-0-lts
+Filesystem: ext4; /dev/nvme0n1p3; rw,relatime
+Fixture: scripts/generate_inode_fixture.py defaults; 1,304,020 entries, including 85,772 directories and 1,218,248 files.
+Workers: RAYON_NUM_THREADS=4; ordinary-user scan; warm unchanged fixture.
+Build: cargo build --locked --release; thin LTO; incremental; default codegen units
+Command: strace -f -qq -c -e trace=statx,openat2,openat,getdents64,close,clone -o /home/josh/d/fdu-perf-local-archive/streaming-20261002/vector-syscalls.txt env RAYON_NUM_THREADS=4 /home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-vector-final /home/josh/d/fdu/perf/fixture >/dev/null
+Interpretation: 1,218,248 metadata operations and 85,772 child-directory opens match the reference. Directory reads are 85,829, up 52 (0.061%) from 85,777, within the 1% allowance. Counts match the bounded-streaming candidate. No traced errors; four worker clones.
+Compiler:
+rustc 1.100.0-nightly (574ff7d98 2026-09-14)
+binary: rustc
+commit-hash: 574ff7d98bd6d037e5236a8453029173b32631fd
+commit-date: 2026-09-14
+host: x86_64-unknown-linux-musl
+release: 1.100.0-nightly
+LLVM version: 23.1.1
+
+% time     seconds  usecs/call     calls    errors syscall
+------ ----------- ----------- --------- --------- ----------------
+ 79.84    7.223864           5   1218248           statx
+  8.72    0.788692           9     85829           getdents64
+  6.65    0.601355           7     85772           openat2
+  4.79    0.433552           5     85773           close
+  0.00    0.000066          16         4           clone
+------ ----------- ----------- --------- --------- ----------------
+100.00    9.047529           6   1475626           total
