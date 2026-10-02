@@ -11,12 +11,12 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-const DIRECTORY_BUFFER_BYTES: usize = 128 * 1024;
+// A 512 KiB buffer reads large ext4 directories in fewer getdents64 calls.
+const DIRECTORY_BUFFER_BYTES: usize = 512 * 1024;
 const STATX_DONT_SYNC: libc::c_int = 0x4000;
 const STATX_TYPE: libc::c_uint = 0x0001;
 const STATX_SIZE: libc::c_uint = 0x0200;
 const STATX_BLOCKS: libc::c_uint = 0x0400;
-const STATX_BASIC_STATS: libc::c_uint = 0x07ff;
 const RESOLVE_NO_XDEV: u64 = 0x01;
 const EXT4_SUPER_MAGIC: u64 = 0xef53;
 const EXT4_HTREE_EOF_32BIT: i64 = 0x7fff_ffff;
@@ -110,6 +110,7 @@ impl LinuxStatx {
     }
 
     fn device(&self) -> Device {
+        // Linux always returns the containing device ID, independent of the requested mask.
         Device {
             major: self.device_major,
             minor: self.device_minor,
@@ -136,7 +137,7 @@ pub(super) fn scan(path: &Path, apparent: bool) -> io::Result<ScanReport> {
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path)?;
-    let root_stat = stat_fd(root.as_raw_fd(), STATX_BASIC_STATS)?;
+    let root_stat = stat_fd(root.as_raw_fd(), STATX_TYPE)?;
     if !root_stat.is_directory() {
         return Err(io::Error::new(
             io::ErrorKind::NotADirectory,
@@ -219,12 +220,22 @@ fn scan_entry(
                 skipped_entries,
             )
         }
-        EntryKind::Other | EntryKind::Unknown => {
+        EntryKind::Other => {
+            let stat = stat_at(parent.as_raw_fd(), &entry.name, entry_size_mask(apparent))?;
+            file_item(entry, stat, apparent)
+        }
+        EntryKind::Unknown => {
             let stat = stat_at(
                 parent.as_raw_fd(),
                 &entry.name,
-                entry_metadata_mask(apparent),
+                STATX_TYPE | entry_size_mask(apparent),
             )?;
+            if stat.mask & STATX_TYPE == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "filesystem did not report an unknown entry type",
+                ));
+            }
             if stat.is_directory() {
                 scan_child_directory(
                     parent,
@@ -235,20 +246,18 @@ fn scan_entry(
                     skipped_entries,
                 )
             } else {
-                Ok(file_item(entry, stat, apparent))
+                file_item(entry, stat, apparent)
             }
         }
     }
 }
 
-fn entry_metadata_mask(apparent: bool) -> libc::c_uint {
-    // Unknown dirent types need the mode; file sizes need only the selected accounting field.
-    STATX_TYPE
-        | if apparent {
-            STATX_SIZE
-        } else {
-            STATX_BLOCKS
-        }
+fn entry_size_mask(apparent: bool) -> libc::c_uint {
+    if apparent {
+        STATX_SIZE
+    } else {
+        STATX_BLOCKS
+    }
 }
 
 fn scan_child_directory(
@@ -339,13 +348,20 @@ fn openat_directory(parent_fd: libc::c_int, name: &CString) -> io::Result<File> 
     }
 }
 
-fn file_item(entry: DirectoryEntry, stat: LinuxStatx, apparent: bool) -> DiskItem {
+fn file_item(entry: DirectoryEntry, stat: LinuxStatx, apparent: bool) -> io::Result<DiskItem> {
+    let size_mask = entry_size_mask(apparent);
+    if stat.mask & size_mask != size_mask {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "filesystem did not report the requested file size",
+        ));
+    }
     let size = if apparent { stat.size } else { stat.blocks * 512 };
-    DiskItem {
+    Ok(DiskItem {
         name: OsString::from_vec(entry.name.into_bytes()),
         disk_size: size,
         children: None,
-    }
+    })
 }
 
 fn stat_at(parent_fd: libc::c_int, name: &CString, mask: libc::c_uint) -> io::Result<LinuxStatx> {

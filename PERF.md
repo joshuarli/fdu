@@ -24,9 +24,15 @@ The dirent parser needs NUL-terminated names for `statx` and `openat2`, but the 
 
 `write_item` uses an explicit frame stack when rendering the tree, so output depth does not consume the native call stack.
 
+The root `statx` request now asks only for type; Linux returns the containing-device ID unconditionally. Ext4 dirents with a known non-directory `d_type` request only the selected size field. `DT_UNKNOWN` still requests type and is rejected if the returned mask omits it; all file entries are also rejected if the requested size field is absent. The [`statx(2)` documentation](https://man7.org/linux/man-pages/man2/statx.2.html) defines the mask as the caller's requested and returned fields.
+
 On the 8,192-file ext4 flat-directory fixture, `perf stat -r 30` favored the new storage path in both run orders. In the last same-second pair, task-clock was 8.03 ms before and 5.49 ms after, instructions were 16.07 million and 12.97 million, and elapsed time was 4.196 ms and 3.429 ms. The fixture output compared byte-for-byte. This small fixture and noisy host do not establish a full-tree throughput gain. Raw captures are `target/perf-initial/fdu-name-move-before-30.txt`, `target/perf-initial/fdu-name-move-after-30.txt`, `target/perf-initial/fdu-name-move-before-30b.txt`, and `target/perf-initial/fdu-name-move-after-30b.txt`; the pre-change executable is `target/perf-initial/fdu-name-move-baseline`.
 
 Per-entry filesystem failures still omit that item and any unreadable subtree, but the walker now counts these failures and reports the total on standard error with an incomplete-total warning. An ext4 smoke directory with one inaccessible child produced the warning and retained the readable sibling. Root-level open or enumeration failures remain fatal.
+
+## Large-directory read buffer
+
+The thread-local `getdents64` buffer is 512 KiB. On an ext4 directory containing 8,192 short-name files, the 128 KiB version needed three reads (3,277, 3,276, and 1,641 records); 512 KiB returned all 8,194 records, including `.` and `..`, in one read. Across 30 runs, `perf stat` recorded three versus one `getdents64` calls per scan. Task-clock and elapsed time were effectively unchanged in this fixture. A small nested directory kept the same four-call count and showed no measurable cost. The larger buffer adds at most 1.5 MiB across four workers compared with 128 KiB buffers. These captures show syscall reduction for large directories, not a whole-tree throughput gain: `target/perf-initial/fdu-buffer-128k-flat-30.txt`, `target/perf-initial/fdu-buffer-512k-flat-30.txt`, `target/perf-initial/fdu-buffer-128k-small-30.txt`, `target/perf-initial/fdu-buffer-512k-small-30.txt`, `target/perf-initial/fdu-buffer-128k-flat-strace.txt`, `target/perf-initial/fdu-buffer-512k-flat-strace.txt`.
 
 ## One directory-open syscall
 
