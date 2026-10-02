@@ -6,6 +6,8 @@ Captured 2026-10-02 on the same ext4 `~/d/crabc` workload as the source scanner.
 
 `fdu` sets `RAYON_NUM_THREADS` to four when the user has not set it, then lets Rayon initialize its global pool on first use. A paired syscall pass recorded four worker clones for both implementations. The filesystem syscall counts matched: 995,293 `statx`, 60,226 directory opens, 60,197 `close`, and 120,467 `getdents64`. `fdu` avoided the source CLI's extra root `newlstat`; both paths performed the same root `statx` and recursive filesystem operations.
 
+The default is exactly four even when CPU affinity exposes fewer processors. With the nested fixture pinned to CPU 0 and `RAYON_NUM_THREADS` unset, `perf` counted four worker clones; setting `RAYON_NUM_THREADS=2` under the same affinity counted two.
+
 Three alternating fixed-four captures on a later snapshot again showed matching traversal calls. The path count in the preceding user-readable inventory was 1,055,519.
 
 | Pass | `statx` source / fdu | `getdents64` source / fdu | `futex` source / fdu | Elapsed seconds source / fdu |
@@ -126,7 +128,7 @@ Build an optimized profile with symbols and frame pointers:
 RUSTFLAGS="-C force-frame-pointers=yes" cargo build --locked --profile profiling
 ```
 
-Run as the ordinary user under `perf` so the target keeps its normal filesystem permissions. The default pool is capped at four; omit the variable to measure that default.
+Run as the ordinary user under `perf` so the target keeps its normal filesystem permissions. The default pool has four workers; omit the variable to measure that default.
 
 ```sh
 doas -n /usr/bin/perf stat \

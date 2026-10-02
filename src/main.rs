@@ -13,7 +13,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::process;
 
-const MAX_DEFAULT_RAYON_THREADS: usize = 4;
+const DEFAULT_RAYON_THREADS: usize = 4;
 
 struct DiskItem {
     name_offset: usize,
@@ -192,9 +192,7 @@ fn require_linux_6() -> io::Result<()> {
 // Set the default before Rayon creates its global pool on the first parallel operation.
 fn configure_rayon_threads() {
     if env::var_os("RAYON_NUM_THREADS").is_none() {
-        let workers = std::thread::available_parallelism()
-            .map_or(1, |parallelism| parallelism.get().min(MAX_DEFAULT_RAYON_THREADS));
-        env::set_var("RAYON_NUM_THREADS", workers.to_string());
+        env::set_var("RAYON_NUM_THREADS", DEFAULT_RAYON_THREADS.to_string());
     }
 }
 
