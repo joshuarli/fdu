@@ -949,7 +949,10 @@ fn read_directory(fd: libc::c_int, ext4_eof_cookie: bool) -> io::Result<Director
                 first_batch = false;
             }
             if estimated_entries > 0 {
-                entries.reserve(estimated_entries);
+                let cached_capacity_remaining =
+                    MAX_CACHED_DIRECTORY_ENTRY_CAPACITY.saturating_sub(entries.len());
+                // Keep eager allocation within the reusable-vector limit; larger dirs can grow.
+                entries.reserve(estimated_entries.min(cached_capacity_remaining));
                 // Leave room for common short names while allowing longer names to grow.
                 names.reserve(bytes_read / 4);
             }
@@ -1028,7 +1031,7 @@ fn read_directory(fd: libc::c_int, ext4_eof_cookie: bool) -> io::Result<Director
 mod tests {
     use super::{
         file_device_with_retry, retry_interrupted, scan, Device, DirectoryContents, DirectoryItem,
-        DiskItem,
+        DiskItem, DIRECTORY_ENTRY_POOL, MAX_CACHED_DIRECTORY_ENTRY_CAPACITY,
     };
     use std::cell::Cell;
     use std::error::Error;
@@ -1275,6 +1278,7 @@ mod tests {
             File::create(temporary.0.join(OsString::from_vec(name)))?;
         }
 
+        DIRECTORY_ENTRY_POOL.with(|pool| pool.borrow_mut().clear());
         let report = scan(&temporary.0, false)?;
         assert_eq!(report.skipped_entries, 0);
         assert_eq!(report.root.disk_size, 0);
@@ -1286,6 +1290,15 @@ mod tests {
             }
             DirectoryItem::Skipped => false,
         }));
+        let cached_entry_capacity = DIRECTORY_ENTRY_POOL.with(|pool| {
+            pool.borrow()
+                .iter()
+                .map(Vec::capacity)
+                .max()
+                .unwrap_or(0)
+        });
+        assert!(cached_entry_capacity >= FILE_COUNT);
+        assert!(cached_entry_capacity <= MAX_CACHED_DIRECTORY_ENTRY_CAPACITY);
 
         Ok(())
     }
