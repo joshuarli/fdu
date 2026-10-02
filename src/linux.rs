@@ -13,6 +13,8 @@ use std::sync::{Mutex, TryLockError};
 
 // A 512 KiB buffer reads large ext4 directories in fewer getdents64 calls.
 const DIRECTORY_BUFFER_BYTES: usize = 512 * 1024;
+// A record needs a 19-byte header and at least one NUL byte for its name.
+const MIN_DIRECTORY_RECORD_BYTES: usize = 20;
 const STATX_DONT_SYNC: libc::c_int = 0x4000;
 const STATX_TYPE: libc::c_uint = 0x0001;
 const STATX_SIZE: libc::c_uint = 0x0200;
@@ -744,6 +746,7 @@ fn read_directory(fd: libc::c_int, ext4_eof_cookie: bool) -> io::Result<Director
         let mut buffer = buffer.borrow_mut();
         let mut entries = Vec::new();
         let mut names = Vec::new();
+        let mut first_batch = true;
 
         loop {
             let result = unsafe {
@@ -771,6 +774,17 @@ fn read_directory(fd: libc::c_int, ext4_eof_cookie: bool) -> io::Result<Director
                     io::ErrorKind::InvalidData,
                     "getdents64 returned more data than the supplied buffer",
                 ));
+            }
+            let mut estimated_entries = bytes_read / MIN_DIRECTORY_RECORD_BYTES;
+            if first_batch {
+                // The first batch includes the two dot entries, which are not retained.
+                estimated_entries = estimated_entries.saturating_sub(2);
+                first_batch = false;
+            }
+            if estimated_entries > 0 {
+                entries.reserve(estimated_entries);
+                // Leave room for common short names while allowing longer names to grow.
+                names.reserve(bytes_read / 4);
             }
             let mut offset = 0;
             let mut final_offset = 0;
