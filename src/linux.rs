@@ -1,15 +1,15 @@
-use crate::{DiskItem, ScanReport};
+use crate::{DirectoryContents, DiskItem, ScanReport};
 use rayon::prelude::*;
 use std::cell::RefCell;
-use std::ffi::{CString, OsString};
+use std::ffi::CStr;
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::mem;
 use std::os::fd::{AsRawFd, FromRawFd};
-use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, TryLockError};
 
 // A 512 KiB buffer reads large ext4 directories in fewer getdents64 calls.
 const DIRECTORY_BUFFER_BYTES: usize = 512 * 1024;
@@ -23,22 +23,64 @@ const EXT4_HTREE_EOF_32BIT: i64 = 0x7fff_ffff;
 const EXT4_HTREE_EOF_64BIT: i64 = i64::MAX;
 const S_IFMT: u16 = 0o170000;
 const S_IFDIR: u16 = 0o040000;
+// Switch to heap-backed descent before a deep tree can exhaust a Rayon worker stack.
+const MAX_RECURSIVE_DIRECTORY_DEPTH: usize = 64;
+
+static FILE_LIMIT_LOCK: Mutex<()> = Mutex::new(());
 
 thread_local! {
     static DIRECTORY_BUFFER: RefCell<Vec<u8>> = RefCell::new(vec![0; DIRECTORY_BUFFER_BYTES]);
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
 struct DirectoryEntry {
-    name: CString,
+    name_offset: usize,
+    name_length: u16,
     kind: EntryKind,
 }
 
+struct DirectoryEntries {
+    names: Vec<u8>,
+    entries: Vec<DirectoryEntry>,
+}
+
+struct DirectoryFrame {
+    directory: File,
+    names: Vec<u8>,
+    entries: Vec<DirectoryEntry>,
+    next_entry: usize,
+    items: Vec<DiskItem>,
+    parent_name_offset: Option<usize>,
+    ext4_eof_cookie: bool,
+}
+
+enum ScannedEntry {
+    Item(DiskItem),
+    Directory {
+        directory: File,
+        name_offset: usize,
+        ext4_eof_cookie: bool,
+    },
+}
+
+impl DirectoryEntry {
+    fn as_c_str<'a>(&self, names: &'a [u8]) -> &'a CStr {
+        let end = self.name_offset + usize::from(self.name_length) + 1;
+        CStr::from_bytes_with_nul(&names[self.name_offset..end])
+            .expect("parsed directory name is NUL-terminated")
+    }
+}
+
 #[derive(Clone, Copy)]
+#[repr(u8)]
 enum EntryKind {
     Directory,
     Other,
     Unknown,
 }
+
+const _: [(); 16] = [(); mem::size_of::<DirectoryEntry>()];
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 struct Device {
@@ -129,7 +171,7 @@ impl Device {
 }
 
 pub(super) fn scan(path: &Path, apparent: bool) -> io::Result<ScanReport> {
-    let name = path
+    let root_name = path
         .file_name()
         .unwrap_or_else(|| std::ffi::OsStr::new("."))
         .to_os_string();
@@ -147,39 +189,54 @@ pub(super) fn scan(path: &Path, apparent: bool) -> io::Result<ScanReport> {
 
     let ext4_eof_cookie = is_ext4(root.as_raw_fd());
     let skipped_entries = AtomicUsize::new(0);
-    let tree = scan_directory(
-        name,
+    let root = scan_directory(
         root,
         root_stat.device(),
         apparent,
         ext4_eof_cookie,
+        0,
         &skipped_entries,
     )?;
 
     Ok(ScanReport {
-        tree,
+        root_name,
+        root,
         skipped_entries: skipped_entries.load(Ordering::Relaxed),
     })
 }
 
 fn scan_directory(
-    name: OsString,
     directory: File,
     root_device: Device,
     apparent: bool,
     ext4_eof_cookie: bool,
+    depth: usize,
     skipped_entries: &AtomicUsize,
-) -> io::Result<DiskItem> {
-    let entries = read_directory(directory.as_raw_fd(), ext4_eof_cookie)?;
-    let mut children = entries
+) -> io::Result<DirectoryContents> {
+    if depth >= MAX_RECURSIVE_DIRECTORY_DEPTH {
+        return scan_directory_iterative(
+            directory,
+            root_device,
+            apparent,
+            ext4_eof_cookie,
+            skipped_entries,
+        );
+    }
+
+    let DirectoryEntries { names, entries } =
+        read_directory(directory.as_raw_fd(), ext4_eof_cookie)?;
+    let child_depth = depth + 1;
+    let items = entries
         .into_par_iter()
         .filter_map(|entry| {
             match scan_entry(
                 &directory,
+                &names,
                 entry,
                 root_device,
                 apparent,
                 ext4_eof_cookie,
+                child_depth,
                 skipped_entries,
             ) {
                 Ok(item) => Some(item),
@@ -191,8 +248,15 @@ fn scan_directory(
         })
         .collect::<Vec<_>>();
 
-    children.sort_unstable_by(|left, right| right.disk_size.cmp(&left.disk_size));
-    let disk_size = children
+    finish_directory(names, items)
+}
+
+fn finish_directory(
+    names: Vec<u8>,
+    mut items: Vec<DiskItem>,
+) -> io::Result<DirectoryContents> {
+    items.sort_unstable_by(|left, right| right.disk_size.cmp(&left.disk_size));
+    let disk_size = items
         .iter()
         .try_fold(0u64, |total, child| total.checked_add(child.disk_size))
         .ok_or_else(|| {
@@ -202,40 +266,155 @@ fn scan_directory(
             )
         })?;
 
-    Ok(DiskItem {
-        name,
+    Ok(DirectoryContents {
+        names,
+        items,
         disk_size,
-        children: Some(children),
     })
+}
+
+impl DirectoryFrame {
+    fn new(
+        directory: File,
+        parent_name_offset: Option<usize>,
+        ext4_eof_cookie: bool,
+    ) -> io::Result<Self> {
+        let DirectoryEntries { names, entries } =
+            read_directory(directory.as_raw_fd(), ext4_eof_cookie)?;
+        Ok(Self {
+            directory,
+            names,
+            entries,
+            next_entry: 0,
+            items: Vec::new(),
+            parent_name_offset,
+            ext4_eof_cookie,
+        })
+    }
+}
+
+fn scan_directory_iterative(
+    directory: File,
+    root_device: Device,
+    apparent: bool,
+    ext4_eof_cookie: bool,
+    skipped_entries: &AtomicUsize,
+) -> io::Result<DirectoryContents> {
+    let root = DirectoryFrame::new(directory, None, ext4_eof_cookie)?;
+    let mut stack = vec![root];
+
+    loop {
+        let entry = {
+            let frame = stack.last_mut().expect("root directory frame remains present");
+            match frame.entries.get(frame.next_entry) {
+                Some(entry) => {
+                    frame.next_entry += 1;
+                    Some(*entry)
+                }
+                None => None,
+            }
+        };
+
+        if let Some(entry) = entry {
+            let scanned = {
+                let frame = stack.last().expect("root directory frame remains present");
+                scan_entry_iterative(
+                    &frame.directory,
+                    &frame.names,
+                    entry,
+                    root_device,
+                    apparent,
+                    frame.ext4_eof_cookie,
+                )
+            };
+
+            match scanned {
+                Ok(ScannedEntry::Item(item)) => {
+                    stack
+                        .last_mut()
+                        .expect("root directory frame remains present")
+                        .items
+                        .push(item);
+                }
+                Ok(ScannedEntry::Directory {
+                    directory,
+                    name_offset,
+                    ext4_eof_cookie,
+                }) => match DirectoryFrame::new(directory, Some(name_offset), ext4_eof_cookie) {
+                    Ok(frame) => stack.push(frame),
+                    Err(_) => {
+                        skipped_entries.fetch_add(1, Ordering::Relaxed);
+                    }
+                },
+                Err(_) => {
+                    skipped_entries.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            continue;
+        }
+
+        let frame = stack.pop().expect("root directory frame remains present");
+        let parent_name_offset = frame.parent_name_offset;
+        match finish_directory(frame.names, frame.items) {
+            Ok(contents) => match parent_name_offset {
+                Some(name_offset) => {
+                    stack
+                        .last_mut()
+                        .expect("child directory has a parent frame")
+                        .items
+                        .push(DiskItem {
+                            name_offset,
+                            disk_size: contents.disk_size,
+                            children: Some(Box::new(contents)),
+                        });
+                }
+                None => return Ok(contents),
+            },
+            Err(error) => match parent_name_offset {
+                Some(_) => {
+                    skipped_entries.fetch_add(1, Ordering::Relaxed);
+                }
+                None => return Err(error),
+            },
+        }
+    }
 }
 
 fn scan_entry(
     parent: &File,
+    names: &[u8],
     entry: DirectoryEntry,
     root_device: Device,
     apparent: bool,
     ext4_eof_cookie: bool,
+    child_depth: usize,
     skipped_entries: &AtomicUsize,
 ) -> io::Result<DiskItem> {
     match entry.kind {
         EntryKind::Directory => {
             scan_child_directory(
                 parent,
+                names,
                 entry,
                 root_device,
                 apparent,
                 ext4_eof_cookie,
+                child_depth,
                 skipped_entries,
             )
         }
         EntryKind::Other => {
-            let stat = stat_at(parent.as_raw_fd(), &entry.name, entry_size_mask(apparent))?;
+            let stat = stat_at(
+                parent.as_raw_fd(),
+                entry.as_c_str(names),
+                entry_size_mask(apparent),
+            )?;
             file_item(entry, stat, apparent)
         }
         EntryKind::Unknown => {
             let stat = stat_at(
                 parent.as_raw_fd(),
-                &entry.name,
+                entry.as_c_str(names),
                 STATX_TYPE | entry_size_mask(apparent),
             )?;
             if stat.mask & STATX_TYPE == 0 {
@@ -247,14 +426,57 @@ fn scan_entry(
             if stat.is_directory() {
                 scan_child_directory(
                     parent,
+                    names,
                     entry,
                     root_device,
                     apparent,
                     ext4_eof_cookie,
+                    child_depth,
                     skipped_entries,
                 )
             } else {
                 file_item(entry, stat, apparent)
+            }
+        }
+    }
+}
+
+fn scan_entry_iterative(
+    parent: &File,
+    names: &[u8],
+    entry: DirectoryEntry,
+    root_device: Device,
+    apparent: bool,
+    ext4_eof_cookie: bool,
+) -> io::Result<ScannedEntry> {
+    match entry.kind {
+        EntryKind::Directory => {
+            open_child_entry(parent, names, entry, root_device, ext4_eof_cookie)
+        }
+        EntryKind::Other => {
+            let stat = stat_at(
+                parent.as_raw_fd(),
+                entry.as_c_str(names),
+                entry_size_mask(apparent),
+            )?;
+            file_item(entry, stat, apparent).map(ScannedEntry::Item)
+        }
+        EntryKind::Unknown => {
+            let stat = stat_at(
+                parent.as_raw_fd(),
+                entry.as_c_str(names),
+                STATX_TYPE | entry_size_mask(apparent),
+            )?;
+            if stat.mask & STATX_TYPE == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "filesystem did not report an unknown entry type",
+                ));
+            }
+            if stat.is_directory() {
+                open_child_entry(parent, names, entry, root_device, ext4_eof_cookie)
+            } else {
+                file_item(entry, stat, apparent).map(ScannedEntry::Item)
             }
         }
     }
@@ -270,34 +492,64 @@ fn entry_size_mask(apparent: bool) -> libc::c_uint {
 
 fn scan_child_directory(
     parent: &File,
+    names: &[u8],
     entry: DirectoryEntry,
     root_device: Device,
     apparent: bool,
     ext4_eof_cookie: bool,
+    child_depth: usize,
     skipped_entries: &AtomicUsize,
 ) -> io::Result<DiskItem> {
-    let (child, child_ext4_eof_cookie) =
-        open_child_directory(parent, &entry.name, root_device, ext4_eof_cookie)?;
-    let name = OsString::from_vec(entry.name.into_bytes());
-
-    scan_directory(
-        name,
+    let (child, child_ext4_eof_cookie) = open_child_directory(
+        parent,
+        entry.as_c_str(names),
+        root_device,
+        ext4_eof_cookie,
+    )?;
+    let contents = scan_directory(
         child,
         root_device,
         apparent,
         child_ext4_eof_cookie,
+        child_depth,
         skipped_entries,
-    )
+    )?;
+
+    Ok(DiskItem {
+        name_offset: entry.name_offset,
+        disk_size: contents.disk_size,
+        children: Some(Box::new(contents)),
+    })
+}
+
+fn open_child_entry(
+    parent: &File,
+    names: &[u8],
+    entry: DirectoryEntry,
+    root_device: Device,
+    ext4_eof_cookie: bool,
+) -> io::Result<ScannedEntry> {
+    let (child, child_ext4_eof_cookie) = open_child_directory(
+        parent,
+        entry.as_c_str(names),
+        root_device,
+        ext4_eof_cookie,
+    )?;
+    Ok(ScannedEntry::Directory {
+        directory: child,
+        name_offset: entry.name_offset,
+        ext4_eof_cookie: child_ext4_eof_cookie,
+    })
 }
 
 // A no-cross-mount open inherits the parent's device; the fallback checks st_dev explicitly.
 fn open_child_directory(
     parent: &File,
-    name: &CString,
+    name: &CStr,
     root_device: Device,
     ext4_eof_cookie: bool,
 ) -> io::Result<(File, bool)> {
-    match openat2_directory(parent.as_raw_fd(), name) {
+    match open_with_nofile_retry(|| openat2_directory(parent.as_raw_fd(), name)) {
         Ok(child) => Ok((child, ext4_eof_cookie)),
         Err(error)
             if matches!(
@@ -306,7 +558,7 @@ fn open_child_directory(
             ) =>
         {
             // The fallback checks st_dev so same-device bind mounts keep the existing behavior.
-            let child = openat_directory(parent.as_raw_fd(), name)?;
+            let child = open_with_nofile_retry(|| openat_directory(parent.as_raw_fd(), name))?;
             if Device::from_raw(child.metadata()?.dev()) != root_device {
                 return Err(io::Error::new(
                     io::ErrorKind::Other,
@@ -319,7 +571,62 @@ fn open_child_directory(
     }
 }
 
-fn openat2_directory(parent_fd: libc::c_int, name: &CString) -> io::Result<File> {
+// Directory descriptors stay open during descent; increase the process soft limit only on EMFILE.
+fn open_with_nofile_retry(
+    mut open: impl FnMut() -> io::Result<File>,
+) -> io::Result<File> {
+    loop {
+        match open() {
+            Err(error) if error.raw_os_error() == Some(libc::EMFILE) => {
+                raise_soft_nofile_limit()?;
+            }
+            result => return result,
+        }
+    }
+}
+
+fn raise_soft_nofile_limit() -> io::Result<()> {
+    let _guard = match FILE_LIMIT_LOCK.try_lock() {
+        Ok(guard) => guard,
+        Err(TryLockError::WouldBlock) => {
+            drop(
+                FILE_LIMIT_LOCK
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            );
+            return Ok(());
+        }
+        Err(TryLockError::Poisoned(error)) => error.into_inner(),
+    };
+
+    let mut limit = mem::MaybeUninit::<libc::rlimit>::uninit();
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, limit.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut limit = unsafe { limit.assume_init() };
+    if limit.rlim_cur >= limit.rlim_max {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "process reached its hard file descriptor limit",
+        ));
+    }
+
+    let increment = limit.rlim_cur.max(256);
+    let next_soft = limit.rlim_cur.saturating_add(increment).min(limit.rlim_max);
+    if next_soft <= limit.rlim_cur {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "process file descriptor limit cannot be increased",
+        ));
+    }
+    limit.rlim_cur = next_soft;
+    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn openat2_directory(parent_fd: libc::c_int, name: &CStr) -> io::Result<File> {
     let how = OpenHow {
         flags: (libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) as u64,
         mode: 0,
@@ -341,7 +648,7 @@ fn openat2_directory(parent_fd: libc::c_int, name: &CString) -> io::Result<File>
     }
 }
 
-fn openat_directory(parent_fd: libc::c_int, name: &CString) -> io::Result<File> {
+fn openat_directory(parent_fd: libc::c_int, name: &CStr) -> io::Result<File> {
     let child_fd = unsafe {
         libc::openat(
             parent_fd,
@@ -375,13 +682,13 @@ fn file_item(entry: DirectoryEntry, stat: LinuxStatx, apparent: bool) -> io::Res
         })?
     };
     Ok(DiskItem {
-        name: OsString::from_vec(entry.name.into_bytes()),
+        name_offset: entry.name_offset,
         disk_size: size,
         children: None,
     })
 }
 
-fn stat_at(parent_fd: libc::c_int, name: &CString, mask: libc::c_uint) -> io::Result<LinuxStatx> {
+fn stat_at(parent_fd: libc::c_int, name: &CStr, mask: libc::c_uint) -> io::Result<LinuxStatx> {
     statx(
         parent_fd,
         name.as_ptr(),
@@ -432,10 +739,11 @@ fn statx(
     }
 }
 
-fn read_directory(fd: libc::c_int, ext4_eof_cookie: bool) -> io::Result<Vec<DirectoryEntry>> {
+fn read_directory(fd: libc::c_int, ext4_eof_cookie: bool) -> io::Result<DirectoryEntries> {
     DIRECTORY_BUFFER.with(|buffer| {
         let mut buffer = buffer.borrow_mut();
         let mut entries = Vec::new();
+        let mut names = Vec::new();
 
         loop {
             let result = unsafe {
@@ -506,10 +814,20 @@ fn read_directory(fd: libc::c_int, ext4_eof_cookie: bool) -> io::Result<Vec<Dire
                 }
 
                 if name_bytes != b"." && name_bytes != b".." {
-                    let name = CString::new(name_bytes).map_err(|_| {
-                        io::Error::new(io::ErrorKind::InvalidData, "invalid directory entry name")
+                    let length = u16::try_from(name_bytes.len()).map_err(|_| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "directory entry name exceeds the supported length",
+                        )
                     })?;
-                    entries.push(DirectoryEntry { name, kind });
+                    let start = names.len();
+                    names.extend_from_slice(name_bytes);
+                    names.push(0);
+                    entries.push(DirectoryEntry {
+                        name_offset: start,
+                        name_length: length,
+                        kind,
+                    });
                 }
                 offset += record_length;
             }
@@ -521,6 +839,6 @@ fn read_directory(fd: libc::c_int, ext4_eof_cookie: bool) -> io::Result<Vec<Dire
             }
         }
 
-        Ok(entries)
+        Ok(DirectoryEntries { names, entries })
     })
 }

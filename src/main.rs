@@ -14,15 +14,33 @@ use std::process;
 
 const MAX_DEFAULT_RAYON_THREADS: usize = 4;
 
-pub(crate) struct DiskItem {
-    name: OsString,
+struct DiskItem {
+    name_offset: usize,
     disk_size: u64,
-    children: Option<Vec<DiskItem>>,
+    children: Option<Box<DirectoryContents>>,
 }
 
-pub(crate) struct ScanReport {
-    pub(crate) tree: DiskItem,
-    pub(crate) skipped_entries: usize,
+struct DirectoryContents {
+    names: Vec<u8>,
+    items: Vec<DiskItem>,
+    disk_size: u64,
+}
+
+struct ScanReport {
+    root_name: OsString,
+    root: DirectoryContents,
+    skipped_entries: usize,
+}
+
+impl DirectoryContents {
+    fn name_bytes(&self, offset: usize) -> &[u8] {
+        let name_and_terminator = &self.names[offset..];
+        let length = name_and_terminator
+            .iter()
+            .position(|byte| *byte == 0)
+            .expect("directory name has a terminator");
+        &name_and_terminator[..length]
+    }
 }
 
 struct Options {
@@ -57,7 +75,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
     let stdout = io::stdout();
     let mut output = BufWriter::new(stdout.lock());
-    write_item(&report.tree, 0, &mut output)?;
+    write_tree(&report.root_name, &report.root, &mut output)?;
     Ok(())
 }
 
@@ -157,16 +175,24 @@ fn print_help() {
 }
 
 struct OutputFrame<'a> {
-    item: &'a DiskItem,
+    name: &'a [u8],
+    disk_size: u64,
+    directory: Option<&'a DirectoryContents>,
     depth: usize,
     wrote_item: bool,
     next_child: usize,
 }
 
-fn write_item(item: &DiskItem, depth: usize, output: &mut impl Write) -> io::Result<()> {
+fn write_tree(
+    root_name: &std::ffi::OsStr,
+    root: &DirectoryContents,
+    output: &mut impl Write,
+) -> io::Result<()> {
     let mut stack = vec![OutputFrame {
-        item,
-        depth,
+        name: root_name.as_bytes(),
+        disk_size: root.disk_size,
+        directory: Some(root),
+        depth: 0,
         wrote_item: false,
         next_child: 0,
     }];
@@ -176,28 +202,36 @@ fn write_item(item: &DiskItem, depth: usize, output: &mut impl Write) -> io::Res
             for _ in 0..frame.depth {
                 output.write_all(b"  ")?;
             }
-            write!(output, "{}\t", frame.item.disk_size)?;
-            write_name(&frame.item.name, output)?;
+            write!(output, "{}\t", frame.disk_size)?;
+            write_name(frame.name, output)?;
             output.write_all(b"\n")?;
             frame.wrote_item = true;
         }
 
         let next_child = {
             let frame = stack.last_mut().expect("output frame is present");
-            let child = frame
-                .item
-                .children
-                .as_ref()
-                .and_then(|children| children.get(frame.next_child));
-            if child.is_some() {
-                frame.next_child += 1;
+            match frame.directory {
+                Some(directory) => match directory.items.get(frame.next_child) {
+                    Some(child) => {
+                        frame.next_child += 1;
+                        Some((
+                            directory.name_bytes(child.name_offset),
+                            child.disk_size,
+                            child.children.as_deref(),
+                            frame.depth + 1,
+                        ))
+                    }
+                    None => None,
+                },
+                None => None,
             }
-            child.map(|child| (child, frame.depth + 1))
         };
 
-        if let Some((child, depth)) = next_child {
+        if let Some((name, disk_size, directory, depth)) = next_child {
             stack.push(OutputFrame {
-                item: child,
+                name,
+                disk_size,
+                directory,
                 depth,
                 wrote_item: false,
                 next_child: 0,
@@ -210,8 +244,7 @@ fn write_item(item: &DiskItem, depth: usize, output: &mut impl Write) -> io::Res
     Ok(())
 }
 
-fn write_name(name: &std::ffi::OsStr, output: &mut impl Write) -> io::Result<()> {
-    let bytes = name.as_bytes();
+fn write_name(bytes: &[u8], output: &mut impl Write) -> io::Result<()> {
     if let Ok(text) = std::str::from_utf8(bytes) {
         let mut segment_start = 0;
         for (byte_index, character) in text.char_indices() {
