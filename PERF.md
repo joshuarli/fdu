@@ -20,9 +20,11 @@ A ten-scan on-CPU profile of `fdu` recorded 7,333 samples with zero lost. `ext4_
 
 ## Reuse directory-name storage
 
-The dirent parser needs NUL-terminated names for `statx` and `openat2`, but the completed tree only needs each name for output. `scan_child_directory` and `file_item` now consume each `CString` buffer into an `OsString`, so valid UTF-8 names can be written through a borrowed lossy view without allocating a second `String` per path. The command output remains unchanged.
+The dirent parser needs NUL-terminated names for `statx` and `openat2`, but the completed tree only needs each name for output. `scan_child_directory` and `file_item` now consume each `CString` buffer into an `OsString`, avoiding a second owned name allocation per path. Ordinary UTF-8 names retain their output; backslashes, control characters, and invalid UTF-8 bytes are escaped to keep each item on one line.
 
 On the 8,192-file ext4 flat-directory fixture, `perf stat -r 30` favored the new storage path in both run orders. In the last same-second pair, task-clock was 8.03 ms before and 5.49 ms after, instructions were 16.07 million and 12.97 million, and elapsed time was 4.196 ms and 3.429 ms. The fixture output compared byte-for-byte. This small fixture and noisy host do not establish a full-tree throughput gain. Raw captures are `target/perf-initial/fdu-name-move-before-30.txt`, `target/perf-initial/fdu-name-move-after-30.txt`, `target/perf-initial/fdu-name-move-before-30b.txt`, and `target/perf-initial/fdu-name-move-after-30b.txt`; the pre-change executable is `target/perf-initial/fdu-name-move-baseline`.
+
+Per-entry filesystem failures still omit that item and any unreadable subtree, but the walker now counts these failures and reports the total on standard error with an incomplete-total warning. An ext4 smoke directory with one inaccessible child produced the warning and retained the readable sibling. Root-level open or enumeration failures remain fatal.
 
 ## One directory-open syscall
 

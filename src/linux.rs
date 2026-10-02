@@ -1,4 +1,4 @@
-use crate::DiskItem;
+use crate::{DiskItem, ScanReport};
 use rayon::prelude::*;
 use std::cell::RefCell;
 use std::ffi::{CString, OsString};
@@ -9,6 +9,7 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const DIRECTORY_BUFFER_BYTES: usize = 128 * 1024;
 const STATX_DONT_SYNC: libc::c_int = 0x4000;
@@ -89,6 +90,16 @@ struct OpenHow {
     resolve: u64,
 }
 
+// These offsets must match the fixed-width structures passed directly to Linux syscalls.
+const _: [(); 256] = [(); mem::size_of::<LinuxStatx>()];
+const _: [(); 28] = [(); mem::offset_of!(LinuxStatx, mode)];
+const _: [(); 40] = [(); mem::offset_of!(LinuxStatx, size)];
+const _: [(); 48] = [(); mem::offset_of!(LinuxStatx, blocks)];
+const _: [(); 136] = [(); mem::offset_of!(LinuxStatx, device_major)];
+const _: [(); 24] = [(); mem::size_of::<OpenHow>()];
+const _: [(); 8] = [(); mem::offset_of!(OpenHow, mode)];
+const _: [(); 16] = [(); mem::offset_of!(OpenHow, resolve)];
+
 impl LinuxStatx {
     fn zeroed() -> Self {
         unsafe { mem::zeroed() }
@@ -116,7 +127,7 @@ impl Device {
     }
 }
 
-pub(super) fn scan(path: &Path, apparent: bool) -> io::Result<DiskItem> {
+pub(super) fn scan(path: &Path, apparent: bool) -> io::Result<ScanReport> {
     let name = path
         .file_name()
         .unwrap_or_else(|| std::ffi::OsStr::new("."))
@@ -134,7 +145,20 @@ pub(super) fn scan(path: &Path, apparent: bool) -> io::Result<DiskItem> {
     }
 
     let ext4_eof_cookie = is_ext4(root.as_raw_fd());
-    scan_directory(name, root, root_stat.device(), apparent, ext4_eof_cookie)
+    let skipped_entries = AtomicUsize::new(0);
+    let tree = scan_directory(
+        name,
+        root,
+        root_stat.device(),
+        apparent,
+        ext4_eof_cookie,
+        &skipped_entries,
+    )?;
+
+    Ok(ScanReport {
+        tree,
+        skipped_entries: skipped_entries.load(Ordering::Relaxed),
+    })
 }
 
 fn scan_directory(
@@ -143,12 +167,26 @@ fn scan_directory(
     root_device: Device,
     apparent: bool,
     ext4_eof_cookie: bool,
+    skipped_entries: &AtomicUsize,
 ) -> io::Result<DiskItem> {
     let entries = read_directory(directory.as_raw_fd(), ext4_eof_cookie)?;
     let mut children = entries
         .into_par_iter()
         .filter_map(|entry| {
-            scan_entry(&directory, entry, root_device, apparent, ext4_eof_cookie).ok()
+            match scan_entry(
+                &directory,
+                entry,
+                root_device,
+                apparent,
+                ext4_eof_cookie,
+                skipped_entries,
+            ) {
+                Ok(item) => Some(item),
+                Err(_) => {
+                    skipped_entries.fetch_add(1, Ordering::Relaxed);
+                    None
+                }
+            }
         })
         .collect::<Vec<_>>();
 
@@ -168,10 +206,18 @@ fn scan_entry(
     root_device: Device,
     apparent: bool,
     ext4_eof_cookie: bool,
+    skipped_entries: &AtomicUsize,
 ) -> io::Result<DiskItem> {
     match entry.kind {
         EntryKind::Directory => {
-            scan_child_directory(parent, entry, root_device, apparent, ext4_eof_cookie)
+            scan_child_directory(
+                parent,
+                entry,
+                root_device,
+                apparent,
+                ext4_eof_cookie,
+                skipped_entries,
+            )
         }
         EntryKind::Other | EntryKind::Unknown => {
             let stat = stat_at(
@@ -180,7 +226,14 @@ fn scan_entry(
                 entry_metadata_mask(apparent),
             )?;
             if stat.is_directory() {
-                scan_child_directory(parent, entry, root_device, apparent, ext4_eof_cookie)
+                scan_child_directory(
+                    parent,
+                    entry,
+                    root_device,
+                    apparent,
+                    ext4_eof_cookie,
+                    skipped_entries,
+                )
             } else {
                 Ok(file_item(entry, stat, apparent))
             }
@@ -204,6 +257,7 @@ fn scan_child_directory(
     root_device: Device,
     apparent: bool,
     ext4_eof_cookie: bool,
+    skipped_entries: &AtomicUsize,
 ) -> io::Result<DiskItem> {
     let (child, child_ext4_eof_cookie) =
         open_child_directory(parent, &entry.name, root_device, ext4_eof_cookie)?;
@@ -215,6 +269,7 @@ fn scan_child_directory(
         root_device,
         apparent,
         child_ext4_eof_cookie,
+        skipped_entries,
     )
 }
 

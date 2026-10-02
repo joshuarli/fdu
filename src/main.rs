@@ -8,6 +8,7 @@ use std::error::Error;
 use std::ffi::{CStr, OsString};
 use std::io::{self, BufWriter, Write};
 use std::mem::MaybeUninit;
+use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::process;
 
@@ -17,6 +18,11 @@ pub(crate) struct DiskItem {
     name: OsString,
     disk_size: u64,
     children: Option<Vec<DiskItem>>,
+}
+
+pub(crate) struct ScanReport {
+    pub(crate) tree: DiskItem,
+    pub(crate) skipped_entries: usize,
 }
 
 struct Options {
@@ -42,10 +48,16 @@ fn run() -> Result<(), Box<dyn Error>> {
     require_linux_6()?;
     configure_rayon_threads();
 
-    let tree = linux::scan(&options.path, options.apparent)?;
+    let report = linux::scan(&options.path, options.apparent)?;
+    if report.skipped_entries != 0 {
+        eprintln!(
+            "fdu: warning: skipped {} entries after filesystem errors; size totals may be incomplete",
+            report.skipped_entries
+        );
+    }
     let stdout = io::stdout();
     let mut output = BufWriter::new(stdout.lock());
-    write_item(&tree, 0, &mut output)?;
+    write_item(&report.tree, 0, &mut output)?;
     Ok(())
 }
 
@@ -148,7 +160,9 @@ fn write_item(item: &DiskItem, depth: usize, output: &mut impl Write) -> io::Res
     for _ in 0..depth {
         output.write_all(b"  ")?;
     }
-    writeln!(output, "{}\t{}", item.disk_size, item.name.to_string_lossy())?;
+    write!(output, "{}\t", item.disk_size)?;
+    write_name(&item.name, output)?;
+    output.write_all(b"\n")?;
 
     if let Some(children) = &item.children {
         for child in children {
@@ -156,4 +170,61 @@ fn write_item(item: &DiskItem, depth: usize, output: &mut impl Write) -> io::Res
         }
     }
     Ok(())
+}
+
+fn write_name(name: &std::ffi::OsStr, output: &mut impl Write) -> io::Result<()> {
+    let bytes = name.as_bytes();
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        let mut segment_start = 0;
+        for (byte_index, character) in text.char_indices() {
+            let escape = match character {
+                '\\' => Some(&b"\\\\"[..]),
+                '\t' => Some(&b"\\t"[..]),
+                '\n' => Some(&b"\\n"[..]),
+                '\r' => Some(&b"\\r"[..]),
+                _ => None,
+            };
+            if escape.is_none() && !character.is_control() {
+                continue;
+            }
+
+            output.write_all(&bytes[segment_start..byte_index])?;
+            if let Some(escape) = escape {
+                output.write_all(escape)?;
+            } else {
+                write!(output, "\\u{{{:x}}}", character as u32)?;
+            }
+            segment_start = byte_index + character.len_utf8();
+        }
+        return output.write_all(&bytes[segment_start..]);
+    }
+
+    let mut segment_start = 0;
+    for (byte_index, byte) in bytes.iter().copied().enumerate() {
+        let escape = match byte {
+            b'\\' => Some(&b"\\\\"[..]),
+            b'\t' => Some(&b"\\t"[..]),
+            b'\n' => Some(&b"\\n"[..]),
+            b'\r' => Some(&b"\\r"[..]),
+            b' '..=b'~' => None,
+            _ => None,
+        };
+        let escaped_byte = byte != b'\\'
+            && byte != b'\t'
+            && byte != b'\n'
+            && byte != b'\r'
+            && !(b' '..=b'~').contains(&byte);
+        if escape.is_none() && !escaped_byte {
+            continue;
+        }
+
+        output.write_all(&bytes[segment_start..byte_index])?;
+        if let Some(escape) = escape {
+            output.write_all(escape)?;
+        } else {
+            write!(output, "\\x{byte:02x}")?;
+        }
+        segment_start = byte_index + 1;
+    }
+    output.write_all(&bytes[segment_start..])
 }
