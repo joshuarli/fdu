@@ -33,7 +33,7 @@ Generate a fresh fixture on the filesystem to be measured. The generated directo
     target/release/fdu perf/fixture
     target/release/fdu --apparent perf/fixture
 
-The default contains 84,736 directories and 1,098,240 tiny files, or 1,182,976 entries. One in sixteen files contains one, four, or eight bytes; the rest are empty. This matches a roughly 1.2-million-entry workload while retaining a regular two-level layout, so directory fanout and depth match only in aggregate. For a larger scan, use explicit counts such as 128 top-level directories, 32 subdirectories per top-level directory, and 512 files per subdirectory (2,097,152 files total). Ensure the target filesystem has enough free inodes before choosing large counts.
+The default contains 85,772 directories and 1,218,248 tiny files, or 1,304,020 entries. Four top-level directories each contain 30,000 files to exercise large directory reads. Eight chains each add 128 nested directory levels to exercise the iterative scanner. About one in sixteen files contains one, four, or eight bytes; the rest are empty. A local release run took about 0.26 seconds, so 78 repetitions produce a batch near 20 seconds. Adjust the repetition count after a warm single scan on the target filesystem. For a larger scan, use explicit counts such as 128 top-level directories, 32 subdirectories per top-level directory, and 512 files per subdirectory (2,097,152 files total). Ensure the target filesystem has enough free inodes before choosing large counts.
 
 The integration test builds a small instance of the same shape in a temporary directory. It verifies that only immediate directories are printed and that each size includes nested files in allocated and apparent modes.
 
@@ -41,7 +41,7 @@ The integration test builds a small instance of the same shape in a temporary di
 
 Store selected, human-readable captures in the tracked perf/captures directory, never under target. Keep each capture with its command, source revision, kernel, filesystem, and generator parameters. Preserve perf stat output and a perf report --stdio export; add raw perf.data only when it is useful alongside the rendered report. Do not commit generated fixture trees or full scan output.
 
-Build the profiling executable, set workload_dir to the generated fixture, then capture filesystem counters:
+Build the profiling executable, set workload_dir to the generated fixture, then capture filesystem counters for a single scan:
 
     workload_dir=perf/fixture
     mkdir -p perf/captures
@@ -53,6 +53,14 @@ Build the profiling executable, set workload_dir to the generated fixture, then 
       target/profiling/fdu "$workload_dir" >/dev/null
 
 For an on-CPU profile, use perf record with frame-pointer call stacks and write the data under perf/captures. The counter tracepoints describe call counts, not latency. Do not drop caches globally.
+
+To collect a longer release batch, wrap repeated scans in perf stat. Keep the repetition count fixed when comparing revisions:
+
+    RAYON_NUM_THREADS=4 perf stat -e task-clock:u,cycles:u,instructions:u -- \
+      bash -c 'for run in {1..78}; do target/release/fdu "$1" >/dev/null || exit; done' \
+      bash "$workload_dir"
+
+On the generated fixture, a 78-scan release batch took 21.5 seconds. A separate syscall-count pass observed 1,218,248 statx calls, 85,772 openat2 calls, 85,777 getdents64 calls, and 85,773 closes. The strace run perturbs timing; use it for call counts only.
 
 ## Findings and next work
 
