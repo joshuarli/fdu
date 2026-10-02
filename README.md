@@ -16,4 +16,6 @@ At depth 64, traversal switches to an explicit directory stack to avoid consumin
 
 The scan reads a live directory tree, not an atomic filesystem snapshot. Changes made during traversal may be observed at different points in time.
 
+Metadata queries do not force synchronization with remote filesystems, so network filesystem results may reflect cached, approximate metadata.
+
 The default Rayon pool has four workers. Set `RAYON_NUM_THREADS` to choose another count.

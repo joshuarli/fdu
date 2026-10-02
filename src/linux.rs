@@ -21,6 +21,7 @@ const MIN_DIRECTORY_RECORD_BYTES: usize = 20;
 // These limits retain at most 512 KiB of parsed records in each scanning thread's pool.
 const MAX_CACHED_DIRECTORY_ENTRY_CAPACITY: usize = 4096;
 const MAX_CACHED_DIRECTORY_ENTRY_VECTORS: usize = 8;
+// Avoid forcing remote metadata refreshes; remote results may reflect cached state.
 const STATX_DONT_SYNC: libc::c_int = 0x4000;
 const STATX_TYPE: libc::c_uint = 0x0001;
 const STATX_SIZE: libc::c_uint = 0x0200;
