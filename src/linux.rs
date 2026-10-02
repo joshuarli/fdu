@@ -4,10 +4,13 @@ use std::cell::RefCell;
 use std::ffi::CStr;
 use std::fs::{File, OpenOptions};
 use std::io;
+use std::marker::PhantomData;
 use std::mem;
+use std::ops::{Deref, DerefMut};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, TryLockError};
 
@@ -15,6 +18,9 @@ use std::sync::{Mutex, TryLockError};
 const DIRECTORY_BUFFER_BYTES: usize = 512 * 1024;
 // A record needs a 19-byte header and at least one NUL byte for its name.
 const MIN_DIRECTORY_RECORD_BYTES: usize = 20;
+// These limits retain at most 512 KiB of parsed records in each scanning thread's pool.
+const MAX_CACHED_DIRECTORY_ENTRY_CAPACITY: usize = 4096;
+const MAX_CACHED_DIRECTORY_ENTRY_VECTORS: usize = 8;
 const STATX_DONT_SYNC: libc::c_int = 0x4000;
 const STATX_TYPE: libc::c_uint = 0x0001;
 const STATX_SIZE: libc::c_uint = 0x0200;
@@ -42,15 +48,65 @@ struct DirectoryEntry {
     kind: EntryKind,
 }
 
+thread_local! {
+    static DIRECTORY_ENTRY_POOL: RefCell<Vec<Vec<DirectoryEntry>>> = RefCell::new(Vec::new());
+}
+
+// The Rc marker keeps each buffer lease on the thread whose TLS pool owns its capacity.
+struct PooledDirectoryEntries {
+    entries: Vec<DirectoryEntry>,
+    _worker: PhantomData<Rc<()>>,
+}
+
+impl PooledDirectoryEntries {
+    fn take() -> Self {
+        let entries = DIRECTORY_ENTRY_POOL.with(|pool| pool.borrow_mut().pop().unwrap_or_default());
+        Self {
+            entries,
+            _worker: PhantomData,
+        }
+    }
+}
+
+impl Deref for PooledDirectoryEntries {
+    type Target = Vec<DirectoryEntry>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.entries
+    }
+}
+
+impl DerefMut for PooledDirectoryEntries {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.entries
+    }
+}
+
+impl Drop for PooledDirectoryEntries {
+    fn drop(&mut self) {
+        if self.entries.capacity() > MAX_CACHED_DIRECTORY_ENTRY_CAPACITY {
+            return;
+        }
+        self.entries.clear();
+        let entries = mem::take(&mut self.entries);
+        let _ = DIRECTORY_ENTRY_POOL.try_with(|pool| {
+            let mut pool = pool.borrow_mut();
+            if pool.len() < MAX_CACHED_DIRECTORY_ENTRY_VECTORS {
+                pool.push(entries);
+            }
+        });
+    }
+}
+
 struct DirectoryEntries {
     names: Vec<u8>,
-    entries: Vec<DirectoryEntry>,
+    entries: PooledDirectoryEntries,
 }
 
 struct DirectoryFrame {
     directory: File,
     names: Vec<u8>,
-    entries: Vec<DirectoryEntry>,
+    entries: PooledDirectoryEntries,
     next_entry: usize,
     items: Vec<DirectoryItem>,
     parent_name_offset: Option<usize>,
@@ -848,7 +904,7 @@ fn retry_interrupted<T>(mut operation: impl FnMut() -> io::Result<T>) -> io::Res
 fn read_directory(fd: libc::c_int, ext4_eof_cookie: bool) -> io::Result<DirectoryEntries> {
     DIRECTORY_BUFFER.with(|buffer| {
         let mut buffer = buffer.borrow_mut();
-        let mut entries = Vec::new();
+        let mut entries = PooledDirectoryEntries::take();
         let mut names = Vec::new();
         let mut first_batch = true;
 
@@ -1029,6 +1085,38 @@ mod tests {
 
         assert_eq!(result.unwrap(), 17);
         assert_eq!(attempts.get(), 2);
+    }
+
+    #[test]
+    fn reuses_small_entry_vectors_and_drops_oversized_ones() {
+        let mut entries = super::PooledDirectoryEntries::take();
+        entries.reserve(64);
+        let cached_capacity = entries.capacity();
+        assert!(cached_capacity <= super::MAX_CACHED_DIRECTORY_ENTRY_CAPACITY);
+        drop(entries);
+
+        let entries = super::PooledDirectoryEntries::take();
+        assert_eq!(entries.capacity(), cached_capacity);
+        drop(entries);
+
+        let mut oversized = super::PooledDirectoryEntries::take();
+        oversized.reserve(super::MAX_CACHED_DIRECTORY_ENTRY_CAPACITY + 1);
+        assert!(oversized.capacity() > super::MAX_CACHED_DIRECTORY_ENTRY_CAPACITY);
+        drop(oversized);
+
+        let replacement = super::PooledDirectoryEntries::take();
+        assert!(replacement.capacity() <= super::MAX_CACHED_DIRECTORY_ENTRY_CAPACITY);
+        drop(replacement);
+
+        let mut buffers = (0..=super::MAX_CACHED_DIRECTORY_ENTRY_VECTORS)
+            .map(|_| super::PooledDirectoryEntries::take())
+            .collect::<Vec<_>>();
+        for buffer in &mut buffers {
+            buffer.reserve(1);
+        }
+        drop(buffers);
+        let cached_count = super::DIRECTORY_ENTRY_POOL.with(|pool| pool.borrow().len());
+        assert_eq!(cached_count, super::MAX_CACHED_DIRECTORY_ENTRY_VECTORS);
     }
 
     #[test]
