@@ -156,19 +156,57 @@ fn print_help() {
     println!("By default, sizes are allocated bytes; --apparent uses logical lengths.");
 }
 
-fn write_item(item: &DiskItem, depth: usize, output: &mut impl Write) -> io::Result<()> {
-    for _ in 0..depth {
-        output.write_all(b"  ")?;
-    }
-    write!(output, "{}\t", item.disk_size)?;
-    write_name(&item.name, output)?;
-    output.write_all(b"\n")?;
+struct OutputFrame<'a> {
+    item: &'a DiskItem,
+    depth: usize,
+    wrote_item: bool,
+    next_child: usize,
+}
 
-    if let Some(children) = &item.children {
-        for child in children {
-            write_item(child, depth + 1, output)?;
+fn write_item(item: &DiskItem, depth: usize, output: &mut impl Write) -> io::Result<()> {
+    let mut stack = vec![OutputFrame {
+        item,
+        depth,
+        wrote_item: false,
+        next_child: 0,
+    }];
+
+    while let Some(frame) = stack.last_mut() {
+        if !frame.wrote_item {
+            for _ in 0..frame.depth {
+                output.write_all(b"  ")?;
+            }
+            write!(output, "{}\t", frame.item.disk_size)?;
+            write_name(&frame.item.name, output)?;
+            output.write_all(b"\n")?;
+            frame.wrote_item = true;
+        }
+
+        let next_child = {
+            let frame = stack.last_mut().expect("output frame is present");
+            let child = frame
+                .item
+                .children
+                .as_ref()
+                .and_then(|children| children.get(frame.next_child));
+            if child.is_some() {
+                frame.next_child += 1;
+            }
+            child.map(|child| (child, frame.depth + 1))
+        };
+
+        if let Some((child, depth)) = next_child {
+            stack.push(OutputFrame {
+                item: child,
+                depth,
+                wrote_item: false,
+                next_child: 0,
+            });
+        } else {
+            stack.pop();
         }
     }
+
     Ok(())
 }
 
