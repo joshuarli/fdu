@@ -125,8 +125,8 @@ enum ScannedEntry {
 impl DirectoryEntry {
     fn as_c_str<'a>(&self, names: &'a [u8]) -> &'a CStr {
         let end = self.name_offset + usize::from(self.name_length) + 1;
-        CStr::from_bytes_with_nul(&names[self.name_offset..end])
-            .expect("parsed directory name is NUL-terminated")
+        // read_directory copies only the bytes before the first NUL and appends one terminator.
+        unsafe { CStr::from_bytes_with_nul_unchecked(&names[self.name_offset..end]) }
     }
 }
 
@@ -1022,8 +1022,10 @@ mod tests {
     use super::{retry_interrupted, scan, DirectoryContents, DirectoryItem, DiskItem};
     use std::cell::Cell;
     use std::error::Error;
+    use std::ffi::OsString;
     use std::fs::{self, File};
     use std::io;
+    use std::os::unix::ffi::OsStringExt;
     use std::os::unix::fs::{symlink, MetadataExt};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1149,6 +1151,8 @@ mod tests {
         let payload = root.join("payload.bin");
         let hardlink = root.join("payload-hardlink.bin");
         let sparse = root.join("sparse.bin");
+        let invalid_name = OsString::from_vec(b"invalid-\xff-name".to_vec());
+        let invalid_path = root.join(&invalid_name);
         let symlink_path = root.join("payload-link");
         let nested = root.join("nested");
         let nested_payload = nested.join("nested.bin");
@@ -1157,6 +1161,7 @@ mod tests {
         fs::write(&payload, vec![0x5a; 8 * 1024])?;
         fs::hard_link(&payload, &hardlink)?;
         File::create(&sparse)?.set_len(1024 * 1024)?;
+        fs::write(&invalid_path, b"raw bytes")?;
         symlink("payload.bin", &symlink_path)?;
         fs::create_dir(&nested)?;
         fs::write(&nested_payload, vec![0x31; 257])?;
@@ -1170,10 +1175,12 @@ mod tests {
         };
         let expected_allocated = allocated_size(&payload)? * 2
             + allocated_size(&sparse)?
+            + allocated_size(&invalid_path)?
             + allocated_size(&symlink_path)?
             + allocated_size(&nested_payload)?;
         let expected_apparent = apparent_size(&payload)? * 2
             + apparent_size(&sparse)?
+            + apparent_size(&invalid_path)?
             + apparent_size(&symlink_path)?
             + apparent_size(&nested_payload)?;
 
@@ -1187,6 +1194,10 @@ mod tests {
         assert_eq!(
             item(&allocated.root, b"payload-hardlink.bin").disk_size,
             allocated_size(&hardlink)?
+        );
+        assert_eq!(
+            item(&allocated.root, b"invalid-\xff-name").disk_size,
+            allocated_size(&invalid_path)?
         );
         assert!(item(&allocated.root, b"payload-link").children.is_none());
         assert_eq!(
