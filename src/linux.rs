@@ -237,7 +237,8 @@ fn scan_directory_contents(
         read_directory(directory.as_raw_fd(), ext4_eof_cookie)?;
     let child_depth = depth + 1;
     let items = entries
-        .into_par_iter()
+        .par_iter()
+        .copied()
         .filter_map(|entry| {
             match scan_entry(
                 &directory,
