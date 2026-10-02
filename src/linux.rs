@@ -914,25 +914,70 @@ fn with_statx<T>(
     inspect: impl FnOnce(&LinuxStatx) -> io::Result<T>,
 ) -> io::Result<T> {
     let mut stat = mem::MaybeUninit::<LinuxStatx>::uninit();
-    retry_interrupted(|| {
-        let result = unsafe {
-            libc::syscall(
-                libc::SYS_statx,
-                directory_fd,
-                path,
-                flags,
-                mask,
-                stat.as_mut_ptr(),
-            )
-        };
-        if result < 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
-    })?;
+    retry_interrupted(|| statx_call(directory_fd, path, flags, mask, stat.as_mut_ptr()))?;
     // A successful Linux statx call writes the entire fixed-width result structure.
     inspect(unsafe { stat.assume_init_ref() })
+}
+
+// Avoid the variadic libc syscall wrapper on the high-volume x86-64 statx path.
+#[cfg(target_arch = "x86_64")]
+fn statx_call(
+    directory_fd: libc::c_int,
+    path: *const libc::c_char,
+    flags: libc::c_int,
+    mask: libc::c_uint,
+    result: *mut LinuxStatx,
+) -> io::Result<()> {
+    // SAFETY: The syscall ABI assigns statx's five arguments to these registers, and `result`
+    // points to the live, 256-byte output buffer owned by `with_statx`.
+    let result_code = unsafe {
+        let mut result_code = libc::SYS_statx as libc::c_long;
+        std::arch::asm!(
+            "syscall",
+            inlateout("rax") result_code,
+            in("rdi") directory_fd as libc::c_long,
+            in("rsi") path,
+            in("rdx") flags as libc::c_long,
+            in("r10") mask as libc::c_long,
+            in("r8") result,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+        result_code
+    };
+    if result_code < 0 {
+        Err(io::Error::from_raw_os_error((-result_code) as i32))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn statx_call(
+    directory_fd: libc::c_int,
+    path: *const libc::c_char,
+    flags: libc::c_int,
+    mask: libc::c_uint,
+    result: *mut LinuxStatx,
+) -> io::Result<()> {
+    // SAFETY: The arguments match the target's statx syscall signature. The result pointer targets
+    // a live output buffer.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_statx,
+            directory_fd,
+            path,
+            flags,
+            mask,
+            result,
+        )
+    };
+    if result < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 // Interrupted syscalls have not completed their operation, so retry before reporting an error.
