@@ -14,6 +14,8 @@ use std::path::PathBuf;
 use std::process;
 
 const DEFAULT_RAYON_THREADS: usize = 4;
+// Batch tree output in bounded chunks to reduce small writes.
+const OUTPUT_BUFFER_CAPACITY: usize = 64 * 1024;
 const INDENT_CHUNK: &[u8; 256] = &[b' '; 256];
 
 struct DiskItem {
@@ -226,13 +228,15 @@ fn run() -> Result<(), Box<dyn Error>> {
         );
     }
     let stdout = io::stdout();
-    let mut output = BufWriter::new(stdout.lock());
+    let mut output = BufWriter::with_capacity(OUTPUT_BUFFER_CAPACITY, stdout.lock());
     write_tree(
         &report.root_name,
         &report.root,
         &report.directories,
         &mut output,
     )?;
+    // Report errors from the final buffered stdout write before returning.
+    output.flush()?;
     Ok(())
 }
 
