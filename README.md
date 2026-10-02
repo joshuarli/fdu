@@ -1,21 +1,27 @@
 # fdu
 
-A small parallel disk usage scanner for Linux 6.0 and newer. It uses the Linux directory and metadata syscalls directly and has only two direct dependencies: `libc` and Rayon.
+A Linux 6.0+ disk usage counter for directory trees. It uses only libc and Rayon as direct dependencies.
 
-```text
-fdu [--apparent] [PATH]
-```
+    fdu [--apparent] [PATH]
 
-The default path is the current directory. By default, sizes are allocated bytes (`stx_blocks * 512`); `--apparent` selects logical file lengths. Output is an indented tree with raw byte counts. Tabs, newlines, carriage returns, and backslashes use `\t`, `\n`, `\r`, and `\\`; other control characters use `\u{hex}`, and invalid UTF-8 name bytes use `\xNN`. This keeps each item on one unambiguous line. Symlinks are counted without following them, hardlinked paths are counted separately, and traversal stops when a child directory is on another device.
+The default path is the current directory. FDU prints one row for each immediate child directory, sorted by size descending. Each row is a raw byte count, a tab, and the quoted directory name with standard Rust debug escaping. Files directly under PATH are omitted from the output. Each directory's count sums the non-directory entries below it; directory inode metadata is not added.
 
-Entries that cannot be read or whose byte count cannot fit in `u64` are omitted. `fdu` reports the number of skipped entries on standard error and marks the totals as potentially incomplete. Root-level open, enumeration, and size-total overflow errors abort the scan.
+By default, sizes are allocated bytes (stx_blocks * 512); --apparent selects logical file lengths. Symlinks are counted without following them, and hardlinked paths are counted separately. The scan assumes a single filesystem and does not check mount boundaries.
 
-Filesystem calls interrupted before completion are retried. Persistent errors follow the skip or abort behavior described above.
+Entries that cannot be read or whose byte count cannot fit in u64 are omitted from their containing total. FDU reports skipped entries on standard error and marks totals as potentially incomplete. Root-level open and enumeration failures abort the scan.
 
-At depth 64, traversal switches to an explicit directory stack to avoid consuming the worker's native stack. If opening a child reaches `EMFILE`, `fdu` raises its own soft open-file limit in increments up to the hard limit and retries. Entries that still cannot be opened are skipped and counted.
+Interrupted filesystem calls are retried. The default Rayon pool has four workers; set RAYON_NUM_THREADS to choose another count.
 
-The scan reads a live directory tree, not an atomic filesystem snapshot. Changes made during traversal may be observed at different points in time.
+The scanner reads a live directory tree, not an atomic filesystem snapshot. Changes made during traversal may be observed at different points in time. Metadata queries do not force synchronization with remote filesystems, so remote results may reflect cached metadata.
 
-Metadata queries do not force synchronization with remote filesystems, so network filesystem results may reflect cached, approximate metadata.
+To create a repeatable, inode-heavy ext4 workload, use the generator:
 
-The default Rayon pool has four workers. Set `RAYON_NUM_THREADS` to choose another count.
+    python3 scripts/generate_inode_fixture.py perf/fixture
+    cargo build --locked --release
+    target/release/fdu perf/fixture
+
+The default fixture contains 64 top-level directories, 16 nested directories per top-level directory, and 256 tiny files per nested directory. Most files are empty; one in sixteen contains at most eight bytes. Scale the counts when the filesystem has room for more inodes. The generated perf/fixture directory is gitignored.
+
+For a larger run with about two million files:
+
+    python3 scripts/generate_inode_fixture.py perf/fixture --top-level-dirs 128 --subdirs-per-directory 32 --files-per-subdirectory 512
