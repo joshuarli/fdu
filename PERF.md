@@ -56,6 +56,12 @@ Four alternating 20-run pairs on a warm ext4 directory of 30,000 files reduced m
 
 Counter captures are `target/perf-initial/fdu-name-fast-{before,after}-{flat,nested}-20{a,b,c,d}.txt`; profiles are `target/perf-initial/fdu-name-fast-{before,after}-nested-100-user.{data,report.txt}`. The measured executables are `target/perf-initial/fdu-name-fast-{before,after}`. Output comparisons are `target/perf-initial/fdu-name-fast-{before,after}-{flat,nested,escape}-{allocated,apparent}.{out,err}`.
 
+## Deep-tree indentation
+
+`write_tree` now writes indentation in chunks of at most 256 spaces. A 1,100-level fixture previously issued one two-space `write_all` per ancestor for every output line: 606,651 writes. Chunking reduces that to 5,301 writes while preserving the same spaces.
+
+Four alternating ten-run pairs pinned to CPU 0 reduced mean user instructions from 11.64 million to 3.27 million (71.9%), cycles from 2.80 million to 2.08 million (25.6%), and user task-clock from 2.34 to 2.14 ms (8.7%). Elapsed time varied between captures and did not show a reliable gain. Allocated and apparent output and stderr matched byte-for-byte. `tests::writes_deep_indentation_without_changing_tree_output` compares exact output across the 256-space chunk boundary. Captures are `target/perf-initial/fdu-indent-pinned-{before,after}-deep-10{a,b,c,d}.txt` and `target/perf-initial/fdu-indent-{before,after}-deep-{allocated,apparent}.{out,err}`; measured executables are `target/perf-initial/fdu-indent-{before,after}`.
+
 ## Directory vector capacity estimates
 
 `read_directory` uses each `getdents64` batch size to reserve entry and name capacity before parsing. The first batch estimate excludes the `.` and `..` records. This reduces repeated growth without changing the number or order of filesystem calls.

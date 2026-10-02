@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::process;
 
 const DEFAULT_RAYON_THREADS: usize = 4;
+const INDENT_CHUNK: &[u8; 256] = &[b' '; 256];
 
 struct DiskItem {
     name_offset: NonZeroUsize,
@@ -278,8 +279,11 @@ fn write_tree(
 
     while let Some(frame) = stack.last_mut() {
         if !frame.wrote_item {
-            for _ in 0..frame.depth {
-                output.write_all(b"  ")?;
+            let mut remaining_depth = frame.depth;
+            while remaining_depth != 0 {
+                let levels = remaining_depth.min(INDENT_CHUNK.len() / 2);
+                output.write_all(&INDENT_CHUNK[..levels * 2])?;
+                remaining_depth -= levels;
             }
             write_size_and_tab(frame.disk_size, output)?;
             write_name(frame.name, output)?;
@@ -408,7 +412,9 @@ fn write_name(bytes: &[u8], output: &mut impl Write) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::write_name;
+    use super::{
+        write_name, write_tree, DirectoryContents, DirectoryId, DirectoryItem, DiskItem,
+    };
     use std::io;
 
     #[test]
@@ -426,6 +432,50 @@ mod tests {
             assert_eq!(&output, expected);
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn writes_deep_indentation_without_changing_tree_output() -> io::Result<()> {
+        let depth = 130;
+        let directories = (0..depth)
+            .map(|index| DirectoryContents {
+                names: b"d\0".to_vec(),
+                items: if index + 1 < depth {
+                    vec![DirectoryItem::Scanned(DiskItem::new(
+                        0,
+                        0,
+                        Some(DirectoryId::from_index(index + 1)),
+                    ))]
+                } else {
+                    Vec::new()
+                },
+                disk_size: 0,
+            })
+            .collect::<Vec<_>>();
+        let root = DirectoryContents {
+            names: b"d\0".to_vec(),
+            items: vec![DirectoryItem::Scanned(DiskItem::new(
+                0,
+                0,
+                Some(DirectoryId::from_index(0)),
+            ))],
+            disk_size: 0,
+        };
+        let mut output = Vec::new();
+        write_tree(
+            std::ffi::OsStr::new("root"),
+            &root,
+            &directories,
+            &mut output,
+        )?;
+
+        let mut expected = b"0\troot\n".to_vec();
+        for level in 1..=depth {
+            expected.resize(expected.len() + level * 2, b' ');
+            expected.extend_from_slice(b"0\td\n");
+        }
+        assert_eq!(output, expected);
         Ok(())
     }
 }
