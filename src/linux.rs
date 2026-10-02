@@ -1262,4 +1262,31 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn reads_all_long_names_across_directory_buffer_batches() -> Result<(), Box<dyn Error>> {
+        const FILE_COUNT: usize = 2050;
+        const NAME_LENGTH: usize = 250;
+
+        let temporary = TemporaryDirectory::new()?;
+        for index in 0..FILE_COUNT {
+            let mut name = format!("entry-{index:04}").into_bytes();
+            name.resize(NAME_LENGTH, b'x');
+            File::create(temporary.0.join(OsString::from_vec(name)))?;
+        }
+
+        let report = scan(&temporary.0, false)?;
+        assert_eq!(report.skipped_entries, 0);
+        assert_eq!(report.root.disk_size, 0);
+        assert_eq!(report.root.items.len(), FILE_COUNT);
+        assert!(report.root.items.iter().all(|item| match item {
+            DirectoryItem::Scanned(item) => {
+                item.children.is_none()
+                    && report.root.name_bytes(item.name_offset()).len() == NAME_LENGTH
+            }
+            DirectoryItem::Skipped => false,
+        }));
+
+        Ok(())
+    }
 }
