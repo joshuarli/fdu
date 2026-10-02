@@ -103,6 +103,10 @@ Dividing by child-directory `openat2` attempts plus one root read, the two snaps
 
 A ten-scan on-CPU profile after this change recorded 6,977 samples with zero lost. Self samples included `ext4_file_getattr` at 6.88%, `memcpy` at 5.68%, Rayon `__lock` at 4.09%, and `__libc_free` at 3.34%. The metadata lookup and output-building costs remain visible after the directory EOF syscall reduction. Raw data and report are `target/perf-initial/fdu-ext4-eof-cookie-10.data` and `target/perf-initial/fdu-ext4-eof-cookie-10.report.txt`.
 
+## Equal-size directory sorting check
+
+I tested skipping `sort_unstable_by` when every child in a directory has the same size. Across two alternating 20-run pairs, mean user instructions on the 30,000-file flat fixture changed from 30.618 million to 30.612 million; on the 5,000-directory, 40,000-file fixture they changed from 103.894 million to 103.438 million. The instruction counts are within run variation. User cycles decreased on the flat fixture but were unchanged on the nested fixture; task-clock and elapsed-time differences were smaller than the per-capture spread. The shortcut also adds a size scan on directories before deciding whether sorting is needed, so the unconditional sort remains. Captures are `target/perf-initial/fdu-sort-{before,after}-{flat,nested}-20{a,b}.txt`; measured executables are `target/perf-initial/fdu-sort-{before,after}`.
+
 ## Remaining metadata work
 
 A read-only dirent inode census found 14 duplicate non-directory paths among 1,023,593 readable paths. A shared inode metadata cache would add synchronization and memory for almost no avoided `statx` calls. The remaining per-file metadata lookup is the main syscall target.
