@@ -952,9 +952,49 @@ fn read_directory(fd: libc::c_int, ext4_eof_cookie: bool) -> io::Result<Director
 
 #[cfg(test)]
 mod tests {
-    use super::retry_interrupted;
+    use super::{retry_interrupted, scan, DirectoryContents, DiskItem};
     use std::cell::Cell;
+    use std::error::Error;
+    use std::fs::{self, File};
     use std::io;
+    use std::os::unix::fs::{symlink, MetadataExt};
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEMP_DIRECTORY_ID: AtomicUsize = AtomicUsize::new(0);
+
+    struct TemporaryDirectory(PathBuf);
+
+    impl TemporaryDirectory {
+        fn new() -> io::Result<Self> {
+            loop {
+                let id = TEMP_DIRECTORY_ID.fetch_add(1, Ordering::Relaxed);
+                let path = std::env::temp_dir().join(format!(
+                    "fdu-test-{}-{id}",
+                    std::process::id()
+                ));
+                match fs::create_dir(&path) {
+                    Ok(()) => return Ok(Self(path)),
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+    }
+
+    impl Drop for TemporaryDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn item<'a>(directory: &'a DirectoryContents, name: &[u8]) -> &'a DiskItem {
+        directory
+            .items
+            .iter()
+            .find(|item| directory.name_bytes(item.name_offset) == name)
+            .expect("fixture entry is present")
+    }
 
     #[test]
     fn retries_interrupted_syscalls() {
@@ -970,5 +1010,86 @@ mod tests {
 
         assert_eq!(result.unwrap(), 17);
         assert_eq!(attempts.get(), 2);
+    }
+
+    #[test]
+    fn walk_accounts_for_each_path_without_following_symlinks() -> Result<(), Box<dyn Error>> {
+        let temporary = TemporaryDirectory::new()?;
+        let root = &temporary.0;
+        let payload = root.join("payload.bin");
+        let hardlink = root.join("payload-hardlink.bin");
+        let sparse = root.join("sparse.bin");
+        let symlink_path = root.join("payload-link");
+        let nested = root.join("nested");
+        let nested_payload = nested.join("nested.bin");
+        let empty = root.join("empty");
+
+        fs::write(&payload, vec![0x5a; 8 * 1024])?;
+        fs::hard_link(&payload, &hardlink)?;
+        File::create(&sparse)?.set_len(1024 * 1024)?;
+        symlink("payload.bin", &symlink_path)?;
+        fs::create_dir(&nested)?;
+        fs::write(&nested_payload, vec![0x31; 257])?;
+        fs::create_dir(&empty)?;
+
+        let allocated_size = |path: &Path| -> io::Result<u64> {
+            Ok(fs::symlink_metadata(path)?.blocks() * 512)
+        };
+        let apparent_size = |path: &Path| -> io::Result<u64> {
+            Ok(fs::symlink_metadata(path)?.len())
+        };
+        let expected_allocated = allocated_size(&payload)? * 2
+            + allocated_size(&sparse)?
+            + allocated_size(&symlink_path)?
+            + allocated_size(&nested_payload)?;
+        let expected_apparent = apparent_size(&payload)? * 2
+            + apparent_size(&sparse)?
+            + apparent_size(&symlink_path)?
+            + apparent_size(&nested_payload)?;
+
+        let allocated = scan(root, false)?;
+        assert_eq!(allocated.skipped_entries, 0);
+        assert_eq!(allocated.root.disk_size, expected_allocated);
+        assert_eq!(
+            item(&allocated.root, b"payload.bin").disk_size,
+            allocated_size(&payload)?
+        );
+        assert_eq!(
+            item(&allocated.root, b"payload-hardlink.bin").disk_size,
+            allocated_size(&hardlink)?
+        );
+        assert!(item(&allocated.root, b"payload-link").children.is_none());
+        assert_eq!(
+            item(&allocated.root, b"payload-link").disk_size,
+            allocated_size(&symlink_path)?
+        );
+        assert!(item(&allocated.root, b"empty").children.is_some());
+        assert_eq!(item(&allocated.root, b"empty").disk_size, 0);
+        let nested_item = item(&allocated.root, b"nested");
+        assert_eq!(nested_item.disk_size, allocated_size(&nested_payload)?);
+        let nested_contents = &allocated.directories[
+            nested_item
+                .children
+                .expect("nested directory has child contents")
+                .index()
+        ];
+        assert_eq!(
+            item(nested_contents, b"nested.bin").disk_size,
+            allocated_size(&nested_payload)?
+        );
+
+        let apparent = scan(root, true)?;
+        assert_eq!(apparent.skipped_entries, 0);
+        assert_eq!(apparent.root.disk_size, expected_apparent);
+        assert_eq!(
+            item(&apparent.root, b"sparse.bin").disk_size,
+            apparent_size(&sparse)?
+        );
+        assert_eq!(
+            item(&apparent.root, b"payload-link").disk_size,
+            apparent_size(&symlink_path)?
+        );
+
+        Ok(())
     }
 }
