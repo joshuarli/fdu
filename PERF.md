@@ -49,7 +49,18 @@ A read-only dirent inode census found 14 duplicate non-directory paths among 1,0
 
 An ext4 inode-table experiment could batch inode metadata reads by group and table block, but it must stay isolated from the default walker. An on-disk table read is not a coherent view of a live mounted filesystem, and ext4 inode accounting has feature-specific fields and live allocation state. The [Linux ext4 inode documentation](https://github.com/torvalds/linux/blob/v6.18/Documentation/filesystems/ext4/inodes.rst) describes the inode-table layout and inode-to-group mapping. Use a read-only snapshot to test sparse and dense table access before deciding whether this can preserve the live `statx` contract.
 
-`io_uring` is enabled on this host, but asynchronous `statx` should remain an experiment. Linux 6.18's [`io_uring/statx.c`](https://github.com/torvalds/linux/blob/v6.18/io_uring/statx.c) marks every `IORING_OP_STATX` request `REQ_F_FORCE_ASYNC`; batching could replace many user `statx` entries with fewer ring submissions, while also moving every metadata lookup through io-wq. Measure that tradeoff before adding the raw ring ABI to the scanner, and keep any implementation within the existing `libc` dependency.
+`io_uring` is enabled on this host, but asynchronous `statx` should remain an experiment. Linux 6.18's [`io_uring/statx.c`](https://github.com/torvalds/linux/blob/v6.18/io_uring/statx.c) marks every `IORING_OP_STATX` request `REQ_F_FORCE_ASYNC`; batching could replace many user `statx` entries with fewer ring submissions, while also moving every metadata lookup through io-wq.
+
+A dispatch microbenchmark on a warm ext4 directory of 8,192 zero-byte files compared direct `statx` calls with `IORING_OP_STATX` batches of 128. Both modes used one thread, the same directory fd, the same statx mask, one warm-up pass, and ten measured passes. The ring reduced syscall entries but increased task scheduling and elapsed time in both runs:
+
+| Pair | Mode | `statx` entries | `io_uring_enter` entries | Context switches | Task-clock ms | Elapsed ms |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | Direct | 90,112 | 0 | 4 | 37.47 | 37.84 |
+| 1 | Ring | 0 | 704 | 13,961 | 141.12 | 46.92 |
+| 2 | Direct | 90,112 | 0 | 6 | 25.52 | 25.86 |
+| 2 | Ring | 0 | 704 | 15,038 | 174.16 | 54.42 |
+
+This is a single-thread metadata microbenchmark, not a full four-worker scan. The result still argues against adding ring submission to the cached metadata path: it replaces 90,112 syscall entries with 704 but routes each operation through asynchronous work. The probe source and captures are `target/perf-initial/statx-uring-probe.c`, `target/perf-initial/statx-direct-perf.txt`, `target/perf-initial/statx-uring-perf.txt`, `target/perf-initial/statx-direct-perf-2.txt`, and `target/perf-initial/statx-uring-perf-2.txt`. Retest only if measurements on cold storage show metadata wait time dominates.
 
 ## Reproducing syscall counts
 
