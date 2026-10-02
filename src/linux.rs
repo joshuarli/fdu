@@ -458,6 +458,12 @@ fn read_directory(fd: libc::c_int, ext4_eof_cookie: bool) -> io::Result<Vec<Dire
             }
 
             let bytes_read = result as usize;
+            if bytes_read > buffer.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "getdents64 returned more data than the supplied buffer",
+                ));
+            }
             let mut offset = 0;
             let mut final_offset = 0;
             while offset < bytes_read {
@@ -492,6 +498,12 @@ fn read_directory(fd: libc::c_int, ext4_eof_cookie: bool) -> io::Result<Vec<Dire
                     io::Error::new(io::ErrorKind::InvalidData, "unterminated directory entry")
                 })?;
                 let name_bytes = &name_bytes[..name_length];
+                if name_bytes.is_empty() || name_bytes.contains(&b'/') {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid directory entry name",
+                    ));
+                }
 
                 if name_bytes != b"." && name_bytes != b".." {
                     let name = CString::new(name_bytes).map_err(|_| {
