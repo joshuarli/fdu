@@ -126,6 +126,11 @@ enum ScannedEntry {
     },
 }
 
+enum UnknownEntry {
+    Directory,
+    Item(DiskItem),
+}
+
 impl DirectoryEntry {
     fn as_c_str<'a>(&self, names: &'a [u8]) -> &'a CStr {
         let end = self.name_offset + usize::from(self.name_length) + 1;
@@ -237,8 +242,11 @@ pub(super) fn scan(path: &Path, apparent: bool) -> io::Result<ScanReport> {
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path)?;
-    let root_stat = stat_fd(root.as_raw_fd(), STATX_TYPE)?;
-    if !root_stat.is_directory() {
+    let (root_is_directory, root_device) =
+        with_stat_fd(root.as_raw_fd(), STATX_TYPE, |stat| {
+            Ok((stat.is_directory(), stat.device()))
+        })?;
+    if !root_is_directory {
         return Err(io::Error::new(
             io::ErrorKind::NotADirectory,
             "path is not a directory",
@@ -250,7 +258,7 @@ pub(super) fn scan(path: &Path, apparent: bool) -> io::Result<ScanReport> {
     let arena = Mutex::new(Vec::new());
     let root = scan_directory_contents(
         root,
-        root_stat.device(),
+        root_device,
         apparent,
         ext4_eof_cookie,
         0,
@@ -542,27 +550,34 @@ fn scan_entry(
             )
         }
         EntryKind::Other => {
-            let stat = stat_at(
+            with_stat_at(
                 parent.as_raw_fd(),
                 entry.as_c_str(names),
                 entry_size_mask(apparent),
-            )?;
-            file_item(entry, stat, apparent)
+                |stat| file_item(entry, stat, apparent),
+            )
         }
         EntryKind::Unknown => {
-            let stat = stat_at(
+            let scanned = with_stat_at(
                 parent.as_raw_fd(),
                 entry.as_c_str(names),
                 STATX_TYPE | entry_size_mask(apparent),
+                |stat| {
+                    if stat.mask & STATX_TYPE == 0 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "filesystem did not report an unknown entry type",
+                        ));
+                    }
+                    if stat.is_directory() {
+                        Ok(UnknownEntry::Directory)
+                    } else {
+                        file_item(entry, stat, apparent).map(UnknownEntry::Item)
+                    }
+                },
             )?;
-            if stat.mask & STATX_TYPE == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "filesystem did not report an unknown entry type",
-                ));
-            }
-            if stat.is_directory() {
-                scan_child_directory(
+            match scanned {
+                UnknownEntry::Directory => scan_child_directory(
                     parent,
                     names,
                     entry,
@@ -572,9 +587,8 @@ fn scan_entry(
                     child_depth,
                     skipped_entries,
                     arena,
-                )
-            } else {
-                file_item(entry, stat, apparent)
+                ),
+                UnknownEntry::Item(item) => Ok(item),
             }
         }
     }
@@ -593,29 +607,37 @@ fn scan_entry_iterative(
             open_child_entry(parent, names, entry, root_device, ext4_eof_cookie)
         }
         EntryKind::Other => {
-            let stat = stat_at(
+            with_stat_at(
                 parent.as_raw_fd(),
                 entry.as_c_str(names),
                 entry_size_mask(apparent),
-            )?;
-            file_item(entry, stat, apparent).map(ScannedEntry::Item)
+                |stat| file_item(entry, stat, apparent).map(ScannedEntry::Item),
+            )
         }
         EntryKind::Unknown => {
-            let stat = stat_at(
+            let scanned = with_stat_at(
                 parent.as_raw_fd(),
                 entry.as_c_str(names),
                 STATX_TYPE | entry_size_mask(apparent),
+                |stat| {
+                    if stat.mask & STATX_TYPE == 0 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "filesystem did not report an unknown entry type",
+                        ));
+                    }
+                    if stat.is_directory() {
+                        Ok(UnknownEntry::Directory)
+                    } else {
+                        file_item(entry, stat, apparent).map(UnknownEntry::Item)
+                    }
+                },
             )?;
-            if stat.mask & STATX_TYPE == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "filesystem did not report an unknown entry type",
-                ));
-            }
-            if stat.is_directory() {
-                open_child_entry(parent, names, entry, root_device, ext4_eof_cookie)
-            } else {
-                file_item(entry, stat, apparent).map(ScannedEntry::Item)
+            match scanned {
+                UnknownEntry::Directory => {
+                    open_child_entry(parent, names, entry, root_device, ext4_eof_cookie)
+                }
+                UnknownEntry::Item(item) => Ok(ScannedEntry::Item(item)),
             }
         }
     }
@@ -817,7 +839,7 @@ fn openat_directory(parent_fd: libc::c_int, name: &CStr) -> io::Result<File> {
     }
 }
 
-fn file_item(entry: DirectoryEntry, stat: LinuxStatx, apparent: bool) -> io::Result<DiskItem> {
+fn file_item(entry: DirectoryEntry, stat: &LinuxStatx, apparent: bool) -> io::Result<DiskItem> {
     let size_mask = entry_size_mask(apparent);
     if stat.mask & size_mask != size_mask {
         return Err(io::Error::new(
@@ -838,12 +860,18 @@ fn file_item(entry: DirectoryEntry, stat: LinuxStatx, apparent: bool) -> io::Res
     Ok(DiskItem::new(entry.name_offset, size, None))
 }
 
-fn stat_at(parent_fd: libc::c_int, name: &CStr, mask: libc::c_uint) -> io::Result<LinuxStatx> {
-    statx(
+fn with_stat_at<T>(
+    parent_fd: libc::c_int,
+    name: &CStr,
+    mask: libc::c_uint,
+    inspect: impl FnOnce(&LinuxStatx) -> io::Result<T>,
+) -> io::Result<T> {
+    with_statx(
         parent_fd,
         name.as_ptr(),
         libc::AT_SYMLINK_NOFOLLOW | STATX_DONT_SYNC,
         mask,
+        inspect,
     )
 }
 
@@ -862,24 +890,31 @@ fn is_ext4(fd: libc::c_int) -> bool {
     }
 }
 
-fn stat_fd(fd: libc::c_int, mask: libc::c_uint) -> io::Result<LinuxStatx> {
+fn with_stat_fd<T>(
+    fd: libc::c_int,
+    mask: libc::c_uint,
+    inspect: impl FnOnce(&LinuxStatx) -> io::Result<T>,
+) -> io::Result<T> {
     // Query the opened root directly without resolving a second pathname.
-    statx(
+    with_statx(
         fd,
         b"\0".as_ptr().cast(),
         libc::AT_EMPTY_PATH | STATX_DONT_SYNC,
         mask,
+        inspect,
     )
 }
 
-fn statx(
+// Inspect the result in place so each 256-byte statx record is not copied on return.
+fn with_statx<T>(
     directory_fd: libc::c_int,
     path: *const libc::c_char,
     flags: libc::c_int,
     mask: libc::c_uint,
-) -> io::Result<LinuxStatx> {
+    inspect: impl FnOnce(&LinuxStatx) -> io::Result<T>,
+) -> io::Result<T> {
+    let mut stat = mem::MaybeUninit::<LinuxStatx>::uninit();
     retry_interrupted(|| {
-        let mut stat = mem::MaybeUninit::<LinuxStatx>::uninit();
         let result = unsafe {
             libc::syscall(
                 libc::SYS_statx,
@@ -893,10 +928,11 @@ fn statx(
         if result < 0 {
             Err(io::Error::last_os_error())
         } else {
-            // A successful Linux statx call writes the entire fixed-width result structure.
-            Ok(unsafe { stat.assume_init() })
+            Ok(())
         }
-    })
+    })?;
+    // A successful Linux statx call writes the entire fixed-width result structure.
+    inspect(unsafe { stat.assume_init_ref() })
 }
 
 // Interrupted syscalls have not completed their operation, so retry before reporting an error.
@@ -1029,8 +1065,9 @@ fn read_directory(fd: libc::c_int, ext4_eof_cookie: bool) -> io::Result<Director
 #[cfg(test)]
 mod tests {
     use super::{
-        file_device_with_retry, retry_interrupted, scan, Device, DirectoryContents, DirectoryItem,
-        DirectoryNames, DiskItem, DIRECTORY_ENTRY_POOL, MAX_CACHED_DIRECTORY_ENTRY_CAPACITY,
+        file_device_with_retry, retry_interrupted, scan, scan_entry, Device, DirectoryContents,
+        DirectoryEntry, DirectoryItem, DirectoryNames, DiskItem, EntryKind, DIRECTORY_ENTRY_POOL,
+        MAX_CACHED_DIRECTORY_ENTRY_CAPACITY,
     };
     use std::cell::Cell;
     use std::error::Error;
@@ -1099,6 +1136,61 @@ mod tests {
 
         assert_eq!(result.unwrap(), 17);
         assert_eq!(attempts.get(), 2);
+    }
+
+    #[test]
+    fn unknown_entry_types_preserve_file_and_directory_scans() -> io::Result<()> {
+        let temporary = TemporaryDirectory::new()?;
+        fs::create_dir(temporary.0.join("child"))?;
+        File::create(temporary.0.join("file"))?;
+        File::create(temporary.0.join("child").join("nested"))?;
+        let root = File::open(&temporary.0)?;
+        let root_device = Device::from_raw(root.metadata()?.dev());
+        let skipped_entries = AtomicUsize::new(0);
+        let arena = Mutex::new(Vec::new());
+
+        let file = scan_entry(
+            &root,
+            b"file\0",
+            DirectoryEntry {
+                name_offset: 0,
+                name_length: 4,
+                kind: EntryKind::Unknown,
+            },
+            root_device,
+            false,
+            true,
+            1,
+            &skipped_entries,
+            &arena,
+        )?;
+        assert_eq!(file.disk_size, 0);
+        assert!(file.children.is_none());
+
+        let child = scan_entry(
+            &root,
+            b"child\0",
+            DirectoryEntry {
+                name_offset: 0,
+                name_length: 5,
+                kind: EntryKind::Unknown,
+            },
+            root_device,
+            false,
+            true,
+            1,
+            &skipped_entries,
+            &arena,
+        )?;
+        assert_eq!(child.disk_size, 0);
+        assert!(child.children.is_some());
+        assert_eq!(skipped_entries.load(Ordering::Relaxed), 0);
+
+        let directories = arena
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(item(&directories[0], b"nested").disk_size, 0);
+        Ok(())
     }
 
     #[test]
