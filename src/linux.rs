@@ -700,7 +700,7 @@ fn open_child_directory(
         {
             // The fallback checks st_dev so same-device bind mounts keep the existing behavior.
             let child = open_with_nofile_retry(|| openat_directory(parent.as_raw_fd(), name))?;
-            if Device::from_raw(child.metadata()?.dev()) != root_device {
+            if file_device_with_retry(|| child.metadata())? != root_device {
                 return Err(io::Error::new(
                     io::ErrorKind::Other,
                     "filesystem boundary crossed",
@@ -710,6 +710,12 @@ fn open_child_directory(
         }
         Err(error) => Err(error),
     }
+}
+
+fn file_device_with_retry(
+    mut metadata: impl FnMut() -> io::Result<std::fs::Metadata>,
+) -> io::Result<Device> {
+    retry_interrupted(&mut metadata).map(|metadata| Device::from_raw(metadata.dev()))
 }
 
 // Directory descriptors stay open during descent; increase the process soft limit only on EMFILE.
@@ -1019,7 +1025,10 @@ fn read_directory(fd: libc::c_int, ext4_eof_cookie: bool) -> io::Result<Director
 
 #[cfg(test)]
 mod tests {
-    use super::{retry_interrupted, scan, DirectoryContents, DirectoryItem, DiskItem};
+    use super::{
+        file_device_with_retry, retry_interrupted, scan, Device, DirectoryContents, DirectoryItem,
+        DiskItem,
+    };
     use std::cell::Cell;
     use std::error::Error;
     use std::ffi::OsString;
@@ -1087,6 +1096,25 @@ mod tests {
 
         assert_eq!(result.unwrap(), 17);
         assert_eq!(attempts.get(), 2);
+    }
+
+    #[test]
+    fn retries_interrupted_file_metadata_before_checking_device() -> io::Result<()> {
+        let file = File::open(".")?;
+        let expected = Device::from_raw(file.metadata()?.dev());
+        let attempts = Cell::new(0);
+        let device = file_device_with_retry(|| {
+            attempts.set(attempts.get() + 1);
+            if attempts.get() == 1 {
+                Err(io::Error::from(io::ErrorKind::Interrupted))
+            } else {
+                file.metadata()
+            }
+        })?;
+
+        assert!(device == expected);
+        assert_eq!(attempts.get(), 2);
+        Ok(())
     }
 
     #[test]
