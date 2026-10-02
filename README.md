@@ -10,4 +10,6 @@ The default path is the current directory. By default, sizes are allocated bytes
 
 Entries that cannot be read or whose byte count cannot fit in `u64` are omitted. `fdu` reports the number of skipped entries on standard error and marks the totals as potentially incomplete. Root-level open, enumeration, and size-total overflow errors abort the scan.
 
+The scan reads a live directory tree, not an atomic filesystem snapshot. Changes made during traversal may be observed at different points in time.
+
 The default Rayon pool has at most four workers. Set `RAYON_NUM_THREADS` to choose another count.
