@@ -1,11 +1,12 @@
 use crate::DiskItem;
 use rayon::prelude::*;
 use std::cell::RefCell;
-use std::ffi::CString;
+use std::ffi::{CString, OsString};
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::mem;
 use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 
@@ -119,8 +120,7 @@ pub(super) fn scan(path: &Path, apparent: bool) -> io::Result<DiskItem> {
     let name = path
         .file_name()
         .unwrap_or_else(|| std::ffi::OsStr::new("."))
-        .to_string_lossy()
-        .into_owned();
+        .to_os_string();
     let root = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
@@ -138,7 +138,7 @@ pub(super) fn scan(path: &Path, apparent: bool) -> io::Result<DiskItem> {
 }
 
 fn scan_directory(
-    name: String,
+    name: OsString,
     directory: File,
     root_device: Device,
     apparent: bool,
@@ -207,9 +207,10 @@ fn scan_child_directory(
 ) -> io::Result<DiskItem> {
     let (child, child_ext4_eof_cookie) =
         open_child_directory(parent, &entry.name, root_device, ext4_eof_cookie)?;
+    let name = OsString::from_vec(entry.name.into_bytes());
 
     scan_directory(
-        entry.name.to_string_lossy().into_owned(),
+        name,
         child,
         root_device,
         apparent,
@@ -286,7 +287,7 @@ fn openat_directory(parent_fd: libc::c_int, name: &CString) -> io::Result<File> 
 fn file_item(entry: DirectoryEntry, stat: LinuxStatx, apparent: bool) -> DiskItem {
     let size = if apparent { stat.size } else { stat.blocks * 512 };
     DiskItem {
-        name: entry.name.to_string_lossy().into_owned(),
+        name: OsString::from_vec(entry.name.into_bytes()),
         disk_size: size,
         children: None,
     }

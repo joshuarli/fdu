@@ -5,7 +5,7 @@ mod linux;
 
 use std::env;
 use std::error::Error;
-use std::ffi::CStr;
+use std::ffi::{CStr, OsString};
 use std::io::{self, BufWriter, Write};
 use std::mem::MaybeUninit;
 use std::path::PathBuf;
@@ -14,7 +14,7 @@ use std::process;
 const MAX_DEFAULT_RAYON_THREADS: usize = 4;
 
 pub(crate) struct DiskItem {
-    name: String,
+    name: OsString,
     disk_size: u64,
     children: Option<Vec<DiskItem>>,
 }
@@ -148,7 +148,7 @@ fn write_item(item: &DiskItem, depth: usize, output: &mut impl Write) -> io::Res
     for _ in 0..depth {
         output.write_all(b"  ")?;
     }
-    writeln!(output, "{}\t{}", item.disk_size, item.name)?;
+    writeln!(output, "{}\t{}", item.disk_size, item.name.to_string_lossy())?;
 
     if let Some(children) = &item.children {
         for child in children {
