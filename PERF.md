@@ -33,7 +33,7 @@ Generate a fresh fixture on the filesystem to be measured. The generated directo
     target/release/fdu perf/fixture
     target/release/fdu --apparent perf/fixture
 
-The default contains 262,144 files spread across two directory levels. Most files are empty; one in sixteen contains at most eight bytes. For a larger scan, use explicit counts such as 128 top-level directories, 32 subdirectories per top-level directory, and 512 files per subdirectory (2,097,152 files total). Ensure the target filesystem has enough free inodes before choosing large counts.
+The default contains 84,736 directories and 1,098,240 tiny files, or 1,182,976 entries. One in sixteen files contains one, four, or eight bytes; the rest are empty. This matches a roughly 1.2-million-entry workload while retaining a regular two-level layout, so directory fanout and depth match only in aggregate. For a larger scan, use explicit counts such as 128 top-level directories, 32 subdirectories per top-level directory, and 512 files per subdirectory (2,097,152 files total). Ensure the target filesystem has enough free inodes before choosing large counts.
 
 The integration test builds a small instance of the same shape in a temporary directory. It verifies that only immediate directories are printed and that each size includes nested files in allocated and apparent modes.
 

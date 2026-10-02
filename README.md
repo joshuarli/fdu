@@ -20,7 +20,7 @@ To create a repeatable, inode-heavy ext4 workload, use the generator:
     cargo build --locked --release
     target/release/fdu perf/fixture
 
-The default fixture contains 64 top-level directories, 16 nested directories per top-level directory, and 256 tiny files per nested directory. Most files are empty; one in sixteen contains at most eight bytes. Scale the counts when the filesystem has room for more inodes. The generated perf/fixture directory is gitignored.
+The default fixture contains 256 top-level directories, 330 nested directories per top-level directory, and 13 tiny files per nested directory: 84,736 directories and 1,098,240 files, or 1,182,976 entries. This is close to a 1.2-million-entry scan, with one in sixteen files containing one, four, or eight bytes and the rest empty. It keeps a regular two-level directory layout, so fanout and depth are representative only in aggregate. Scale the counts when the filesystem has room for more inodes. The generated perf/fixture directory is gitignored.
 
 For a larger run with about two million files:
 

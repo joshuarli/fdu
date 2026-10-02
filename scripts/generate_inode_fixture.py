@@ -23,9 +23,9 @@ def main() -> None:
         description="Generate a shallow, inode-heavy directory tree with tiny files."
     )
     parser.add_argument("root", type=Path, help="new output directory")
-    parser.add_argument("--top-level-dirs", type=positive_count, default=64)
-    parser.add_argument("--subdirs-per-directory", type=positive_count, default=16)
-    parser.add_argument("--files-per-subdirectory", type=positive_count, default=256)
+    parser.add_argument("--top-level-dirs", type=positive_count, default=256)
+    parser.add_argument("--subdirs-per-directory", type=positive_count, default=330)
+    parser.add_argument("--files-per-subdirectory", type=positive_count, default=13)
     parser.add_argument(
         "--nonempty-every",
         type=int,
@@ -58,10 +58,10 @@ def main() -> None:
                 try:
                     if (
                         args.nonempty_every
-                        and file_index % args.nonempty_every == 0
+                        and file_count % args.nonempty_every == 0
                     ):
                         payload = SMALL_PAYLOADS[
-                            (file_index // args.nonempty_every) % len(SMALL_PAYLOADS)
+                            (file_count // args.nonempty_every) % len(SMALL_PAYLOADS)
                         ]
                         os.write(fd, payload)
                         nonempty_count += 1
@@ -70,7 +70,7 @@ def main() -> None:
                 file_count += 1
 
     print(
-        f"directories={directory_count} files={file_count} "
+        f"directories={directory_count} files={file_count} entries={directory_count + file_count} "
         f"nonempty_files={nonempty_count} root={args.root}"
     )
 
