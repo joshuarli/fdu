@@ -34,6 +34,12 @@ The root `statx` request now asks only for type; Linux returns the containing-de
 
 Per-entry filesystem or size-overflow errors omit that item and any unreadable subtree, but the walker counts these failures and reports the total on standard error with an incomplete-total warning. An ext4 smoke directory with one inaccessible child produced the warning and retained the readable sibling. Root-level open, enumeration, or size-total overflow failures remain fatal.
 
+## Decimal size formatting
+
+`write_size_and_tab` now converts each byte count into a 21-byte stack buffer containing its decimal digits and the following tab, then writes it once. This replaces `core::fmt` for the repeated size column. Allocated and apparent output matched byte-for-byte on the 8,192-file flat ext4 fixture and the 5,000-directory, 40,000-file fixture.
+
+Two alternating `perf stat -r 30` pairs on the flat fixture averaged 13.17 million to 11.21 million user instructions and 6.69 million to 5.83 million user cycles. Task-clock averaged 7.04 to 6.84 ms, and elapsed time 3.750 to 3.562 ms. One `perf stat -r 20` pair on the nested fixture recorded 129.48 million to 117.88 million user instructions; task-clock and elapsed time overlapped. The flat-fixture instruction reduction repeated consistently, but these warm fixtures and host activity do not establish a whole-tree throughput gain. Captures are `target/perf-initial/fdu-manual-size-before-coalesced-30{b,c}.txt`, `target/perf-initial/fdu-manual-size-after-coalesced-30{b,c}.txt`, `target/perf-initial/fdu-manual-size-before-nested-20b.txt`, and `target/perf-initial/fdu-manual-size-after-coalesced-nested-20b.txt`; measured binaries are `target/perf-initial/fdu-manual-size-before` and `target/perf-initial/fdu-manual-size-after-coalesced`.
+
 ## Deep directory traversal
 
 `scan_directory` uses native recursion for the first 64 levels, then switches to `scan_directory_iterative` and its heap-backed `DirectoryFrame` stack. Child directory descriptors remain open so metadata calls stay relative to the parent. If `open_with_nofile_retry` receives `EMFILE`, `raise_soft_nofile_limit` increases the scanner process's soft descriptor limit in bounded steps and retries. It does not change the parent shell's limit; if the process reaches its hard limit, the affected entry is still counted as skipped.

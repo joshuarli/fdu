@@ -202,7 +202,7 @@ fn write_tree(
             for _ in 0..frame.depth {
                 output.write_all(b"  ")?;
             }
-            write!(output, "{}\t", frame.disk_size)?;
+            write_size_and_tab(frame.disk_size, output)?;
             write_name(frame.name, output)?;
             output.write_all(b"\n")?;
             frame.wrote_item = true;
@@ -242,6 +242,21 @@ fn write_tree(
     }
 
     Ok(())
+}
+
+fn write_size_and_tab(mut size: u64, output: &mut impl Write) -> io::Result<()> {
+    let mut digits = [0u8; 21];
+    digits[20] = b'\t';
+    let mut start = 20;
+    loop {
+        start -= 1;
+        digits[start] = b'0' + (size % 10) as u8;
+        size /= 10;
+        if size == 0 {
+            break;
+        }
+    }
+    output.write_all(&digits[start..])
 }
 
 fn write_name(bytes: &[u8], output: &mut impl Write) -> io::Result<()> {
