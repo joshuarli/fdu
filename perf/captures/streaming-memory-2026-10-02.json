@@ -1,0 +1,458 @@
+{
+  "reference_source": "9b4bd1e",
+  "candidate_source": "9b4bd1e plus bounded streaming metadata batches, inline child records, and empty-directory reduction bypass",
+  "binary_paths": {
+    "reference": "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-reference",
+    "candidate": "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-streaming-final",
+    "reference-allocations": "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-reference-allocations",
+    "candidate-allocations": "/home/josh/d/fdu-perf-local-archive/streaming-20261002/fdu-streaming-final-allocations"
+  },
+  "binary_hashes": {
+    "reference": "9caf0b58391164707c0710ec20b3bd4d1cd6fe53ff13643a32d3940be57008e1",
+    "candidate": "3f8f041262ba7e16f79083e12c6c1beac9ad21d360e858a3322f71679244cf2d",
+    "reference-allocations": "56dcd46cd93ef92ad360e7a21792b07f1325a3caec8aa214ecc35f8bfc841c51",
+    "candidate-allocations": "7899a54f019f557f17a5d088705532a67b96577312b254fdd644531080c27274"
+  },
+  "fixture": "/home/josh/d/fdu/perf/fixture",
+  "kernel": "6.18.33-0-lts",
+  "filesystem": "ext4; /dev/nvme0n1p3; rw,relatime",
+  "workers": 4,
+  "cache_state": "warm; no global cache drops",
+  "build": "cargo build --locked --release; thin LTO; incremental; default codegen units",
+  "rustc_verbose_version": "rustc 1.100.0-nightly (574ff7d98 2026-09-14)\nbinary: rustc\ncommit-hash: 574ff7d98bd6d037e5236a8453029173b32631fd\ncommit-date: 2026-09-14\nhost: x86_64-unknown-linux-musl\nrelease: 1.100.0-nightly\nLLVM version: 23.1.1",
+  "method": {
+    "metrics": "memory",
+    "pairs": 2,
+    "repetitions": 39,
+    "memory_samples": 5
+  },
+  "records": {
+    "allocated-memory": {
+      "reference": [
+        {
+          "allocation_calls": 1748,
+          "reallocation_calls": 365,
+          "deallocation_calls": 1675,
+          "requested_bytes": 12685738,
+          "live_bytes": 2710008,
+          "peak_live_bytes": 3779069,
+          "allocation_requests": 2113,
+          "peak_rss_kib": 2792,
+          "run": 1
+        },
+        {
+          "allocation_calls": 1814,
+          "reallocation_calls": 357,
+          "deallocation_calls": 1747,
+          "requested_bytes": 12672778,
+          "live_bytes": 2692760,
+          "peak_live_bytes": 4805909,
+          "allocation_requests": 2171,
+          "peak_rss_kib": 2572,
+          "run": 2
+        },
+        {
+          "allocation_calls": 1698,
+          "reallocation_calls": 370,
+          "deallocation_calls": 1625,
+          "requested_bytes": 12666946,
+          "live_bytes": 2693240,
+          "peak_live_bytes": 3761014,
+          "allocation_requests": 2068,
+          "peak_rss_kib": 2476,
+          "run": 3
+        },
+        {
+          "allocation_calls": 1794,
+          "reallocation_calls": 359,
+          "deallocation_calls": 1721,
+          "requested_bytes": 12663490,
+          "live_bytes": 2693240,
+          "peak_live_bytes": 3787082,
+          "allocation_requests": 2153,
+          "peak_rss_kib": 2548,
+          "run": 4
+        },
+        {
+          "allocation_calls": 1799,
+          "reallocation_calls": 363,
+          "deallocation_calls": 1726,
+          "requested_bytes": 12697682,
+          "live_bytes": 2710008,
+          "peak_live_bytes": 3822630,
+          "allocation_requests": 2162,
+          "peak_rss_kib": 3784,
+          "run": 5
+        }
+      ],
+      "candidate": [
+        {
+          "allocation_calls": 803,
+          "reallocation_calls": 70,
+          "deallocation_calls": 751,
+          "requested_bytes": 2611090,
+          "live_bytes": 406136,
+          "peak_live_bytes": 639626,
+          "allocation_requests": 873,
+          "peak_rss_kib": 844,
+          "run": 1
+        },
+        {
+          "allocation_calls": 797,
+          "reallocation_calls": 70,
+          "deallocation_calls": 745,
+          "requested_bytes": 2610586,
+          "live_bytes": 406136,
+          "peak_live_bytes": 624404,
+          "allocation_requests": 867,
+          "peak_rss_kib": 860,
+          "run": 2
+        },
+        {
+          "allocation_calls": 820,
+          "reallocation_calls": 70,
+          "deallocation_calls": 762,
+          "requested_bytes": 2728090,
+          "live_bytes": 456920,
+          "peak_live_bytes": 709300,
+          "allocation_requests": 890,
+          "peak_rss_kib": 564,
+          "run": 3
+        },
+        {
+          "allocation_calls": 852,
+          "reallocation_calls": 65,
+          "deallocation_calls": 798,
+          "requested_bytes": 2695850,
+          "live_bytes": 423032,
+          "peak_live_bytes": 631811,
+          "allocation_requests": 917,
+          "peak_rss_kib": 812,
+          "run": 4
+        },
+        {
+          "allocation_calls": 833,
+          "reallocation_calls": 66,
+          "deallocation_calls": 779,
+          "requested_bytes": 2629058,
+          "live_bytes": 423032,
+          "peak_live_bytes": 630102,
+          "allocation_requests": 899,
+          "peak_rss_kib": 564,
+          "run": 5
+        }
+      ]
+    },
+    "apparent-memory": {
+      "reference": [
+        {
+          "allocation_calls": 1721,
+          "reallocation_calls": 369,
+          "deallocation_calls": 1648,
+          "requested_bytes": 12676508,
+          "live_bytes": 2701624,
+          "peak_live_bytes": 3773092,
+          "allocation_requests": 2090,
+          "peak_rss_kib": 2532,
+          "run": 1
+        },
+        {
+          "allocation_calls": 1791,
+          "reallocation_calls": 362,
+          "deallocation_calls": 1718,
+          "requested_bytes": 12680340,
+          "live_bytes": 2701624,
+          "peak_live_bytes": 4812797,
+          "allocation_requests": 2153,
+          "peak_rss_kib": 2112,
+          "run": 2
+        },
+        {
+          "allocation_calls": 1779,
+          "reallocation_calls": 362,
+          "deallocation_calls": 1706,
+          "requested_bytes": 12703844,
+          "live_bytes": 2718392,
+          "peak_live_bytes": 3776844,
+          "allocation_requests": 2141,
+          "peak_rss_kib": 2292,
+          "run": 3
+        },
+        {
+          "allocation_calls": 1800,
+          "reallocation_calls": 354,
+          "deallocation_calls": 1732,
+          "requested_bytes": 12678892,
+          "live_bytes": 2692824,
+          "peak_live_bytes": 3765750,
+          "allocation_requests": 2154,
+          "peak_rss_kib": 2664,
+          "run": 4
+        },
+        {
+          "allocation_calls": 1721,
+          "reallocation_calls": 369,
+          "deallocation_calls": 1648,
+          "requested_bytes": 12676508,
+          "live_bytes": 2701624,
+          "peak_live_bytes": 3769841,
+          "allocation_requests": 2090,
+          "peak_rss_kib": 3472,
+          "run": 5
+        }
+      ],
+      "candidate": [
+        {
+          "allocation_calls": 769,
+          "reallocation_calls": 73,
+          "deallocation_calls": 718,
+          "requested_bytes": 2600844,
+          "live_bytes": 397688,
+          "peak_live_bytes": 538433,
+          "allocation_requests": 842,
+          "peak_rss_kib": 852,
+          "run": 1
+        },
+        {
+          "allocation_calls": 729,
+          "reallocation_calls": 77,
+          "deallocation_calls": 676,
+          "requested_bytes": 2615236,
+          "live_bytes": 414584,
+          "peak_live_bytes": 536361,
+          "allocation_requests": 806,
+          "peak_rss_kib": 800,
+          "run": 2
+        },
+        {
+          "allocation_calls": 753,
+          "reallocation_calls": 74,
+          "deallocation_calls": 700,
+          "requested_bytes": 2616484,
+          "live_bytes": 414584,
+          "peak_live_bytes": 538265,
+          "allocation_requests": 827,
+          "peak_rss_kib": 1040,
+          "run": 3
+        },
+        {
+          "allocation_calls": 798,
+          "reallocation_calls": 69,
+          "deallocation_calls": 745,
+          "requested_bytes": 2684180,
+          "live_bytes": 414584,
+          "peak_live_bytes": 629749,
+          "allocation_requests": 867,
+          "peak_rss_kib": 556,
+          "run": 4
+        },
+        {
+          "allocation_calls": 722,
+          "reallocation_calls": 77,
+          "deallocation_calls": 670,
+          "requested_bytes": 2606284,
+          "live_bytes": 406136,
+          "peak_live_bytes": 536633,
+          "allocation_requests": 799,
+          "peak_rss_kib": 596,
+          "run": 5
+        }
+      ]
+    }
+  },
+  "summary": {
+    "allocated-memory": {
+      "reference": {
+        "allocation_calls": {
+          "min": 1698,
+          "median": 1794,
+          "max": 1814
+        },
+        "reallocation_calls": {
+          "min": 357,
+          "median": 363,
+          "max": 370
+        },
+        "deallocation_calls": {
+          "min": 1625,
+          "median": 1721,
+          "max": 1747
+        },
+        "requested_bytes": {
+          "min": 12663490,
+          "median": 12672778,
+          "max": 12697682
+        },
+        "live_bytes": {
+          "min": 2692760,
+          "median": 2693240,
+          "max": 2710008
+        },
+        "peak_live_bytes": {
+          "min": 3761014,
+          "median": 3787082,
+          "max": 4805909
+        },
+        "allocation_requests": {
+          "min": 2068,
+          "median": 2153,
+          "max": 2171
+        },
+        "peak_rss_kib": {
+          "min": 2476,
+          "median": 2572,
+          "max": 3784
+        }
+      },
+      "candidate": {
+        "allocation_calls": {
+          "min": 797,
+          "median": 820,
+          "max": 852
+        },
+        "reallocation_calls": {
+          "min": 65,
+          "median": 70,
+          "max": 70
+        },
+        "deallocation_calls": {
+          "min": 745,
+          "median": 762,
+          "max": 798
+        },
+        "requested_bytes": {
+          "min": 2610586,
+          "median": 2629058,
+          "max": 2728090
+        },
+        "live_bytes": {
+          "min": 406136,
+          "median": 423032,
+          "max": 456920
+        },
+        "peak_live_bytes": {
+          "min": 624404,
+          "median": 631811,
+          "max": 709300
+        },
+        "allocation_requests": {
+          "min": 867,
+          "median": 890,
+          "max": 917
+        },
+        "peak_rss_kib": {
+          "min": 564,
+          "median": 812,
+          "max": 860
+        }
+      }
+    },
+    "apparent-memory": {
+      "reference": {
+        "allocation_calls": {
+          "min": 1721,
+          "median": 1779,
+          "max": 1800
+        },
+        "reallocation_calls": {
+          "min": 354,
+          "median": 362,
+          "max": 369
+        },
+        "deallocation_calls": {
+          "min": 1648,
+          "median": 1706,
+          "max": 1732
+        },
+        "requested_bytes": {
+          "min": 12676508,
+          "median": 12678892,
+          "max": 12703844
+        },
+        "live_bytes": {
+          "min": 2692824,
+          "median": 2701624,
+          "max": 2718392
+        },
+        "peak_live_bytes": {
+          "min": 3765750,
+          "median": 3773092,
+          "max": 4812797
+        },
+        "allocation_requests": {
+          "min": 2090,
+          "median": 2141,
+          "max": 2154
+        },
+        "peak_rss_kib": {
+          "min": 2112,
+          "median": 2532,
+          "max": 3472
+        }
+      },
+      "candidate": {
+        "allocation_calls": {
+          "min": 722,
+          "median": 753,
+          "max": 798
+        },
+        "reallocation_calls": {
+          "min": 69,
+          "median": 74,
+          "max": 77
+        },
+        "deallocation_calls": {
+          "min": 670,
+          "median": 700,
+          "max": 745
+        },
+        "requested_bytes": {
+          "min": 2600844,
+          "median": 2615236,
+          "max": 2684180
+        },
+        "live_bytes": {
+          "min": 397688,
+          "median": 414584,
+          "max": 414584
+        },
+        "peak_live_bytes": {
+          "min": 536361,
+          "median": 538265,
+          "max": 629749
+        },
+        "allocation_requests": {
+          "min": 799,
+          "median": 827,
+          "max": 867
+        },
+        "peak_rss_kib": {
+          "min": 556,
+          "median": 800,
+          "max": 1040
+        }
+      }
+    }
+  },
+  "command_examples": {
+    "rss": [
+      "/usr/bin/time",
+      "-v",
+      "-o",
+      "rss.txt",
+      "env",
+      "RAYON_NUM_THREADS=4",
+      "RELEASE_BINARY",
+      "SIZE_MODE",
+      "/home/josh/d/fdu/perf/fixture"
+    ],
+    "allocations": [
+      "env",
+      "RAYON_NUM_THREADS=4",
+      "ALLOCATION_BINARY",
+      "SIZE_MODE",
+      "/home/josh/d/fdu/perf/fixture"
+    ]
+  },
+  "measurement_notes": "Five fresh-process reference/candidate pairs per mode, alternating order. RSS uses uninstrumented release binaries. Allocation outputs match the reference directory-size mapping, and both release outputs are sorted descending and match; no incomplete-total warnings. No concurrent scanner, profiler, or compiler during sampling."
+}

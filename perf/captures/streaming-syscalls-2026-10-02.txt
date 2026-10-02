@@ -1,0 +1,20 @@
+Bounded directory storage and streaming metadata syscall counts
+Date: 2026-10-02
+Source: 9b4bd1e plus bounded streaming batches and inline child records
+Host: Linux 6.18.33-0-lts; ext4 /dev/nvme0n1p3
+Build: cargo build --locked --release; thin LTO; incremental; default codegen units
+Workers: RAYON_NUM_THREADS=4
+Fixture: generator defaults; 1304020 entries
+Command: strace -f -c -e statx,openat,openat2,getdents64,close -o streaming-64k-syscalls.txt env RAYON_NUM_THREADS=4 fdu-streaming-final perf/fixture
+Binary SHA256: 3f8f041262ba7e16f79083e12c6c1beac9ad21d360e858a3322f71679244cf2d
+
+One traced scan; durations are perturbed and are not performance comparisons.
+
+% time     seconds  usecs/call     calls    errors syscall
+------ ----------- ----------- --------- --------- ----------------
+ 80.71   10.682316           8   1218248           statx
+  7.76    1.027060          11     85829           getdents64
+  6.27    0.829771           9     85772           openat2
+  5.27    0.696992           8     85773           close
+------ ----------- ----------- --------- --------- ----------------
+100.00   13.236139           8   1475622           total

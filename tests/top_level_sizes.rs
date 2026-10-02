@@ -36,6 +36,16 @@ fn allocated_size(path: &Path) -> io::Result<u64> {
     Ok(fs::symlink_metadata(path)?.blocks() * 512)
 }
 
+fn assert_expected_diagnostics(stderr: &[u8]) {
+    if cfg!(feature = "allocation-profile") {
+        let diagnostics = std::str::from_utf8(stderr).unwrap();
+        assert!(diagnostics.starts_with("fdu-allocations "));
+        assert_eq!(diagnostics.lines().count(), 1);
+    } else {
+        assert!(stderr.is_empty());
+    }
+}
+
 #[test]
 fn prints_only_immediate_directory_totals_in_both_size_modes() -> io::Result<()> {
     let temporary = TemporaryDirectory::new()?;
@@ -62,7 +72,7 @@ fn prints_only_immediate_directory_totals_in_both_size_modes() -> io::Result<()>
         .arg(root)
         .output()?;
     assert!(output.status.success());
-    assert!(output.stderr.is_empty());
+    assert_expected_diagnostics(&output.stderr);
     assert_eq!(String::from_utf8_lossy(&output.stdout), expected_allocated);
 
     let output = Command::new(env!("CARGO_BIN_EXE_fdu"))
@@ -70,7 +80,7 @@ fn prints_only_immediate_directory_totals_in_both_size_modes() -> io::Result<()>
         .arg(root)
         .output()?;
     assert!(output.status.success());
-    assert!(output.stderr.is_empty());
+    assert_expected_diagnostics(&output.stderr);
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
         "8\t\"alpha\"\n0\t\"empty\"\n"

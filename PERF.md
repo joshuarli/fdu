@@ -10,7 +10,7 @@ The scanner returns aggregate sizes only. It does not retain or render a full tr
 
 ## Quantified optimization goal
 
-The replacement objective for the paused goal is: **double FDU's throughput on the default ext4 fixture, halve CPU work and allocation traffic, and reduce peak memory while preserving its current accounting, four default Rayon workers, and libc-plus-Rayon dependency boundary.** The targets below define success; they are aspirations, not measured improvements.
+The optimization objective is: **double FDU's throughput on the default ext4 fixture, halve CPU work and allocation traffic, and reduce peak memory while preserving its current accounting, four default Rayon workers, and libc-plus-Rayon dependency boundary.** The targets below define success; they are aspirations, not measured improvements.
 
 Use the default `scripts/generate_inode_fixture.py` tree: 1,304,020 entries, including 85,772 directories and 1,218,248 files. The reference scanner is `bd507f7`, whose scanning code is unchanged in `baeb0af`. Timing and CPU baselines below sum two 39-scan release batches. Memory baselines use five fresh processes per size mode. Source, commands, and binary hashes are recorded in `perf/captures/fdu-goal-baseline-2026-10-02.txt` and `perf/captures/fdu-memory-baseline-2026-10-02.json`.
 
@@ -36,8 +36,9 @@ The goal is achieved when all targets and requirements pass the validation proce
 
 - Linux 6.0 or newer; direct Rust dependencies are libc and Rayon.
 - Four Rayon workers by default. RAYON_NUM_THREADS remains an explicit override.
-- Directory entries are read with getdents64 into a 512 KiB thread-local buffer. Names stay inline for small directories and promote to a byte vector when needed. Parsed entry vectors use a bounded per-thread pool.
-- The first getdents64 batch estimates directory width. Below 128 estimated entries, known non-directory entries are statted while their names still borrow the read buffer; only directories and unknown types are retained. Wider directories retain file records so Rayon can parallelize their metadata calls.
+- Directory entries are read with getdents64 into a reusable 64 KiB buffer. `DirectoryBuffer` leases storage from TLS, so a worker can enumerate another directory while a metadata batch yields to Rayon. Each thread retains at most one enumeration buffer.
+- The first getdents64 batch estimates directory width. Below 128 estimated entries, known non-directory entries are statted directly during enumeration. Wider directories parallelize metadata calls over records for the current read batch; those records borrow the buffer's name bytes and finish before the next read. Only directories and unknown types remain in `DirectoryEntries` after enumeration.
+- Names stay inline for short name lists. `DirectoryEntryStorage` keeps up to two child records inline; larger lists use a bounded per-thread vector pool. Directories with no retained children return their already-computed subtotal without an empty Rayon reduction.
 - File sizes use narrow statx requests and count each hardlinked path independently. On x86-64, statx, getdents64, and openat2 use the Linux syscall ABI directly; other Linux architectures use libc wrappers.
 - Child directories use parent-relative openat2 with O_NOFOLLOW and fall back to openat when openat2 is unavailable or denied.
 - On ext4, the walker recognizes HTree end-of-directory cookies and avoids the trailing empty getdents64 call. Other filesystems use read-until-zero.
@@ -89,7 +90,7 @@ To collect a longer release batch, wrap repeated scans in perf stat. Keep the re
       bash -c 'for run in {1..78}; do target/release/fdu "$1" >/dev/null || exit; done' \
       bash "$workload_dir"
 
-On the generated fixture, a 78-scan release batch took 21.5 seconds. A separate syscall-count pass observed 1,218,248 statx calls, 85,772 openat2 calls, 85,777 getdents64 calls, and 85,773 closes. The strace run perturbs timing; use it for call counts only.
+An earlier 78-scan release batch on the generated fixture took 21.5 seconds. Its syscall-count pass observed 1,218,248 statx calls, 85,772 openat2 calls, 85,777 getdents64 calls, and 85,773 closes. The strace run perturbs timing; use it for call counts only.
 
 ### Allocation and resident-memory validation
 
@@ -116,7 +117,21 @@ Repeat with `--apparent` and separate capture names. Verify successful exit and 
 
 ## Findings and next work
 
-Earlier ext4 experiments on synthetic fixtures found that four workers preserved the filesystem-call count while producing substantially fewer futex operations than eight or sixteen workers. The four-worker default is fixed; no scheduling change is planned.
+### Bounded streaming metadata batches
+
+File names and records now live only for one enumeration batch. Two retained child records fit inline, and reusable buffers are leased from TLS while Rayon consumes a batch. A serial 8 KiB prototype met the memory budgets but slowed a single 30,000-file child directory from about 6.1 ms to 10.9 ms. Parallel metadata batches restored most of that throughput; 64 KiB batches measured about 5.9 ms against a 6.1 ms reference across six alternating 30-scan pairs. These small timing differences do not establish a flat-directory speedup.
+
+Five fresh-process samples per mode met every memory target. Allocated-mode medians were 890 allocation requests, 2.51 MiB requested heap, 0.60 MiB peak live heap, and 812 KiB peak RSS. Apparent-mode medians were 827 requests, 2.49 MiB requested heap, 0.51 MiB peak live heap, and 800 KiB peak RSS. Maximum requested heap stayed below 2.61 MiB, maximum peak live heap below 0.68 MiB, and maximum RSS below the matched reference in each mode. The records, paired references, binary hashes, and measurement methods are in `perf/captures/streaming-memory-2026-10-02.json`.
+
+The current syscall counts are 1,218,248 metadata calls, 85,772 child-directory opens, 85,829 directory reads, and 85,773 closes. The 52 additional reads are about 0.061% above the reference, within the 1% allowance. The traced report is in `perf/captures/streaming-syscalls-2026-10-02.txt`.
+
+Across two alternating 39-scan pairs, allocated-mode elapsed time fell from a summed 18.92 s to 18.47 s, task-clock from 71.40 CPU-s to 70.00 CPU-s, and user instructions from 31.69 billion to 28.18 billion. Apparent-mode elapsed rose about 2.8% and task-clock about 2.1%. These are exploratory samples, fewer than the five 78-scan pairs required for throughput validation. They show a memory improvement and an 11% instruction reduction; the 2x throughput, 50% CPU, and 200-million-instruction targets remain unmet. The commands and raw counters are in `perf/captures/streaming-counters-2026-10-02.json`.
+
+The next measurements should focus on kernel metadata work. Keep the ordinary-user accounting contract and compare full-scanner total CPU cost when evaluating metadata interfaces; user-only instruction counts cannot establish a kernel-time improvement.
+
+### Earlier experiments
+
+Earlier ext4 experiments on synthetic fixtures found that four workers preserved the filesystem-call count while producing substantially fewer futex operations than eight or sixteen workers. The four-worker default remains fixed.
 
 The strongest remaining counter is one statx per non-directory path. A shared inode cache had little opportunity because duplicate non-directory paths were rare. A single-thread statx-versus-fstatat probe favored the narrow statx request in instructions and cycles, while elapsed times overlapped. A single-thread io_uring statx microbenchmark reduced syscall entries but increased context switches, task-clock, and elapsed time. Keep direct statx as the default.
 
@@ -126,7 +141,7 @@ On the mixed fixture, the inline sizing path kept the statx, getdents64, openat2
 
 A trial that replaced child-directory `openat2` (`resolve = 0`) with `openat` produced byte-identical allocated and apparent output and the same statx, getdents64, close, and clone counts. The only syscall-count change was 85,772 `openat2` calls becoming 85,772 `openat` calls. Across two alternating 39-scan pairs, `openat` was slower in both orders and used about 1.9% more user cycles and 0.6% more instructions on average, so the simpler call was rejected. The four counter summaries are in `perf/captures/openat-vs-openat2-2026-10-02.txt`.
 
-The already-cloned `rsdirstat` scanner uses a 1 MiB directory buffer. A one-scan FDU comparison on the current fixture preserved allocated and apparent output, and reduced `getdents64` calls from 85,777 to 85,773; `statx`, `openat2`, `close`, and worker counts were unchanged. Those four saved calls are under 0.005% of the total, while the larger buffer retains another 2 MiB across four workers. One elapsed-time pair was inconclusive, so FDU keeps 512 KiB. Revisit 1 MiB only for much wider flat directories where saved reads become material. The counter summary is in `perf/captures/directory-buffer-1m-2026-10-02.txt`.
+The already-cloned `rsdirstat` scanner uses a 1 MiB directory buffer. A one-scan FDU comparison against its then-current 512 KiB buffer preserved allocated and apparent output, and reduced `getdents64` calls from 85,777 to 85,773; `statx`, `openat2`, `close`, and worker counts were unchanged. Those four saved calls are under 0.005% of the total, while the larger buffer retains another 2 MiB across four workers. One elapsed-time pair was inconclusive, so that trial did not justify 1 MiB. Subsequent streaming experiments use 64 KiB batches. Revisit 1 MiB only for much wider flat directories where saved reads become material. The counter summary is in `perf/captures/directory-buffer-1m-2026-10-02.txt`.
 
 ## Ext4 inode-table research direction
 

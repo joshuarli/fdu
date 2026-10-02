@@ -6,7 +6,7 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::marker::PhantomData;
 use std::mem;
-use std::ops::{Deref, DerefMut};
+use std::ops::Deref;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::OpenOptionsExt;
@@ -15,14 +15,14 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, TryLockError};
 
-// A 512 KiB buffer reads large ext4 directories in fewer getdents64 calls.
-const DIRECTORY_BUFFER_BYTES: usize = 512 * 1024;
+// A small reusable buffer bounds retained memory while batching wide directories.
+const DIRECTORY_BUFFER_BYTES: usize = 64 * 1024;
 // A record needs a 19-byte header and at least one NUL byte for its name.
 const MIN_DIRECTORY_RECORD_BYTES: usize = 20;
 // These limits retain at most 512 KiB of parsed records in each scanning thread's pool.
 const MAX_CACHED_DIRECTORY_ENTRY_CAPACITY: usize = 4096;
 const MAX_CACHED_DIRECTORY_ENTRY_VECTORS: usize = 8;
-// Retain file records when a directory is large enough for parallel metadata calls.
+// Only wide batches need metadata jobs beyond the parallel directory traversal.
 const PARALLEL_METADATA_ENTRY_ESTIMATE_THRESHOLD: usize = 128;
 // Avoid forcing remote metadata refreshes; remote results may reflect cached state.
 const STATX_DONT_SYNC: libc::c_int = 0x4000;
@@ -40,7 +40,40 @@ const MAX_RECURSIVE_DIRECTORY_DEPTH: usize = 64;
 static FILE_LIMIT_LOCK: Mutex<()> = Mutex::new(());
 
 thread_local! {
-    static DIRECTORY_BUFFER: RefCell<Vec<u8>> = RefCell::new(vec![0; DIRECTORY_BUFFER_BYTES]);
+    static DIRECTORY_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::new());
+}
+
+// A metadata batch can yield to another directory job on the same Rayon worker.
+// Move the buffer out of TLS so that nested enumeration leases independent storage.
+struct DirectoryBuffer {
+    bytes: Vec<u8>,
+    _worker: PhantomData<Rc<()>>,
+}
+
+impl DirectoryBuffer {
+    fn with<T>(inspect: impl FnOnce(&mut [u8]) -> T) -> T {
+        let mut bytes = DIRECTORY_BUFFER.with(|buffer| mem::take(&mut *buffer.borrow_mut()));
+        if bytes.is_empty() {
+            bytes.resize(DIRECTORY_BUFFER_BYTES, 0);
+        }
+        let mut buffer = Self {
+            bytes,
+            _worker: PhantomData,
+        };
+        inspect(&mut buffer.bytes)
+    }
+}
+
+impl Drop for DirectoryBuffer {
+    fn drop(&mut self) {
+        let bytes = mem::take(&mut self.bytes);
+        let _ = DIRECTORY_BUFFER.try_with(|buffer| {
+            let mut cached = buffer.borrow_mut();
+            if cached.is_empty() {
+                *cached = bytes;
+            }
+        });
+    }
 }
 
 #[repr(C)]
@@ -57,41 +90,96 @@ thread_local! {
 
 // The Rc marker keeps each buffer lease on the thread whose TLS pool owns its capacity.
 struct PooledDirectoryEntries {
-    entries: Vec<DirectoryEntry>,
+    entries: DirectoryEntryStorage,
     _worker: PhantomData<Rc<()>>,
+}
+
+// Single-child chains retain their records without allocating at every level of descent.
+enum DirectoryEntryStorage {
+    Inline {
+        entries: [DirectoryEntry; 2],
+        len: usize,
+    },
+    Heap(Vec<DirectoryEntry>),
 }
 
 impl PooledDirectoryEntries {
     fn take() -> Self {
-        let entries = DIRECTORY_ENTRY_POOL.with(|pool| pool.borrow_mut().pop().unwrap_or_default());
         Self {
-            entries,
+            entries: DirectoryEntryStorage::Inline {
+                entries: [DirectoryEntry {
+                    name_offset: 0,
+                    name_length: 0,
+                    kind: EntryKind::Unknown,
+                }; 2],
+                len: 0,
+            },
             _worker: PhantomData,
         }
+    }
+
+    #[cfg(test)]
+    fn capacity(&self) -> usize {
+        match &self.entries {
+            DirectoryEntryStorage::Inline { entries, .. } => entries.len(),
+            DirectoryEntryStorage::Heap(entries) => entries.capacity(),
+        }
+    }
+
+    fn reserve(&mut self, additional: usize) {
+        if let DirectoryEntryStorage::Inline { entries, len } = &self.entries {
+            if *len + additional <= entries.len() {
+                return;
+            }
+            let mut heap = DIRECTORY_ENTRY_POOL.with(|pool| {
+                pool.borrow_mut().pop().unwrap_or_default()
+            });
+            heap.reserve(*len + additional);
+            heap.extend_from_slice(&entries[..*len]);
+            self.entries = DirectoryEntryStorage::Heap(heap);
+        } else if let DirectoryEntryStorage::Heap(entries) = &mut self.entries {
+            entries.reserve(additional);
+        }
+    }
+
+    fn push(&mut self, entry: DirectoryEntry, capacity_hint: usize) {
+        if let DirectoryEntryStorage::Inline { entries, len } = &mut self.entries {
+            if *len < entries.len() {
+                entries[*len] = entry;
+                *len += 1;
+                return;
+            }
+            let additional = capacity_hint.saturating_sub(*len).max(1);
+            self.reserve(additional);
+        }
+        let DirectoryEntryStorage::Heap(entries) = &mut self.entries else {
+            unreachable!("inline entries promote before exceeding their capacity");
+        };
+        entries.push(entry);
     }
 }
 
 impl Deref for PooledDirectoryEntries {
-    type Target = Vec<DirectoryEntry>;
+    type Target = [DirectoryEntry];
 
     fn deref(&self) -> &Self::Target {
-        &self.entries
-    }
-}
-
-impl DerefMut for PooledDirectoryEntries {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.entries
+        match &self.entries {
+            DirectoryEntryStorage::Inline { entries, len } => &entries[..*len],
+            DirectoryEntryStorage::Heap(entries) => entries,
+        }
     }
 }
 
 impl Drop for PooledDirectoryEntries {
     fn drop(&mut self) {
-        if self.entries.capacity() > MAX_CACHED_DIRECTORY_ENTRY_CAPACITY {
+        let DirectoryEntryStorage::Heap(entries) = &mut self.entries else {
+            return;
+        };
+        if entries.capacity() > MAX_CACHED_DIRECTORY_ENTRY_CAPACITY {
             return;
         }
-        self.entries.clear();
-        let entries = mem::take(&mut self.entries);
+        entries.clear();
+        let entries = mem::take(entries);
         let _ = DIRECTORY_ENTRY_POOL.try_with(|pool| {
             let mut pool = pool.borrow_mut();
             if pool.len() < MAX_CACHED_DIRECTORY_ENTRY_VECTORS {
@@ -146,12 +234,6 @@ impl DirectoryNames {
         match self {
             Self::Inline(bytes) => &bytes[..inline_name_bytes_len(bytes)],
             Self::Heap(names) => names,
-        }
-    }
-
-    fn reserve(&mut self, additional: usize) {
-        if let Self::Heap(names) = self {
-            names.reserve(additional);
         }
     }
 
@@ -396,6 +478,9 @@ fn scan_directory_contents(
         apparent,
         skipped_entries,
     )?;
+    if entries.is_empty() {
+        return Ok(disk_size);
+    }
     let name_bytes = names.as_slice();
     let child_size = entries
         .par_iter()
@@ -1079,16 +1164,16 @@ fn read_directory(
     apparent: bool,
     skipped_entries: &AtomicUsize,
 ) -> io::Result<DirectoryEntries> {
-    DIRECTORY_BUFFER.with(|buffer| {
-        let mut buffer = buffer.borrow_mut();
+    DirectoryBuffer::with(|buffer| {
         let mut entries = PooledDirectoryEntries::take();
         let mut names = DirectoryNames::new();
         let mut disk_size = 0u64;
         let mut parallel_file_entries = false;
+        let mut file_entries = Vec::new();
         let mut first_batch = true;
 
         loop {
-            let bytes_read = match getdents64_call(fd, buffer.as_mut_slice()) {
+            let bytes_read = match getdents64_call(fd, buffer) {
                 Ok(bytes_read) => bytes_read,
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Err(error) => return Err(error),
@@ -1107,9 +1192,8 @@ fn read_directory(
             if first_batch {
                 // The first batch includes the two dot entries, which are not retained.
                 estimated_entries = estimated_entries.saturating_sub(2);
-                parallel_file_entries =
-                    !directories_only
-                        && estimated_entries >= PARALLEL_METADATA_ENTRY_ESTIMATE_THRESHOLD;
+                parallel_file_entries = !directories_only
+                    && estimated_entries >= PARALLEL_METADATA_ENTRY_ESTIMATE_THRESHOLD;
                 first_batch = false;
             }
             let mut offset = 0;
@@ -1154,11 +1238,21 @@ fn read_directory(
                 }
 
                 if name_bytes != b"." && name_bytes != b".." {
-                    if !directories_only
-                        && !parallel_file_entries
-                        && matches!(kind, EntryKind::Other)
-                    {
-                        // Known non-directories need no retained names or Rayon jobs.
+                    if !directories_only && matches!(kind, EntryKind::Other) {
+                        if parallel_file_entries {
+                            if file_entries.is_empty() {
+                                file_entries.reserve(estimated_entries);
+                            }
+                            // File records borrow only this batch; the u16 record length bounds names.
+                            file_entries.push(DirectoryEntry {
+                                name_offset: offset + 19,
+                                name_length: name_length as u16,
+                                kind,
+                            });
+                            offset += record_length;
+                            continue;
+                        }
+                        // Narrow directories size files without retaining their names or records.
                         let name_with_nul = &buffer[offset + 19..offset + 19 + name_length + 1];
                         // name_length points at the first NUL in the getdents64 record.
                         let name = unsafe { CStr::from_bytes_with_nul_unchecked(name_with_nul) };
@@ -1181,29 +1275,40 @@ fn read_directory(
                             }
                         }
                     } else if !directories_only || !matches!(kind, EntryKind::Other) {
-                        if entries.is_empty() {
-                            let cached_capacity_remaining =
-                                MAX_CACHED_DIRECTORY_ENTRY_CAPACITY.saturating_sub(entries.len());
-                            // Most directories contain only files or only subdirectories.
-                            entries.reserve(estimated_entries.min(cached_capacity_remaining));
-                            // Leave room for common short names while allowing longer names to grow.
-                            names.reserve(bytes_read / 4);
-                        }
                         let length = u16::try_from(name_bytes.len()).map_err(|_| {
                             io::Error::new(
                                 io::ErrorKind::InvalidData,
                                 "directory entry name exceeds the supported length",
                             )
                         })?;
-                        let start = names.append_name(name_bytes, bytes_read / 4);
-                        entries.push(DirectoryEntry {
-                            name_offset: start,
-                            name_length: length,
-                            kind,
-                        });
+                        let start = names.append_name(name_bytes, bytes_read / 2);
+                        entries.push(
+                            DirectoryEntry {
+                                name_offset: start,
+                                name_length: length,
+                                kind,
+                            },
+                            estimated_entries.min(MAX_CACHED_DIRECTORY_ENTRY_CAPACITY),
+                        );
                     }
                 }
                 offset += record_length;
+            }
+            if !file_entries.is_empty() {
+                let batch_size = file_batch_size(
+                    fd,
+                    buffer,
+                    &file_entries,
+                    apparent,
+                    skipped_entries,
+                )?;
+                disk_size = disk_size.checked_add(batch_size).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "directory total exceeds the supported byte-count range",
+                    )
+                })?;
+                file_entries.clear();
             }
             // Ext4 HTree reserves these d_off values for an exhausted directory.
             if ext4_eof_cookie
@@ -1219,6 +1324,42 @@ fn read_directory(
             disk_size,
         })
     })
+}
+
+fn file_batch_size(
+    fd: libc::c_int,
+    names: &[u8],
+    entries: &[DirectoryEntry],
+    apparent: bool,
+    skipped_entries: &AtomicUsize,
+) -> io::Result<u64> {
+    entries
+        .par_iter()
+        .map(|entry| {
+            match with_stat_at(
+                fd,
+                entry.as_c_str(names),
+                entry_size_mask(apparent),
+                |stat| file_size(stat, apparent),
+            ) {
+                Ok(size) => Ok(size),
+                Err(_) => {
+                    skipped_entries.fetch_add(1, Ordering::Relaxed);
+                    Ok(0)
+                }
+            }
+        })
+        .try_reduce(
+            || 0u64,
+            |left, right| {
+                left.checked_add(right).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "directory total exceeds the supported byte-count range",
+                    )
+                })
+            },
+        )
 }
 
 #[cfg(test)]
@@ -1312,7 +1453,8 @@ mod tests {
         assert!(cached_capacity <= MAX_CACHED_DIRECTORY_ENTRY_CAPACITY);
         drop(entries);
 
-        let entries = super::PooledDirectoryEntries::take();
+        let mut entries = super::PooledDirectoryEntries::take();
+        entries.reserve(64);
         assert_eq!(entries.capacity(), cached_capacity);
         drop(entries);
 
@@ -1329,7 +1471,7 @@ mod tests {
             .map(|_| super::PooledDirectoryEntries::take())
             .collect::<Vec<_>>();
         for buffer in &mut buffers {
-            buffer.reserve(1);
+            buffer.reserve(64);
         }
         drop(buffers);
         let cached_count = DIRECTORY_ENTRY_POOL.with(|pool| pool.borrow().len());
@@ -1465,9 +1607,72 @@ mod tests {
                 .max()
                 .unwrap_or(0)
         });
-        assert!(cached_entry_capacity >= FILE_COUNT);
         assert!(cached_entry_capacity <= MAX_CACHED_DIRECTORY_ENTRY_CAPACITY);
 
+        Ok(())
+    }
+
+    #[test]
+    fn directory_buffer_leases_preserve_outer_bytes_during_nested_enumeration() {
+        super::DirectoryBuffer::with(|outer| {
+            outer[0] = 41;
+            let outer_pointer = outer.as_ptr();
+            super::DirectoryBuffer::with(|nested| {
+                assert_ne!(nested.as_ptr(), outer_pointer);
+                nested[0] = 73;
+                assert_eq!(outer[0], 41);
+            });
+            assert_eq!(outer[0], 41);
+        });
+        super::DirectoryBuffer::with(|reused| {
+            assert_eq!(reused[0], 73);
+            assert_eq!(reused.len(), super::DIRECTORY_BUFFER_BYTES);
+        });
+    }
+
+    #[test]
+    fn keeps_two_child_directories_inline_during_enumeration() -> io::Result<()> {
+        let temporary = TemporaryDirectory::new()?;
+        fs::create_dir(temporary.0.join("first"))?;
+        fs::create_dir(temporary.0.join("second"))?;
+        let directory = File::open(&temporary.0)?;
+        let skipped_entries = AtomicUsize::new(0);
+        let result = super::read_directory(
+            std::os::fd::AsRawFd::as_raw_fd(&directory),
+            false,
+            false,
+            true,
+            &skipped_entries,
+        )?;
+        assert_eq!(result.entries.len(), 2);
+        assert!(matches!(result.entries.entries, super::DirectoryEntryStorage::Inline { .. }));
+        assert_eq!(result.disk_size, 0);
+        assert_eq!(skipped_entries.load(Ordering::Relaxed), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn sizes_wide_file_batches_without_retaining_file_records() -> io::Result<()> {
+        let temporary = TemporaryDirectory::new()?;
+        let mut expected_allocated = 0;
+        for index in 0..160 {
+            let path = temporary.0.join(format!("file-{index:04}"));
+            fs::write(&path, b"batch")?;
+            expected_allocated += allocated_size(&path)?;
+        }
+        let directory = File::open(&temporary.0)?;
+        let skipped_entries = AtomicUsize::new(0);
+        let result = super::read_directory(
+            std::os::fd::AsRawFd::as_raw_fd(&directory),
+            false,
+            false,
+            false,
+            &skipped_entries,
+        )?;
+        assert_eq!(result.disk_size, expected_allocated);
+        assert!(result.entries.is_empty());
+        assert!(result.names.as_slice().is_empty());
+        assert_eq!(skipped_entries.load(Ordering::Relaxed), 0);
         Ok(())
     }
 
