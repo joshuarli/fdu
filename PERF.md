@@ -28,7 +28,7 @@ The root `statx` request now asks only for type; Linux returns the containing-de
 
 On the 8,192-file ext4 flat-directory fixture, `perf stat -r 30` favored the new storage path in both run orders. In the last same-second pair, task-clock was 8.03 ms before and 5.49 ms after, instructions were 16.07 million and 12.97 million, and elapsed time was 4.196 ms and 3.429 ms. The fixture output compared byte-for-byte. This small fixture and noisy host do not establish a full-tree throughput gain. Raw captures are `target/perf-initial/fdu-name-move-before-30.txt`, `target/perf-initial/fdu-name-move-after-30.txt`, `target/perf-initial/fdu-name-move-before-30b.txt`, and `target/perf-initial/fdu-name-move-after-30b.txt`; the pre-change executable is `target/perf-initial/fdu-name-move-baseline`.
 
-Per-entry filesystem failures still omit that item and any unreadable subtree, but the walker now counts these failures and reports the total on standard error with an incomplete-total warning. An ext4 smoke directory with one inaccessible child produced the warning and retained the readable sibling. Root-level open or enumeration failures remain fatal.
+Per-entry filesystem or size-overflow errors omit that item and any unreadable subtree, but the walker counts these failures and reports the total on standard error with an incomplete-total warning. An ext4 smoke directory with one inaccessible child produced the warning and retained the readable sibling. Root-level open, enumeration, or size-total overflow failures remain fatal.
 
 ## Large-directory read buffer
 

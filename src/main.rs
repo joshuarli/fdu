@@ -51,7 +51,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let report = linux::scan(&options.path, options.apparent)?;
     if report.skipped_entries != 0 {
         eprintln!(
-            "fdu: warning: skipped {} entries after filesystem errors; size totals may be incomplete",
+            "fdu: warning: skipped {} entries after errors; size totals may be incomplete",
             report.skipped_entries
         );
     }

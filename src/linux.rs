@@ -192,7 +192,15 @@ fn scan_directory(
         .collect::<Vec<_>>();
 
     children.sort_unstable_by(|left, right| right.disk_size.cmp(&left.disk_size));
-    let disk_size = children.iter().map(|child| child.disk_size).sum();
+    let disk_size = children
+        .iter()
+        .try_fold(0u64, |total, child| total.checked_add(child.disk_size))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "directory total exceeds the supported byte-count range",
+            )
+        })?;
 
     Ok(DiskItem {
         name,
@@ -356,7 +364,16 @@ fn file_item(entry: DirectoryEntry, stat: LinuxStatx, apparent: bool) -> io::Res
             "filesystem did not report the requested file size",
         ));
     }
-    let size = if apparent { stat.size } else { stat.blocks * 512 };
+    let size = if apparent {
+        stat.size
+    } else {
+        stat.blocks.checked_mul(512).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "file total exceeds the supported byte-count range",
+            )
+        })?
+    };
     Ok(DiskItem {
         name: OsString::from_vec(entry.name.into_bytes()),
         disk_size: size,
