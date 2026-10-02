@@ -254,11 +254,8 @@ enum DirectoryReference<'a> {
 }
 
 struct OutputFrame<'a> {
-    name: &'a [u8],
-    disk_size: u64,
-    directory: Option<DirectoryReference<'a>>,
+    directory: DirectoryReference<'a>,
     depth: usize,
-    wrote_item: bool,
     next_child: usize,
 }
 
@@ -268,37 +265,21 @@ fn write_tree(
     directories: &[DirectoryContents],
     output: &mut impl Write,
 ) -> io::Result<()> {
+    write_tree_entry(root_name.as_bytes(), root.disk_size, 0, output)?;
     let mut stack = vec![OutputFrame {
-        name: root_name.as_bytes(),
-        disk_size: root.disk_size,
-        directory: Some(DirectoryReference::Inline(root)),
+        directory: DirectoryReference::Inline(root),
         depth: 0,
-        wrote_item: false,
         next_child: 0,
     }];
 
-    while let Some(frame) = stack.last_mut() {
-        if !frame.wrote_item {
-            let mut remaining_depth = frame.depth;
-            while remaining_depth != 0 {
-                let levels = remaining_depth.min(INDENT_CHUNK.len() / 2);
-                output.write_all(&INDENT_CHUNK[..levels * 2])?;
-                remaining_depth -= levels;
-            }
-            write_size_and_tab(frame.disk_size, output)?;
-            write_name(frame.name, output)?;
-            output.write_all(b"\n")?;
-            frame.wrote_item = true;
-        }
-
+    while !stack.is_empty() {
         let next_child = loop {
             let frame = stack.last_mut().expect("output frame is present");
             let directory = match frame.directory {
-                Some(DirectoryReference::Inline(directory)) => directory,
-                Some(DirectoryReference::Stored(directory_id)) => {
+                DirectoryReference::Inline(directory) => directory,
+                DirectoryReference::Stored(directory_id) => {
                     &directories[directory_id.index()]
                 }
-                None => break None,
             };
             match directory.items.get(frame.next_child) {
                 Some(DirectoryItem::Skipped) => frame.next_child += 1,
@@ -316,20 +297,37 @@ fn write_tree(
         };
 
         if let Some((name, disk_size, directory, depth)) = next_child {
-            stack.push(OutputFrame {
-                name,
-                disk_size,
-                directory,
-                depth,
-                wrote_item: false,
-                next_child: 0,
-            });
+            write_tree_entry(name, disk_size, depth, output)?;
+            if let Some(directory) = directory {
+                stack.push(OutputFrame {
+                    directory,
+                    depth,
+                    next_child: 0,
+                });
+            }
         } else {
             stack.pop();
         }
     }
 
     Ok(())
+}
+
+fn write_tree_entry(
+    name: &[u8],
+    disk_size: u64,
+    depth: usize,
+    output: &mut impl Write,
+) -> io::Result<()> {
+    let mut remaining_depth = depth;
+    while remaining_depth != 0 {
+        let levels = remaining_depth.min(INDENT_CHUNK.len() / 2);
+        output.write_all(&INDENT_CHUNK[..levels * 2])?;
+        remaining_depth -= levels;
+    }
+    write_size_and_tab(disk_size, output)?;
+    write_name(name, output)?;
+    output.write_all(b"\n")
 }
 
 fn write_size_and_tab(mut size: u64, output: &mut impl Write) -> io::Result<()> {
