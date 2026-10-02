@@ -1,4 +1,4 @@
-use crate::{DirectoryContents, DirectoryId, DiskItem, ScanReport, StoredDirectory};
+use crate::{DirectoryContents, DirectoryId, DirectoryItem, DiskItem, ScanReport, StoredDirectory};
 use rayon::prelude::*;
 use std::cell::RefCell;
 use std::ffi::CStr;
@@ -52,7 +52,7 @@ struct DirectoryFrame {
     names: Vec<u8>,
     entries: Vec<DirectoryEntry>,
     next_entry: usize,
-    items: Vec<DiskItem>,
+    items: Vec<DirectoryItem>,
     parent_name_offset: Option<usize>,
     ext4_eof_cookie: bool,
 }
@@ -239,7 +239,7 @@ fn scan_directory_contents(
     let items = entries
         .par_iter()
         .copied()
-        .filter_map(|entry| {
+        .map(|entry| {
             match scan_entry(
                 &directory,
                 &names,
@@ -251,10 +251,10 @@ fn scan_directory_contents(
                 skipped_entries,
                 arena,
             ) {
-                Ok(item) => Some(item),
+                Ok(item) => DirectoryItem::Scanned(item),
                 Err(_) => {
                     skipped_entries.fetch_add(1, Ordering::Relaxed);
-                    None
+                    DirectoryItem::Skipped
                 }
             }
         })
@@ -265,13 +265,13 @@ fn scan_directory_contents(
 
 fn finish_directory(
     names: Vec<u8>,
-    mut items: Vec<DiskItem>,
+    mut items: Vec<DirectoryItem>,
     arena: &Mutex<Vec<DirectoryContents>>,
 ) -> io::Result<DirectoryContents> {
-    items.sort_unstable_by(|left, right| right.disk_size.cmp(&left.disk_size));
+    items.sort_unstable_by(|left, right| right.disk_size().cmp(&left.disk_size()));
     let disk_size = match items
         .iter()
-        .try_fold(0u64, |total, child| total.checked_add(child.disk_size))
+        .try_fold(0u64, |total, child| total.checked_add(child.disk_size()))
     {
         Some(disk_size) => disk_size,
         None => {
@@ -291,10 +291,10 @@ fn finish_directory(
 }
 
 // Remove stored descendants when an overflowing total causes the whole subtree to be skipped.
-fn discard_child_directories(arena: &Mutex<Vec<DirectoryContents>>, items: &[DiskItem]) {
+fn discard_child_directories(arena: &Mutex<Vec<DirectoryContents>>, items: &[DirectoryItem]) {
     let mut pending = items
         .iter()
-        .filter_map(|item| item.children)
+        .filter_map(DirectoryItem::children)
         .collect::<Vec<_>>();
     if pending.is_empty() {
         return;
@@ -312,7 +312,7 @@ fn discard_child_directories(arena: &Mutex<Vec<DirectoryContents>>, items: &[Dis
                 disk_size: 0,
             },
         );
-        pending.extend(directory.items.into_iter().filter_map(|item| item.children));
+        pending.extend(directory.items.into_iter().filter_map(|item| item.children()));
     }
 }
 
@@ -395,7 +395,7 @@ fn scan_directory_iterative(
                         .last_mut()
                         .expect("root directory frame remains present")
                         .items
-                        .push(item);
+                        .push(DirectoryItem::Scanned(item));
                 }
                 Ok(ScannedEntry::Directory {
                     directory,
@@ -405,10 +405,20 @@ fn scan_directory_iterative(
                     Ok(frame) => stack.push(frame),
                     Err(_) => {
                         skipped_entries.fetch_add(1, Ordering::Relaxed);
+                        stack
+                            .last_mut()
+                            .expect("root directory frame remains present")
+                            .items
+                            .push(DirectoryItem::Skipped);
                     }
                 },
                 Err(_) => {
                     skipped_entries.fetch_add(1, Ordering::Relaxed);
+                    stack
+                        .last_mut()
+                        .expect("root directory frame remains present")
+                        .items
+                        .push(DirectoryItem::Skipped);
                 }
             }
             continue;
@@ -425,11 +435,11 @@ fn scan_directory_iterative(
                             .last_mut()
                             .expect("child directory has a parent frame")
                             .items
-                            .push(DiskItem {
+                            .push(DirectoryItem::Scanned(DiskItem::new(
                                 name_offset,
-                                disk_size: stored.disk_size,
-                                children: Some(stored.id),
-                            });
+                                stored.disk_size,
+                                Some(stored.id),
+                            )));
                     }
                     None => return Ok(contents),
                 }
@@ -437,6 +447,11 @@ fn scan_directory_iterative(
             Err(error) => match parent_name_offset {
                 Some(_) => {
                     skipped_entries.fetch_add(1, Ordering::Relaxed);
+                    stack
+                        .last_mut()
+                        .expect("child directory has a parent frame")
+                        .items
+                        .push(DirectoryItem::Skipped);
                 }
                 None => return Err(error),
             },
@@ -585,11 +600,11 @@ fn scan_child_directory(
     )?;
     let directory = store_directory(arena, contents);
 
-    Ok(DiskItem {
-        name_offset: entry.name_offset,
-        disk_size: directory.disk_size,
-        children: Some(directory.id),
-    })
+    Ok(DiskItem::new(
+        entry.name_offset,
+        directory.disk_size,
+        Some(directory.id),
+    ))
 }
 
 fn open_child_entry(
@@ -757,11 +772,7 @@ fn file_item(entry: DirectoryEntry, stat: LinuxStatx, apparent: bool) -> io::Res
             )
         })?
     };
-    Ok(DiskItem {
-        name_offset: entry.name_offset,
-        disk_size: size,
-        children: None,
-    })
+    Ok(DiskItem::new(entry.name_offset, size, None))
 }
 
 fn stat_at(parent_fd: libc::c_int, name: &CStr, mask: libc::c_uint) -> io::Result<LinuxStatx> {
@@ -952,7 +963,7 @@ fn read_directory(fd: libc::c_int, ext4_eof_cookie: bool) -> io::Result<Director
 
 #[cfg(test)]
 mod tests {
-    use super::{retry_interrupted, scan, DirectoryContents, DiskItem};
+    use super::{retry_interrupted, scan, DirectoryContents, DirectoryItem, DiskItem};
     use std::cell::Cell;
     use std::error::Error;
     use std::fs::{self, File};
@@ -960,6 +971,7 @@ mod tests {
     use std::os::unix::fs::{symlink, MetadataExt};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
 
     static TEMP_DIRECTORY_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -992,7 +1004,14 @@ mod tests {
         directory
             .items
             .iter()
-            .find(|item| directory.name_bytes(item.name_offset) == name)
+            .find_map(|directory_item| match directory_item {
+                DirectoryItem::Scanned(item)
+                    if directory.name_bytes(item.name_offset()) == name =>
+                {
+                    Some(item)
+                }
+                DirectoryItem::Scanned(_) | DirectoryItem::Skipped => None,
+            })
             .expect("fixture entry is present")
     }
 
@@ -1010,6 +1029,29 @@ mod tests {
 
         assert_eq!(result.unwrap(), 17);
         assert_eq!(attempts.get(), 2);
+    }
+
+    #[test]
+    fn skipped_directory_items_do_not_contribute_to_totals_or_output() -> io::Result<()> {
+        let mut names = b"unreadable\0".to_vec();
+        let readable_offset = names.len();
+        names.extend_from_slice(b"readable\0");
+        let items = vec![
+            DirectoryItem::Skipped,
+            DirectoryItem::Scanned(DiskItem::new(readable_offset, 7, None)),
+        ];
+        let directory = super::finish_directory(names, items, &Mutex::new(Vec::new()))?;
+        assert_eq!(directory.disk_size, 7);
+
+        let mut output = Vec::new();
+        crate::write_tree(
+            std::ffi::OsStr::new("root"),
+            &directory,
+            &[],
+            &mut output,
+        )?;
+        assert_eq!(output, b"7\troot\n  7\treadable\n");
+        Ok(())
     }
 
     #[test]

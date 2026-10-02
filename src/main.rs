@@ -16,9 +16,50 @@ use std::process;
 const DEFAULT_RAYON_THREADS: usize = 4;
 
 struct DiskItem {
-    name_offset: usize,
+    name_offset: NonZeroUsize,
     disk_size: u64,
     children: Option<DirectoryId>,
+}
+
+impl DiskItem {
+    fn new(name_offset: usize, disk_size: u64, children: Option<DirectoryId>) -> Self {
+        // The zero niche keeps the skipped outcome the same size as a scanned directory item.
+        let name_offset = name_offset
+            .checked_add(1)
+            .and_then(NonZeroUsize::new)
+            .expect("directory name offset is representable");
+        Self {
+            name_offset,
+            disk_size,
+            children,
+        }
+    }
+
+    fn name_offset(&self) -> usize {
+        self.name_offset.get() - 1
+    }
+}
+
+// One outcome per entry keeps Rayon collection indexed and avoids merging filtered worker vectors.
+enum DirectoryItem {
+    Scanned(DiskItem),
+    Skipped,
+}
+
+impl DirectoryItem {
+    fn disk_size(&self) -> u64 {
+        match self {
+            Self::Scanned(item) => item.disk_size,
+            Self::Skipped => 0,
+        }
+    }
+
+    fn children(&self) -> Option<DirectoryId> {
+        match self {
+            Self::Scanned(item) => item.children,
+            Self::Skipped => None,
+        }
+    }
 }
 
 // Nonzero indices keep an optional child link to one machine word.
@@ -44,12 +85,14 @@ struct StoredDirectory {
 
 struct DirectoryContents {
     names: Vec<u8>,
-    items: Vec<DiskItem>,
+    items: Vec<DirectoryItem>,
     disk_size: u64,
 }
 
 #[cfg(target_pointer_width = "64")]
 const _: [(); 24] = [(); std::mem::size_of::<DiskItem>()];
+const _: [(); std::mem::size_of::<DiskItem>()] =
+    [(); std::mem::size_of::<DirectoryItem>()];
 
 struct ScanReport {
     root_name: OsString,
@@ -244,30 +287,27 @@ fn write_tree(
             frame.wrote_item = true;
         }
 
-        let next_child = {
+        let next_child = loop {
             let frame = stack.last_mut().expect("output frame is present");
-            match frame.directory {
-                Some(directory_reference) => {
-                    let directory = match directory_reference {
-                        DirectoryReference::Inline(directory) => directory,
-                        DirectoryReference::Stored(directory_id) => {
-                            &directories[directory_id.index()]
-                        }
-                    };
-                    match directory.items.get(frame.next_child) {
-                        Some(child) => {
-                            frame.next_child += 1;
-                            Some((
-                                directory.name_bytes(child.name_offset),
-                                child.disk_size,
-                                child.children.map(DirectoryReference::Stored),
-                                frame.depth + 1,
-                            ))
-                        }
-                        None => None,
-                    }
+            let directory = match frame.directory {
+                Some(DirectoryReference::Inline(directory)) => directory,
+                Some(DirectoryReference::Stored(directory_id)) => {
+                    &directories[directory_id.index()]
                 }
-                None => None,
+                None => break None,
+            };
+            match directory.items.get(frame.next_child) {
+                Some(DirectoryItem::Skipped) => frame.next_child += 1,
+                Some(DirectoryItem::Scanned(child)) => {
+                    frame.next_child += 1;
+                    break Some((
+                        directory.name_bytes(child.name_offset()),
+                        child.disk_size,
+                        child.children.map(DirectoryReference::Stored),
+                        frame.depth + 1,
+                    ));
+                }
+                None => break None,
             }
         };
 
