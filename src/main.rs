@@ -3,7 +3,6 @@ compile_error!("fdu supports Linux only");
 
 mod linux;
 
-use rayon::ThreadPoolBuilder;
 use std::env;
 use std::error::Error;
 use std::ffi::CStr;
@@ -41,7 +40,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
 
     require_linux_6()?;
-    initialize_rayon_pool()?;
+    configure_rayon_threads();
 
     let tree = linux::scan(&options.path, options.apparent)?;
     let stdout = io::stdout();
@@ -129,14 +128,13 @@ fn require_linux_6() -> io::Result<()> {
     Ok(())
 }
 
-fn initialize_rayon_pool() -> Result<(), rayon::ThreadPoolBuildError> {
-    let mut builder = ThreadPoolBuilder::new();
+// Set the default before Rayon creates its global pool on the first parallel operation.
+fn configure_rayon_threads() {
     if env::var_os("RAYON_NUM_THREADS").is_none() {
         let workers = std::thread::available_parallelism()
             .map_or(1, |parallelism| parallelism.get().min(MAX_DEFAULT_RAYON_THREADS));
-        builder = builder.num_threads(workers);
+        env::set_var("RAYON_NUM_THREADS", workers.to_string());
     }
-    builder.build_global()
 }
 
 fn print_help() {

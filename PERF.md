@@ -4,7 +4,7 @@
 
 Captured 2026-10-02 on the same ext4 `~/d/crabc` workload as the source scanner. The tree was changing while other work continued, so wall time and scheduler counts are not stable performance evidence. Every measured process ran as the normal user; `perf` ran through `doas`. No caches were dropped.
 
-`fdu` leaves `RAYON_NUM_THREADS` unset and creates a four-worker global pool by default. A paired syscall pass recorded four worker clones for both implementations. The filesystem syscall counts matched: 995,293 `statx`, 60,226 `openat`, 60,197 `close`, and 120,467 `getdents64`. `fdu` avoided the source CLI's extra root `newlstat`; both paths performed the same root `statx` and recursive filesystem operations.
+`fdu` sets `RAYON_NUM_THREADS` to four when the user has not set it, then lets Rayon initialize its global pool on first use. A paired syscall pass recorded four worker clones for both implementations. The filesystem syscall counts matched: 995,293 `statx`, 60,226 directory opens, 60,197 `close`, and 120,467 `getdents64`. `fdu` avoided the source CLI's extra root `newlstat`; both paths performed the same root `statx` and recursive filesystem operations.
 
 Three alternating fixed-four captures on a later snapshot again showed matching traversal calls. The path count in the preceding user-readable inventory was 1,055,519.
 
@@ -18,6 +18,22 @@ The mean futex counts differ by about 1%; their run-to-run spread is much larger
 
 A ten-scan on-CPU profile of `fdu` recorded 7,333 samples with zero lost. `ext4_file_getattr` was 5.92% and Rayon `__lock` was 4.96% of samples. `memcpy` was 4.80%, including formatting the full plain-text tree even though stdout was redirected. Raw captures are in the ignored `target/perf-initial/` directory, including `fdu-crabc-pinned-rayon-10.data` and its report.
 
+## One directory-open syscall
+
+`open_child_directory` now uses `openat2` with `RESOLVE_NO_XDEV`. The entry name is a single directory component and `O_NOFOLLOW` prevents following a symlink. A successful open cannot cross a mount, so the child inherits its already-validated parent's device and needs no follow-up `File::metadata()` call. The [`openat2(2)` documentation](https://man7.org/linux/man-pages/man2/openat2.2.html) specifies that `RESOLVE_NO_XDEV` blocks mount crossings, including bind mounts, and returns `EXDEV` for one. On `EXDEV`, `ENOSYS`, or `EPERM`, `fdu` falls back to `openat` plus the explicit device check; this preserves traversal into same-device bind mounts and supports restricted syscall environments.
+
+On a later `crabc` snapshot, the task trace counted 70,770 `openat2`, zero `openat`, 1,030,066 `statx`, and 141,555 `getdents64` calls with four worker clones. The paired existing walker used 70,770 `openat` calls on the same snapshot. The fast path therefore removed its per-child descriptor metadata check for all 70,770 directory opens. The host lacks a `sys_enter_fstat` tracepoint, so the removed check is established by the code path rather than a direct counter. The ten-scan profile recorded 7,643 samples with zero lost; `ext4_file_getattr` remained 6.17% of samples. Raw captures are `target/perf-initial/fdu-openat2-crabc-syscalls.txt`, `target/perf-initial/dirstat-openat2-baseline-crabc-syscalls.txt`, `target/perf-initial/fdu-crabc-openat2-10.data`, and `target/perf-initial/fdu-crabc-openat2-10.report.txt`.
+
+After moving pool setup back to Rayon's lazy initialization, a paired pass over 1,124,714 readable paths counted 1,052,051 `statx`, 145,343 `getdents64`, and 72,663 directory opens in each scanner. `fdu` used `openat2`; the source scanner used `openat`. Futex counts were 701,146 for `fdu` and 736,416 for the source scanner, with context switches of 55,172 and 57,094. This single pair does not establish a timing win; the lower futex count is consistent with avoiding the synchronization spike from eager pool initialization, but needs repeated stable runs to isolate. The output paths differ: `fdu` renders every item as plain text, so wall and user time include more formatting work. Captures are `target/perf-initial/fdu-lazy-pool-syscalls.txt` and `target/perf-initial/dirstat-lazy-pool-syscalls.txt`.
+
+## Remaining metadata work
+
+A read-only dirent inode census found 14 duplicate non-directory paths among 1,023,593 readable paths. A shared inode metadata cache would add synchronization and memory for almost no avoided `statx` calls. The remaining per-file metadata lookup is the main syscall target.
+
+An ext4 inode-table experiment could batch inode metadata reads by group and table block, but it must stay isolated from the default walker. An on-disk table read is not a coherent view of a live mounted filesystem, and ext4 inode accounting has feature-specific fields and live allocation state. The [Linux ext4 inode documentation](https://github.com/torvalds/linux/blob/v6.18/Documentation/filesystems/ext4/inodes.rst) describes the inode-table layout and inode-to-group mapping. Use a read-only snapshot to test sparse and dense table access before deciding whether this can preserve the live `statx` contract.
+
+`io_uring` is enabled on this host, but asynchronous `statx` should remain a measured experiment: batch it only if latency data shows a benefit over direct syscalls, and keep the implementation within the existing `libc` dependency.
+
 ## Reproducing syscall counts
 
 Build an optimized profile with symbols and frame pointers:
@@ -30,7 +46,8 @@ Run as the ordinary user under `perf` so the target keeps its normal filesystem 
 
 ```sh
 doas -n /usr/bin/perf stat \
-  -e syscalls:sys_enter_statx,syscalls:sys_enter_openat,syscalls:sys_enter_close,\
+  -e syscalls:sys_enter_statx,syscalls:sys_enter_openat,syscalls:sys_enter_openat2,\
+syscalls:sys_enter_close,\
 syscalls:sys_enter_getdents64,syscalls:sys_enter_futex,syscalls:sys_enter_sched_yield,\
 syscalls:sys_enter_clone,context-switches \
   -o target/perf-initial/fdu-crabc-syscalls.txt -- \

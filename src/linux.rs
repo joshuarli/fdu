@@ -15,6 +15,7 @@ const STATX_TYPE: libc::c_uint = 0x0001;
 const STATX_SIZE: libc::c_uint = 0x0200;
 const STATX_BLOCKS: libc::c_uint = 0x0400;
 const STATX_BASIC_STATS: libc::c_uint = 0x07ff;
+const RESOLVE_NO_XDEV: u64 = 0x01;
 const S_IFMT: u16 = 0o170000;
 const S_IFDIR: u16 = 0o040000;
 
@@ -74,6 +75,14 @@ struct StatxTimestamp {
     _seconds: i64,
     _nanoseconds: u32,
     _pad: i32,
+}
+
+#[repr(C)]
+// openat2 uses a fixed-width UAPI structure; unused fields stay zero.
+struct OpenHow {
+    flags: u64,
+    mode: u64,
+    resolve: u64,
 }
 
 impl LinuxStatx {
@@ -185,24 +194,7 @@ fn scan_child_directory(
     root_device: Device,
     apparent: bool,
 ) -> io::Result<DiskItem> {
-    let child_fd = unsafe {
-        libc::openat(
-            parent.as_raw_fd(),
-            entry.name.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-    };
-    if child_fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-
-    let child = unsafe { File::from_raw_fd(child_fd) };
-    if Device::from_raw(child.metadata()?.dev()) != root_device {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            "filesystem boundary crossed",
-        ));
-    }
+    let child = open_child_directory(parent, &entry.name, root_device)?;
 
     scan_directory(
         entry.name.to_string_lossy().into_owned(),
@@ -210,6 +202,67 @@ fn scan_child_directory(
         root_device,
         apparent,
     )
+}
+
+// A no-cross-mount open inherits the parent's device; the fallback checks st_dev explicitly.
+fn open_child_directory(parent: &File, name: &CString, root_device: Device) -> io::Result<File> {
+    match openat2_directory(parent.as_raw_fd(), name) {
+        Ok(child) => Ok(child),
+        Err(error)
+            if matches!(
+                error.raw_os_error(),
+                Some(libc::EXDEV) | Some(libc::ENOSYS) | Some(libc::EPERM)
+            ) =>
+        {
+            // The fallback checks st_dev so same-device bind mounts keep the existing behavior.
+            let child = openat_directory(parent.as_raw_fd(), name)?;
+            if Device::from_raw(child.metadata()?.dev()) != root_device {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "filesystem boundary crossed",
+                ));
+            }
+            Ok(child)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn openat2_directory(parent_fd: libc::c_int, name: &CString) -> io::Result<File> {
+    let how = OpenHow {
+        flags: (libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) as u64,
+        mode: 0,
+        resolve: RESOLVE_NO_XDEV,
+    };
+    let child_fd = unsafe {
+        libc::syscall(
+            libc::SYS_openat2,
+            parent_fd,
+            name.as_ptr(),
+            &how as *const OpenHow,
+            mem::size_of::<OpenHow>(),
+        )
+    };
+    if child_fd < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(unsafe { File::from_raw_fd(child_fd as libc::c_int) })
+    }
+}
+
+fn openat_directory(parent_fd: libc::c_int, name: &CString) -> io::Result<File> {
+    let child_fd = unsafe {
+        libc::openat(
+            parent_fd,
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if child_fd < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(unsafe { File::from_raw_fd(child_fd) })
+    }
 }
 
 fn file_item(entry: DirectoryEntry, stat: LinuxStatx, apparent: bool) -> DiskItem {
