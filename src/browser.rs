@@ -12,10 +12,14 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-const CHANNEL_CAPACITY: usize = 8;
+const SCAN_EVENT_CHANNEL_CAPACITY: usize = 512;
 const SCAN_BATCH_CAPACITY: usize = 256;
-const MAX_EVENTS_PER_TICK: usize = 32;
+const SCAN_BATCH_POOL_CAPACITY: usize = 8;
+const DELETE_CHANNEL_CAPACITY: usize = 8;
+const MAX_SCAN_EVENTS_PER_TICK: usize = 128;
+const MAX_DELETE_EVENTS_PER_TICK: usize = 32;
 const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(20);
+const SCAN_INPUT_POLL_INTERVAL: Duration = Duration::from_millis(1);
 const SCAN_REDRAW_INTERVAL: Duration = Duration::from_millis(100);
 
 enum AppPhase {
@@ -44,9 +48,9 @@ struct ScanRun {
 
 impl ScanRun {
     fn start(root: RootAnchor, queue_metrics: ScanQueueMetrics) -> Self {
-        let (sender, receiver) = mpsc::sync_channel(CHANNEL_CAPACITY);
-        let (batch_sender, batch_receiver) = mpsc::sync_channel(CHANNEL_CAPACITY);
-        for _ in 0..CHANNEL_CAPACITY {
+        let (sender, receiver) = mpsc::sync_channel(SCAN_EVENT_CHANNEL_CAPACITY);
+        let (batch_sender, batch_receiver) = mpsc::sync_channel(SCAN_BATCH_POOL_CAPACITY);
+        for _ in 0..SCAN_BATCH_POOL_CAPACITY {
             let batch = fdu_core::EntryBatch::with_capacity(
                 DirectoryToken(0),
                 SCAN_BATCH_CAPACITY,
@@ -117,7 +121,7 @@ struct DeleteRun {
 impl DeleteRun {
     fn start(root: std::os::fd::OwnedFd, plan: DeletionPlan) -> Self {
         let total = plan.operation_count();
-        let (sender, receiver) = mpsc::sync_channel(CHANNEL_CAPACITY);
+        let (sender, receiver) = mpsc::sync_channel(DELETE_CHANNEL_CAPACITY);
         let cancelled = Arc::new(AtomicBool::new(false));
         let worker_cancelled = Arc::clone(&cancelled);
         let worker = thread::spawn(move || {
@@ -210,6 +214,7 @@ struct BrowserProfile {
     started: Instant,
     first_render: Option<Duration>,
     first_usable_listing: Option<Duration>,
+    initial_scan_settled: Option<Duration>,
     pending_input: Option<Instant>,
     input_render_micros: Vec<u64>,
     queue_metrics: ScanQueueMetrics,
@@ -222,6 +227,7 @@ impl BrowserProfile {
             started: Instant::now(),
             first_render: None,
             first_usable_listing: None,
+            initial_scan_settled: None,
             pending_input: None,
             input_render_micros: Vec::new(),
             queue_metrics,
@@ -254,6 +260,10 @@ impl BrowserProfile {
         }
     }
 
+    fn note_scan_settled(&mut self) {
+        self.initial_scan_settled.get_or_insert_with(|| self.started.elapsed());
+    }
+
     fn report(&mut self, model: &BrowserModel) {
         if !self.enabled {
             return;
@@ -267,8 +277,9 @@ impl BrowserProfile {
         let entries = model.indexed_entries;
         let arena_bytes = model.tree.retained_arena_bytes();
         eprintln!(
-            "fdu-profile elapsed_ms={} first_render_ms={} first_usable_listing_ms={} entries={} tree_arena_bytes={} tree_arena_bytes_per_entry={:.2} scan_event_queue_high_water={} input_render_samples={} input_render_p50_us={} input_render_max_us={}",
+            "fdu-profile elapsed_ms={} initial_scan_settled_ms={} first_render_ms={} first_usable_listing_ms={} entries={} tree_arena_bytes={} tree_arena_bytes_per_entry={:.2} scan_event_queue_high_water={} input_render_samples={} input_render_p50_us={} input_render_max_us={}",
             self.started.elapsed().as_millis(),
+            duration_ms(self.initial_scan_settled),
             duration_ms(self.first_render),
             duration_ms(self.first_usable_listing),
             entries,
@@ -1227,14 +1238,19 @@ pub fn run(path: std::path::PathBuf, read_only: bool, apparent: bool) -> Result<
     let root = open_root(&path)?;
     let mut model = BrowserModel::new(&root, read_only, apparent)?;
     let profiling_enabled = std::env::var_os("FDU_PROFILE").is_some();
-    let scan_metrics = ScanQueueMetrics::new(CHANNEL_CAPACITY, profiling_enabled);
+    let scan_metrics = ScanQueueMetrics::new(SCAN_EVENT_CHANNEL_CAPACITY, profiling_enabled);
     let mut profile = BrowserProfile::new(profiling_enabled, scan_metrics.clone());
     let mut phase = AppPhase::Scanning(ScanRun::start(root.clone(), scan_metrics));
     let mut last_draw = Instant::now() - SCAN_REDRAW_INTERVAL;
     let mut draw_pending = true;
     loop {
         let text_input = matches!(&model.dialog, DialogState::Filter(_));
-        let intent = fdu_tui::poll_intent(INPUT_POLL_INTERVAL, text_input)?;
+        let input_poll_interval = if matches!(&phase, AppPhase::Scanning(_)) {
+            SCAN_INPUT_POLL_INTERVAL
+        } else {
+            INPUT_POLL_INTERVAL
+        };
+        let intent = fdu_tui::poll_intent(input_poll_interval, text_input)?;
         let mut input_changed = false;
         let mut action = Action::None;
         if let Some(intent) = intent {
@@ -1248,7 +1264,7 @@ pub fn run(path: std::path::PathBuf, read_only: bool, apparent: bool) -> Result<
             Action::Quit => break,
             Action::Refresh => {
                 model.reset_for_rescan(&root)?;
-                let metrics = ScanQueueMetrics::new(CHANNEL_CAPACITY, profiling_enabled);
+                let metrics = ScanQueueMetrics::new(SCAN_EVENT_CHANNEL_CAPACITY, profiling_enabled);
                 profile.reset_scan_queue(metrics.clone());
                 phase = AppPhase::Scanning(ScanRun::start(root.clone(), metrics));
                 draw_pending = true;
@@ -1276,7 +1292,7 @@ pub fn run(path: std::path::PathBuf, read_only: bool, apparent: bool) -> Result<
         let mut scan_finished = false;
         if let AppPhase::Scanning(worker) = &mut phase {
             if let Some(receiver) = worker.receiver.as_ref() {
-                for _ in 0..MAX_EVENTS_PER_TICK {
+                for _ in 0..MAX_SCAN_EVENTS_PER_TICK {
                     match receiver.try_recv() {
                         Ok(event) => {
                             worker.queue_metrics.event_received();
@@ -1309,13 +1325,14 @@ pub fn run(path: std::path::PathBuf, read_only: bool, apparent: bool) -> Result<
             };
             model.finish_scan(scan_error);
             phase = AppPhase::Ready;
+            profile.note_scan_settled();
             model_changed = true;
         }
 
         let mut delete_finished = false;
         if let AppPhase::Deleting(worker) = &mut phase {
             if let Some(receiver) = worker.receiver.as_ref() {
-                for _ in 0..MAX_EVENTS_PER_TICK {
+                for _ in 0..MAX_DELETE_EVENTS_PER_TICK {
                     match receiver.try_recv() {
                         Ok(DeleteEvent::Progress { completed, total, current }) => {
                             worker.completed = completed;

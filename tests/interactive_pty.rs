@@ -82,6 +82,15 @@ impl Pty {
     }
 
     fn spawn(&self, root: &std::path::Path, read_only: bool) -> io::Result<Child> {
+        self.spawn_with_profile(root, read_only, false)
+    }
+
+    fn spawn_with_profile(
+        &self,
+        root: &std::path::Path,
+        read_only: bool,
+        profile: bool,
+    ) -> io::Result<Child> {
         let input = self.slave.try_clone()?;
         let output = self.slave.try_clone()?;
         let error = self.slave.try_clone()?;
@@ -93,6 +102,9 @@ impl Pty {
             .stdin(Stdio::from(input))
             .stdout(Stdio::from(output))
             .stderr(Stdio::from(error));
+        if profile {
+            command.env("FDU_PROFILE", "1");
+        }
         if read_only {
             command.arg("--read-only");
         }
@@ -153,13 +165,36 @@ impl Pty {
     }
 
     fn wait_for_exit(&mut self, child: &mut Child) -> io::Result<std::process::ExitStatus> {
+        self.wait_for_exit_output(child).map(|(status, _)| status)
+    }
+
+    fn wait_for_exit_output(
+        &mut self,
+        child: &mut Child,
+    ) -> io::Result<(std::process::ExitStatus, Vec<u8>)> {
         let deadline = Instant::now() + Duration::from_secs(10);
+        let mut output = Vec::new();
         let mut buffer = [0u8; 4096];
         loop {
             if let Some(status) = child.try_wait()? {
-                return Ok(status);
+                loop {
+                    match self.master.read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(count) => output.extend_from_slice(&buffer[..count]),
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                        Err(error) if error.raw_os_error() == Some(libc::EIO) => break,
+                        Err(error) => return Err(error),
+                    }
+                }
+                return Ok((status, output));
             }
-            let _ = self.master.read(&mut buffer);
+            match self.master.read(&mut buffer) {
+                Ok(0) => {}
+                Ok(count) => output.extend_from_slice(&buffer[..count]),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) if error.raw_os_error() == Some(libc::EIO) => {}
+                Err(error) => return Err(error),
+            }
             if Instant::now() >= deadline {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -245,5 +280,57 @@ fn interactive_read_only_session_rejects_delete_and_restores_terminal_state() ->
     assert!(status.success());
     assert!(payload.exists(), "read-only input must not remove fixture entries");
     pty.assert_restored()?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "host-dependent release-tree timing; run cargo test --release --test interactive_pty release_artifact_tree_reaches_ready_under_100ms -- --ignored --exact"]
+fn release_artifact_tree_reaches_ready_under_100ms() -> io::Result<()> {
+    const RUNS: usize = 5;
+    const MIN_INDEXED_ENTRIES: usize = 1_000;
+
+    let release_tree = PathBuf::from(env!("CARGO_BIN_EXE_fdu"))
+        .parent()
+        .expect("the fdu binary must be inside target/release")
+        .to_path_buf();
+    let mut samples = Vec::with_capacity(RUNS);
+
+    for _ in 0..RUNS {
+        let mut pty = Pty::new()?;
+        let mut child = pty.spawn_with_profile(&release_tree, true, true)?;
+        pty.wait_for(&mut child, b"Ready")?;
+        pty.send(b"q")?;
+        let (status, output) = pty.wait_for_exit_output(&mut child)?;
+        assert!(status.success(), "fdu exited unsuccessfully: {status}");
+        pty.assert_restored()?;
+
+        let output = String::from_utf8_lossy(&output);
+        let profile_field = |name: &str| {
+            output
+                .split_whitespace()
+                .find_map(|field| field.strip_prefix(name))
+        };
+        let settled_ms: u128 = profile_field("initial_scan_settled_ms=")
+            .expect("profile output must report the initial scan settle time")
+            .parse()
+            .expect("settle time must be an integer number of milliseconds");
+        let entries: usize = profile_field("entries=")
+            .expect("profile output must report the indexed entry count")
+            .parse()
+            .expect("indexed entry count must be an integer");
+        assert!(
+            entries >= MIN_INDEXED_ENTRIES,
+            "expected a populated release tree with at least {MIN_INDEXED_ENTRIES} entries, got {entries}"
+        );
+        samples.push(settled_ms);
+    }
+
+    samples.sort_unstable();
+    let median_ms = samples[samples.len() / 2];
+    eprintln!("initial scan settle samples: {samples:?} ms; median: {median_ms} ms");
+    assert!(
+        median_ms < 100,
+        "initial scan settle median must be below 100 ms; samples: {samples:?}"
+    );
     Ok(())
 }
