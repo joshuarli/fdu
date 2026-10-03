@@ -46,8 +46,9 @@ explicit confirmation before work starts.
 
 - A macOS terminal session opens the interactive browser: a minimal title
   strip, a plainly framed listing (size, share of the directory, bar, name), a
-  marked-items pane, and a status strip that shows only the entry count
-  (ending in `…` while scanning). There is no key-hint strip; `?` opens help.
+  marked-items pane, and a status strip that leads with the entry count
+  (ending in `…` while scanning), then transient messages and key hints for
+  the focused pane. `?` opens help.
   The focused pane is drawn at normal weight and the other dimmed; `[x]` marks
   and `[=]` covered rows do not depend on color.
 - Navigation can descend into indexed directories and return to the opened

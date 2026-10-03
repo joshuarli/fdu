@@ -51,8 +51,9 @@ descriptor mount-ID fallback.
 The screen has a title strip, a framed listing, and a status strip. Marking
 opens the marked-items pane beside the listing. The title strip shows only
 non-default state (`read only`, `apparent sizes`, an active filter). The status
-strip shows the total entry count, ending in `…` while the scan is still adding
-to it; transient messages and deletion prompts appear there too. The listing
+strip leads with the total entry count, ending in `…` while the scan is still
+adding to it, followed by transient messages and key hints for the focused
+pane; deletion prompts and progress appear there too. The listing
 shows each entry's size, share of the directory, and a bar. `[x]` marks an
 entry, `[=]` shows an entry already covered by a marked parent directory, and
 `!`, `~`, `M`, and `A` flag incomplete, stale, mount-boundary, and

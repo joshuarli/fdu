@@ -613,9 +613,20 @@ fn size_of(record: &NodeRecord, mode: SizeMode) -> u64 {
     }
 }
 
-/// The bottom strip carries the entry count, ending in `…` while the scan is
-/// still adding to it. A running deletion or a pending confirmation, which have
-/// no other place to appear, and any transient message precede the count.
+/// Key hints for the focused pane, trimmed to what applies.
+fn key_hints(view: &View<'_>) -> String {
+    match view.focus {
+        Pane::Browser if view.marked.is_empty() => "d mark · s sort · / filter · ? help · q quit".to_owned(),
+        Pane::Browser => "d mark · Tab marked · - split · s sort · / filter · ? help · q quit".to_owned(),
+        Pane::Marked if view.read_only => "d unmark · Enter show · c clear · Tab list · - split · ? help · q quit".to_owned(),
+        Pane::Marked => "d unmark · Enter show · ^R delete · c clear · Tab list · - split · ? help · q quit".to_owned(),
+    }
+}
+
+/// The bottom strip leads with the entry count, which ends in `…` while the
+/// scan is still adding to it, followed by a transient message and key hints.
+/// A pending confirmation or running deletion has no other place to appear, so
+/// it comes first and the count moves to the end.
 fn render_status(frame: &mut Frame<'_>, area: Rect, view: &View<'_>) {
     let count = format!(
         "{} entries{}",
@@ -633,8 +644,8 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, view: &View<'_>) {
             format_size(*allocated_bytes),
         ),
         Operation::Idle => match view.message.or(view.detail_message) {
-            Some(message) => format!(" {message} · {count}"),
-            None => format!(" {count}"),
+            Some(message) => format!(" {count} · {message} · {}", key_hints(view)),
+            None => format!(" {count} · {}", key_hints(view)),
         },
     };
     frame.render_widget(Paragraph::new(clip_end(&text, usize::from(area.width))), area);
@@ -1124,18 +1135,19 @@ mod tests {
     }
 
     #[test]
-    fn status_strip_shows_only_the_entry_count_and_marks_a_running_scan() {
+    fn status_strip_leads_with_the_entry_count_then_key_hints() {
         let fixture = fixture();
         let rows = [fixture.directory, fixture.top];
         let marks = HashSet::new();
         let mut view = base_view(&fixture, &rows, &marks, &[]);
         view.indexed_entries = 42;
         let ready = draw(&view, 100, 24);
-        let status = ready.lines().last().unwrap().trim_end().to_owned();
-        assert_eq!(status.trim(), "42 entries");
+        let status = ready.lines().last().unwrap().trim().to_owned();
+        assert!(status.starts_with("42 entries · d mark"), "{status}");
+        assert!(status.contains("? help"), "{status}");
         view.phase = Phase::Scanning;
         let scanning = draw(&view, 100, 24);
-        assert_eq!(scanning.lines().last().unwrap().trim(), "42 entries…");
+        assert!(scanning.lines().last().unwrap().trim().starts_with("42 entries… · "));
         let title = scanning.lines().next().unwrap();
         for noise in ["Ready", "allocated", "sort", "Scanning"] {
             assert!(!title.contains(noise), "{noise} is not title noise: {title}");

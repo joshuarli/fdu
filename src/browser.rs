@@ -901,15 +901,15 @@ impl BrowserModel {
                 self.message = None;
             }
             Err(error) => {
-                let blocked = error.rejected.len();
+                let more = error.rejected.len().saturating_sub(1);
                 let first = error.rejected.first().map(|rejection| match rejection.node {
                     Some(node) => format!("{}: {}", self.display_path(node), rejection.reason),
                     None => rejection.reason.clone(),
                 });
                 self.message = Some(format!(
-                    "Nothing was deleted or narrowed: {blocked} marked entr{} cannot be removed ({})",
-                    if blocked == 1 { "y" } else { "ies" },
+                    "Nothing deleted or narrowed: {}{}",
                     first.unwrap_or_default(),
+                    if more > 0 { format!(" (+{more} more)") } else { String::new() },
                 ));
             }
         }
@@ -2238,7 +2238,7 @@ mod tests {
         assert!(matches!(press_delete_on_marks(&mut model, &[good, bad]), Action::None));
         assert!(model.pending_delete.is_none());
         let message = model.message.as_deref().unwrap();
-        assert!(message.contains("Nothing was deleted or narrowed"), "{message}");
+        assert!(message.contains("Nothing deleted or narrowed"), "{message}");
         assert!(message.contains("bad.bin: scan is incomplete"), "{message}");
         assert_eq!(model.marks.len(), 2, "no mark is dropped");
         Ok(())

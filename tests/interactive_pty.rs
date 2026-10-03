@@ -97,12 +97,14 @@ impl Session {
         self.wait(&format!("{text} to disappear"), |screen| !screen.shows(text))
     }
 
-    /// The status strip ends in `entries` once the scan has finished and in
-    /// `entries…` while it is still adding to the count.
+    /// The status strip leads with `N entries` once the scan has finished and
+    /// `N entries…` while it is still adding to the count.
     fn wait_ready(&mut self) -> ScreenSnapshot {
         self.wait("scan to finish", |screen| {
             let status = screen.lines().pop().unwrap_or_default();
-            status.trim_end().ends_with(" entries")
+            let status = status.trim_start();
+            status.split_whitespace().next().is_some_and(|count| count.parse::<usize>().is_ok())
+                && status.contains(" entries ")
         })
     }
 
@@ -178,16 +180,22 @@ fn startup_shows_a_minimal_title_and_the_entry_count_and_restores_the_terminal()
     let title = screen.lines().remove(0);
     assert_eq!(title.split_whitespace().collect::<Vec<_>>(), ["fdu"]);
     let status = screen.lines().pop().unwrap();
-    for noise in ["Ready", "allocated", "sort", "Scanning", "incomplete", "excluded"] {
-        assert!(!title.contains(noise) && !status.contains(noise), "{noise} is not shown");
+    for noise in ["Ready", "allocated", "sort", "Scanning"] {
+        assert!(!title.contains(noise), "{noise} is not in the title");
+    }
+    for noise in ["Ready", "allocated", "Scanning", "incomplete", "excluded"] {
+        assert!(!status.contains(noise), "{noise} is not in the status bar");
     }
     for name in ["alpha/", "beta/", "top.txt"] {
         assert!(screen.shows(name), "{name} is listed");
     }
     // The pane title names the root and shows the count and total.
     assert!(screen.shows("root (3 shown, 3 total,"));
-    // The bottom bar carries only the total entry count: 3 at the top plus 3 below.
-    assert_eq!(screen.lines().pop().unwrap().trim(), "6 entries");
+    // The bottom bar leads with the total entry count (3 at the top plus 3
+    // below) and follows it with the key hints.
+    let status = screen.lines().pop().unwrap();
+    assert!(status.trim().starts_with("6 entries · d mark"), "{status}");
+    assert!(status.contains("? help"), "{status}");
     // No marks yet: only the list is drawn.
     assert!(!screen.shows("Marked"));
     session.quit();
@@ -518,7 +526,7 @@ fn ineligible_marks_block_the_whole_deletion_and_say_why() -> io::Result<()> {
     session.wait_for("Marked 2 items");
     session.key(Key::Tab);
     session.key(Key::Ctrl('r'));
-    let screen = session.wait_for("Nothing was deleted or narrowed");
+    let screen = session.wait_for("Nothing deleted or narrowed");
     assert!(screen.shows("beta: scan is incomplete"));
     assert!(!screen.shows("Permanently delete"), "no confirmation is offered");
     assert!(screen.shows("Marked 2 items"), "the marks are kept");
