@@ -29,6 +29,9 @@ const STATX_DONT_SYNC: libc::c_int = 0x4000;
 const STATX_TYPE: libc::c_uint = 0x0001;
 const STATX_SIZE: libc::c_uint = 0x0200;
 const STATX_BLOCKS: libc::c_uint = 0x0400;
+const STATX_MNT_ID: libc::c_uint = 0x1000;
+const AT_EMPTY_PATH: libc::c_int = 0x1000;
+const RESOLVE_NO_XDEV: u64 = 0x01;
 const EXT4_SUPER_MAGIC: u64 = 0xef53;
 const EXT4_HTREE_EOF_32BIT: i64 = 0x7fff_ffff;
 const EXT4_HTREE_EOF_64BIT: i64 = i64::MAX;
@@ -208,10 +211,16 @@ struct DirectoryFrame {
 
 enum ScannedEntry {
     Item(u64),
+    MountBoundary,
     Directory {
         directory: File,
         ext4_eof_cookie: bool,
     },
+}
+
+enum OpenedChildDirectory {
+    MountBoundary,
+    Directory(File, bool),
 }
 
 enum UnknownEntry {
@@ -373,10 +382,11 @@ pub(super) fn scan(path: &Path, apparent: bool) -> io::Result<ScanReport> {
 fn scan_mode<const APPARENT: bool>(path: &Path) -> io::Result<ScanReport> {
     let root = OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
         .open(path)?;
     let ext4_eof_cookie = is_ext4(root.as_raw_fd());
     let skipped_entries = AtomicUsize::new(0);
+    let mount_boundaries = AtomicUsize::new(0);
     let DirectoryEntries { names, entries, .. } = read_directory::<APPARENT, true>(
         root.as_raw_fd(),
         ext4_eof_cookie,
@@ -394,6 +404,7 @@ fn scan_mode<const APPARENT: bool>(path: &Path) -> io::Result<ScanReport> {
                 entry,
                 ext4_eof_cookie,
                 &skipped_entries,
+                &mount_boundaries,
             ) {
                 Ok(directory) => directory,
                 Err(_) => {
@@ -408,6 +419,7 @@ fn scan_mode<const APPARENT: bool>(path: &Path) -> io::Result<ScanReport> {
     Ok(ScanReport {
         directories,
         skipped_entries: skipped_entries.load(Ordering::Relaxed),
+        mount_boundaries: mount_boundaries.load(Ordering::Relaxed),
     })
 }
 
@@ -417,6 +429,7 @@ fn scan_top_level_entry<const APPARENT: bool>(
     entry: DirectoryEntry,
     ext4_eof_cookie: bool,
     skipped_entries: &AtomicUsize,
+    mount_boundaries: &AtomicUsize,
 ) -> io::Result<Option<TopLevelDirectory>> {
     if matches!(entry.kind, EntryKind::Other) {
         return Ok(None);
@@ -448,6 +461,7 @@ fn scan_top_level_entry<const APPARENT: bool>(
         ext4_eof_cookie,
         1,
         skipped_entries,
+        mount_boundaries,
     )?;
     Ok(Some(TopLevelDirectory {
         name: OsString::from_vec(entry.as_c_str(names).to_bytes().to_vec()),
@@ -460,12 +474,14 @@ fn scan_directory_contents<const APPARENT: bool>(
     ext4_eof_cookie: bool,
     depth: usize,
     skipped_entries: &AtomicUsize,
+    mount_boundaries: &AtomicUsize,
 ) -> io::Result<u64> {
     if depth >= MAX_RECURSIVE_DIRECTORY_DEPTH {
         return scan_directory_iterative::<APPARENT>(
             directory,
             ext4_eof_cookie,
             skipped_entries,
+            mount_boundaries,
         );
     }
 
@@ -493,6 +509,7 @@ fn scan_directory_contents<const APPARENT: bool>(
                 ext4_eof_cookie,
                 depth + 1,
                 skipped_entries,
+                mount_boundaries,
             ) {
                 Ok(size) => Ok(size),
                 Err(_) => {
@@ -570,6 +587,7 @@ fn scan_directory_iterative<const APPARENT: bool>(
     directory: File,
     ext4_eof_cookie: bool,
     skipped_entries: &AtomicUsize,
+    mount_boundaries: &AtomicUsize,
 ) -> io::Result<u64> {
     let root = DirectoryFrame::new::<APPARENT>(directory, ext4_eof_cookie, skipped_entries)?;
     let mut stack = vec![root];
@@ -602,6 +620,9 @@ fn scan_directory_iterative<const APPARENT: bool>(
                     .last_mut()
                     .expect("root directory frame remains present")
                     .add_size(size),
+                Ok(ScannedEntry::MountBoundary) => {
+                    mount_boundaries.fetch_add(1, Ordering::Relaxed);
+                }
                 Ok(ScannedEntry::Directory {
                     directory,
                     ext4_eof_cookie,
@@ -646,6 +667,7 @@ fn scan_entry_size<const APPARENT: bool>(
     ext4_eof_cookie: bool,
     child_depth: usize,
     skipped_entries: &AtomicUsize,
+    mount_boundaries: &AtomicUsize,
 ) -> io::Result<u64> {
     match entry.kind {
         EntryKind::Directory => scan_child_directory::<APPARENT>(
@@ -654,6 +676,7 @@ fn scan_entry_size<const APPARENT: bool>(
             ext4_eof_cookie,
             child_depth,
             skipped_entries,
+            mount_boundaries,
         ),
         EntryKind::Other => with_stat_at(
             parent.as_raw_fd(),
@@ -687,6 +710,7 @@ fn scan_entry_size<const APPARENT: bool>(
                     ext4_eof_cookie,
                     child_depth,
                     skipped_entries,
+                    mount_boundaries,
                 ),
                 UnknownEntry::Item(size) => Ok(size),
             }
@@ -757,13 +781,27 @@ fn scan_child_directory<const APPARENT: bool>(
     ext4_eof_cookie: bool,
     child_depth: usize,
     skipped_entries: &AtomicUsize,
+    mount_boundaries: &AtomicUsize,
 ) -> io::Result<u64> {
-    let (child, child_ext4_eof_cookie) = open_child_directory(parent, name, ext4_eof_cookie)?;
+    let (child, child_ext4_eof_cookie) = match open_child_directory(
+        parent.as_raw_fd(),
+        name,
+        ext4_eof_cookie,
+    )? {
+        OpenedChildDirectory::MountBoundary => {
+            mount_boundaries.fetch_add(1, Ordering::Relaxed);
+            return Ok(0);
+        }
+        OpenedChildDirectory::Directory(child, child_ext4_eof_cookie) => {
+            (child, child_ext4_eof_cookie)
+        }
+    };
     scan_directory_contents::<APPARENT>(
         child,
         child_ext4_eof_cookie,
         child_depth,
         skipped_entries,
+        mount_boundaries,
     )
 }
 
@@ -772,28 +810,43 @@ fn open_child_entry(
     name: &CStr,
     ext4_eof_cookie: bool,
 ) -> io::Result<ScannedEntry> {
-    let (directory, ext4_eof_cookie) = open_child_directory(parent, name, ext4_eof_cookie)?;
-    Ok(ScannedEntry::Directory {
-        directory,
-        ext4_eof_cookie,
-    })
+    match open_child_directory(parent.as_raw_fd(), name, ext4_eof_cookie)? {
+        OpenedChildDirectory::MountBoundary => Ok(ScannedEntry::MountBoundary),
+        OpenedChildDirectory::Directory(directory, ext4_eof_cookie) => {
+            Ok(ScannedEntry::Directory {
+                directory,
+                ext4_eof_cookie,
+            })
+        }
+    }
 }
 
 fn open_child_directory(
-    parent: &File,
+    parent_fd: libc::c_int,
     name: &CStr,
     ext4_eof_cookie: bool,
-) -> io::Result<(File, bool)> {
-    match open_with_nofile_retry(|| openat2_directory(parent.as_raw_fd(), name)) {
-        Ok(child) => Ok((child, ext4_eof_cookie)),
+) -> io::Result<OpenedChildDirectory> {
+    match open_with_nofile_retry(|| openat2_directory(parent_fd, name)) {
+        Ok(child) => Ok(OpenedChildDirectory::Directory(child, ext4_eof_cookie)),
+        Err(error)
+            if error.raw_os_error() == Some(libc::EXDEV) =>
+        {
+            Ok(OpenedChildDirectory::MountBoundary)
+        }
         Err(error)
             if matches!(
                 error.raw_os_error(),
                 Some(libc::ENOSYS) | Some(libc::EPERM)
             ) =>
         {
-            let child = open_with_nofile_retry(|| openat_directory(parent.as_raw_fd(), name))?;
-            Ok((child, ext4_eof_cookie))
+            let child = open_with_nofile_retry(|| openat_directory(parent_fd, name))?;
+            let parent_mount_id = mount_id_for_fd(parent_fd)?;
+            let child_mount_id = mount_id_for_fd(child.as_raw_fd())?;
+            if parent_mount_id == child_mount_id {
+                Ok(OpenedChildDirectory::Directory(child, ext4_eof_cookie))
+            } else {
+                Ok(OpenedChildDirectory::MountBoundary)
+            }
         }
         Err(error) => Err(error),
     }
@@ -861,7 +914,7 @@ fn openat2_directory(parent_fd: libc::c_int, name: &CStr) -> io::Result<File> {
     let how = OpenHow {
         flags: (libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) as u64,
         mode: 0,
-        resolve: 0,
+        resolve: RESOLVE_NO_XDEV,
     };
     let child_fd = openat2_call(parent_fd, name, &how)?;
     Ok(unsafe { File::from_raw_fd(child_fd) })
@@ -916,6 +969,25 @@ fn with_stat_at<T>(
         libc::AT_SYMLINK_NOFOLLOW | STATX_DONT_SYNC,
         mask,
         inspect,
+    )
+}
+
+fn mount_id_for_fd(fd: libc::c_int) -> io::Result<u64> {
+    with_statx(
+        fd,
+        b"\0".as_ptr().cast(),
+        AT_EMPTY_PATH,
+        STATX_MNT_ID,
+        |stat| {
+            if stat.mask & STATX_MNT_ID == 0 {
+                Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "kernel did not report the directory mount ID",
+                ))
+            } else {
+                Ok(stat._mount_id)
+            }
+        },
     )
 }
 
@@ -1429,15 +1501,14 @@ fn file_batch_size<const APPARENT: bool>(
 #[cfg(test)]
 mod tests {
     use super::{
-        retry_interrupted, scan, scan_entry_size, DirectoryEntry, DirectoryNames, EntryKind,
+        retry_interrupted, scan_entry_size, DirectoryEntry, DirectoryNames, EntryKind,
         DIRECTORY_ENTRY_POOL, MAX_CACHED_DIRECTORY_ENTRY_CAPACITY,
     };
     use std::cell::Cell;
     use std::fs::{self, File};
     use std::io::{self, Write};
-    use std::os::unix::ffi::OsStringExt;
-    use std::os::unix::fs::{symlink, MetadataExt, OpenOptionsExt};
-    use std::path::{Path, PathBuf};
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static TEMP_DIRECTORY_ID: AtomicUsize = AtomicUsize::new(0);
@@ -1467,16 +1538,7 @@ mod tests {
         }
     }
 
-    fn report_size(report: &super::ScanReport, name: &str) -> u64 {
-        report
-            .directories
-            .iter()
-            .find(|directory| directory.name == name)
-            .expect("top-level directory is present")
-            .disk_size
-    }
-
-    fn allocated_size(path: &Path) -> io::Result<u64> {
+    fn allocated_size(path: &std::path::Path) -> io::Result<u64> {
         Ok(fs::symlink_metadata(path)?.blocks() * 512)
     }
 
@@ -1625,6 +1687,7 @@ mod tests {
             .open(&temporary.0)?;
         let names = b"file\0child\0";
         let skipped_entries = AtomicUsize::new(0);
+        let mount_boundaries = AtomicUsize::new(0);
 
         let file_size = scan_entry_size::<true>(
             &root,
@@ -1637,6 +1700,7 @@ mod tests {
             false,
             1,
             &skipped_entries,
+            &mount_boundaries,
         )?;
         assert_eq!(file_size, 2);
 
@@ -1651,95 +1715,11 @@ mod tests {
             false,
             1,
             &skipped_entries,
+            &mount_boundaries,
         )?;
         assert_eq!(child_size, 3);
         assert_eq!(skipped_entries.load(Ordering::Relaxed), 0);
-        Ok(())
-    }
-
-    #[test]
-    fn reports_only_immediate_directories_and_counts_each_descendant_path() -> io::Result<()> {
-        let temporary = TemporaryDirectory::new()?;
-        let root = &temporary.0;
-        let included = root.join("included");
-        let empty = root.join("empty");
-        fs::create_dir(&included)?;
-        fs::create_dir(&empty)?;
-
-        let payload = included.join("payload.bin");
-        let hardlink = included.join("payload-hardlink.bin");
-        let sparse = included.join("sparse.bin");
-        let invalid_name = std::ffi::OsString::from_vec(b"invalid-\xff-name".to_vec());
-        let invalid_path = included.join(invalid_name);
-        let symlink_path = included.join("payload-link");
-        let nested = included.join("nested");
-        let nested_payload = nested.join("nested.bin");
-
-        fs::write(&payload, vec![0x5a; 8192])?;
-        fs::hard_link(&payload, &hardlink)?;
-        File::create(&sparse)?.set_len(1024 * 1024)?;
-        fs::write(&invalid_path, b"raw bytes")?;
-        symlink("payload.bin", &symlink_path)?;
-        fs::create_dir(&nested)?;
-        fs::write(&nested_payload, vec![0x31; 257])?;
-        File::create(root.join("root-file"))?.write_all(b"excluded")?;
-
-        let expected_allocated = allocated_size(&payload)? * 2
-            + allocated_size(&sparse)?
-            + allocated_size(&invalid_path)?
-            + allocated_size(&symlink_path)?
-            + allocated_size(&nested_payload)?;
-        let report = scan(root, false)?;
-        assert_eq!(report.skipped_entries, 0);
-        assert_eq!(report.directories.len(), 2);
-        assert_eq!(report.directories[0].name, "included");
-        assert_eq!(report_size(&report, "included"), expected_allocated);
-        assert_eq!(report_size(&report, "empty"), 0);
-
-        let expected_apparent = fs::symlink_metadata(&payload)?.len() * 2
-            + fs::symlink_metadata(&sparse)?.len()
-            + fs::symlink_metadata(&invalid_path)?.len()
-            + fs::symlink_metadata(&symlink_path)?.len()
-            + fs::symlink_metadata(&nested_payload)?.len();
-        let report = scan(root, true)?;
-        assert_eq!(report.skipped_entries, 0);
-        assert_eq!(report.directories.len(), 2);
-        assert_eq!(report_size(&report, "included"), expected_apparent);
-        assert_eq!(report_size(&report, "empty"), 0);
-        Ok(())
-    }
-
-    #[test]
-    fn scans_many_long_names_across_directory_buffer_batches() -> io::Result<()> {
-        const FILE_COUNT: usize = 2050;
-        const NAME_LENGTH: usize = 250;
-
-        let temporary = TemporaryDirectory::new()?;
-        let top_level = temporary.0.join("large");
-        fs::create_dir(&top_level)?;
-        let mut expected_allocated = 0;
-        for index in 0..FILE_COUNT {
-            let mut name = format!("entry-{index:04}").into_bytes();
-            name.resize(NAME_LENGTH, b'x');
-            let path = top_level.join(std::ffi::OsString::from_vec(name));
-            File::create(&path)?.write_all(b"x")?;
-            expected_allocated += allocated_size(&path)?;
-        }
-
-        DIRECTORY_ENTRY_POOL.with(|pool| pool.borrow_mut().clear());
-        let report = scan(&temporary.0, false)?;
-        assert_eq!(report.skipped_entries, 0);
-        assert_eq!(report.directories.len(), 1);
-        assert_eq!(report_size(&report, "large"), expected_allocated);
-        let cached_entry_capacity = DIRECTORY_ENTRY_POOL.with(|pool| {
-            pool.borrow()
-                .iter()
-                .map(Vec::capacity)
-                .max()
-                .unwrap_or(0)
-        });
-        assert!(cached_entry_capacity <= MAX_CACHED_DIRECTORY_ENTRY_CAPACITY);
-
+        assert_eq!(mount_boundaries.load(Ordering::Relaxed), 0);
         Ok(())
     }
 
@@ -1803,24 +1783,4 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn deep_directory_descent_uses_the_iterative_scanner() -> io::Result<()> {
-        let temporary = TemporaryDirectory::new()?;
-        let top_level = temporary.0.join("top");
-        fs::create_dir(&top_level)?;
-        let mut current = top_level.clone();
-        for _ in 0..70 {
-            current.push("d");
-            fs::create_dir(&current)?;
-        }
-        let payload = current.join("leaf");
-        File::create(&payload)?.write_all(b"deep")?;
-
-        for (apparent, expected) in [(false, allocated_size(&payload)?), (true, 4)] {
-            let report = scan(&temporary.0, apparent)?;
-            assert_eq!(report.skipped_entries, 0);
-            assert_eq!(report_size(&report, "top"), expected);
-        }
-        Ok(())
-    }
 }

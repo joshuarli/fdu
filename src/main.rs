@@ -1,29 +1,19 @@
-#[cfg(not(target_os = "linux"))]
-compile_error!("fdu supports Linux only");
-
-mod linux;
 #[cfg(feature = "allocation-profile")]
 mod allocation_profile;
 
+use fdu::{scan, ScanOptions};
 use std::env;
 use std::error::Error;
-use std::ffi::{CStr, OsString};
+#[cfg(target_os = "linux")]
+use std::ffi::CStr;
 use std::io::{self, Write};
+#[cfg(target_os = "linux")]
 use std::mem::MaybeUninit;
 use std::path::PathBuf;
 use std::process;
 
+#[cfg(target_os = "linux")]
 const DEFAULT_RAYON_THREADS: usize = 4;
-
-struct TopLevelDirectory {
-    pub name: OsString,
-    pub disk_size: u64,
-}
-
-struct ScanReport {
-    pub directories: Vec<TopLevelDirectory>,
-    pub skipped_entries: usize,
-}
 
 struct Options {
     path: PathBuf,
@@ -48,10 +38,16 @@ fn run() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    require_linux_6()?;
-    configure_rayon_threads();
+    #[cfg(target_os = "linux")]
+    {
+        require_linux_6()?;
+        configure_rayon_threads();
+    }
 
-    let report = linux::scan(&options.path, options.apparent)?;
+    let report = scan(&ScanOptions {
+        path: options.path,
+        apparent: options.apparent,
+    })?;
     if report.skipped_entries != 0 {
         eprintln!(
             "fdu: warning: skipped {} entries after errors; size totals may be incomplete",
@@ -120,6 +116,7 @@ fn parse_args() -> io::Result<Options> {
     })
 }
 
+#[cfg(target_os = "linux")]
 fn require_linux_6() -> io::Result<()> {
     let mut system = MaybeUninit::<libc::utsname>::zeroed();
     if unsafe { libc::uname(system.as_mut_ptr()) } != 0 {
@@ -153,6 +150,7 @@ fn require_linux_6() -> io::Result<()> {
 }
 
 // Set the default before Rayon creates its global pool on the first parallel operation.
+#[cfg(target_os = "linux")]
 fn configure_rayon_threads() {
     if env::var_os("RAYON_NUM_THREADS").is_none() {
         env::set_var("RAYON_NUM_THREADS", DEFAULT_RAYON_THREADS.to_string());

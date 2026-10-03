@@ -2,9 +2,9 @@
 
 ## Current scope
 
-FDU scans a Linux 6.0+ directory tree and reports one row for each immediate child directory. Each size sums the non-directory entries below that directory; directory inode metadata is not added. Root-level files are excluded. Rows are sorted from largest to smallest; each row contains a raw byte count, a tab, and the directory name.
+FDU scans Linux 6.0+ and macOS directory trees and reports one row for each immediate child directory. Each size sums the non-directory entries below that directory; directory inode metadata is not added. Root-level files are excluded. Rows are sorted from largest to smallest; each row contains a raw byte count, a tab, and the directory name. Performance goals and captures in this document apply to the Linux backend.
 
-The scan assumes a single filesystem. It does not detect or stop at mount boundaries. Symlinks are counted without following them, and hardlinked paths are counted separately. Allocated bytes are the default; apparent mode uses logical lengths. Per-entry failures omit that entry and increment the incomplete-total warning.
+The supplied root path is opened normally, so symlinks in that path resolve. Discovered symlinks are counted without following them, and hardlinked paths are counted separately. Allocated bytes are the default; apparent mode uses logical lengths. FDU excludes child directories on another filesystem or mount; the library report counts those boundaries separately from entries skipped after I/O or metadata errors.
 
 The scanner returns aggregate sizes only. It does not retain or render a full tree.
 
@@ -36,7 +36,7 @@ Work is paused at the user's request. The settled implementation meets the measu
 
 ## Implementation state
 
-- Linux 6.0 or newer; direct Rust dependencies are libc and Rayon.
+- Linux 6.0 or newer; Linux uses libc and Rayon. The macOS backend uses libc and has no performance target in this document.
 - Four Rayon workers by default. RAYON_NUM_THREADS remains an explicit override.
 - Size accounting is selected before traversal. `scan_mode` specializes the recursive and iterative walks so each metadata call has a fixed request mask and size field.
 - Name validation stays inside each directory record and ends at its first NUL. `directory_record_name` uses bounded SSE2 comparisons on x86-64, with scalar handling for short tails and other architectures. Bytes after the terminator are padding and are not validated as part of the name.
@@ -45,9 +45,11 @@ Work is paused at the user's request. The settled implementation meets the measu
 - Serial versus parallel metadata work is selected once per batch. `parse_directory_batch` checks each record's bounds before reading its name, and completes any borrowed-name metadata work before the enumeration buffer is reused.
 - Names stay inline for short name lists. `DirectoryEntryStorage` keeps up to two child records inline; larger lists use a bounded per-thread vector pool. Directories with no retained children return their already-computed subtotal without an empty Rayon reduction.
 - File sizes use narrow statx requests and count each hardlinked path independently. On x86-64, statx, getdents64, and openat2 use the Linux syscall ABI directly; other Linux architectures use libc wrappers.
-- Child directories use parent-relative openat2 with O_NOFOLLOW and fall back to openat when openat2 is unavailable or denied.
+- Child directories use parent-relative openat2 with O_NOFOLLOW and RESOLVE_NO_XDEV, falling back to openat plus descriptor mount-ID checks when openat2 is unavailable or denied.
 - On ext4, the walker recognizes HTree end-of-directory cookies and avoids the trailing empty getdents64 call. Other filesystems use read-until-zero.
 - Deep trees switch to an explicit directory stack. Interrupted filesystem calls retry. The process raises its soft file limit on EMFILE and retries.
+
+The macOS backend uses `fdopendir`/`readdir`, no-follow `fstatat`, and no-follow `openat`. It checks opened child descriptors with `fstat` and `fstatfs` before enumeration and uses a heap-backed path stack to keep descriptor use bounded on deep trees. Those checks compare device, filesystem ID, and mount point, but they are not atomic with path or mount changes; this backend makes no Linux-style atomic resolution guarantee. No APFS-specific optimization is used.
 
 ## Release and profiling builds
 
