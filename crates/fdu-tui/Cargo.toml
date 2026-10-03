@@ -1,0 +1,11 @@
+[package]
+name = "fdu-tui"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Terminal browser for fdu"
+
+[dependencies]
+fdu-core = { path = "../fdu-core" }
+crossterm = "0.29"
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }

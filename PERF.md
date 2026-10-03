@@ -1,14 +1,85 @@
-# Performance goals and measurements
+# Performance and measurements
 
-## Current scope
+## Current macOS browser and scanner profile
 
-FDU scans Linux 6.0+ and macOS directory trees and reports one row for each immediate child directory. Each size sums the non-directory entries below that directory; directory inode metadata is not added. Root-level files are excluded. Rows are sorted from largest to smallest; each row contains a raw byte count, a tab, and the directory name. Performance goals and captures in this document apply to the Linux backend.
+The indexed browser and deletion workflow run on the macOS host build. The
+Linux backend in this port remains summary-only. Measurements below were taken
+on macOS 27 arm64 using a disposable fixture with 34,493 indexed entries, one
+30,000-file wide directory, 395 directories, and two 64-level directory
+chains. Timings are observations from this fixture, not CI thresholds.
 
-The supplied root path is opened normally, so symlinks in that path resolve. Discovered symlinks are counted without following them, and hardlinked paths are counted separately. Allocated bytes are the default; apparent mode uses logical lengths. FDU excludes child directories on another filesystem or mount; the library report counts those boundaries separately from entries skipped after I/O or metadata errors.
+The macOS summary output from the pre-browser release and the new `--summary`
+release had identical bytes on the same fixture. Five uninstrumented runs gave
+median elapsed times of 0.57 s (0.53–0.76 s) and 0.59 s (0.54–0.81 s)
+respectively. Median process CPU time (`user + sys`) was 0.40 s (0.38–0.52 s)
+before and 0.31 s (0.31–0.40 s) after. Peak RSS was about 3.42–3.47 MB before
+and 3.67–3.72 MB after. These close, host-noisy samples show a small memory
+increase and do not establish a material timing regression or gain.
 
-The scanner returns aggregate sizes only. It does not retain or render a full tree.
+The headless indexed scanner completed five runs in 0.528–0.780 s. The index
+retained 6,193,152 arena bytes, or 179.55 bytes per entry, and the bounded
+scanner event queue reached 8 of 8 slots. No scan errors occurred. The live
+headless indexed runs used 0.36–0.47 s of process CPU time (median 0.39 s).
+The live browser profile was repeated after increasing the model's bounded
+per-tick event budget from 4 to 32:
 
-## Quantified optimization goal
+| Live browser run | Elapsed | Process CPU | First usable listing | Input-to-render p50 / max | Peak RSS |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | 2.666 s | 0.65 s | 23 ms | 748 / 2,259 µs | 16.58 MB |
+| 2 | 2.744 s | 0.68 s | 23 ms | 453 / 536 µs | 16.56 MB |
+| 3 | 2.519 s | 0.64 s | 22 ms | 609 / 909 µs | 16.60 MB |
+
+Each run indexed all 34,493 entries and retained the same 179.55 arena bytes
+per entry. The event queue reached 8 of 8 slots. The increase from 4 to 32
+reduced internal elapsed time from the earlier 5.15–5.40 s samples to
+2.52–2.74 s, while the measured input-to-render maximum remained below 2.3 ms.
+The measurements use a PTY runner that sends four navigation/filter keys
+during scanning and quits when the UI reports Ready.
+
+The optional `allocation-profile` build reported the following three-run
+distributions. It instruments Rust allocator requests across startup, scan,
+model updates, and rendering; allocator atomics add overhead, so these are not
+timing measurements.
+
+| Mode | Allocation + reallocation calls | Requested bytes | Peak live requested bytes |
+| --- | ---: | ---: | ---: |
+| Summary | 50,430 each run | 2,604,828 each run | 1,160,336 each run |
+| Live indexed browser | 34,656–35,782 | 16,491,704–16,729,724 | 6,679,935–6,680,835 |
+
+The summary-only counts are for the macOS backend and this fixture; they should
+not be compared directly with the historical Linux allocator captures below.
+Peak RSS above is from uninstrumented processes. The headless indexed example
+reports retained arena size and queue high-water marks, while the live browser
+profile also records first-listing and input-to-render latency.
+
+No syscall profile was collected: `/usr/bin/dtruss` is installed, but DTrace
+refused to initialize because tracing requires additional privileges on this
+host. macOS end-to-end nested-mount and directory-alias coverage, plus Linux
+bind-mount coverage, were skipped because controlled privileged fixtures were
+not available. Mount-identity comparisons have unit coverage, but they do not
+replace those traversal fixtures. Native Linux runtime tests were not run
+from this macOS host. Cross-compilation, if performed, is not counted as
+Linux runtime verification.
+
+On macOS, `cargo test --locked --workspace`,
+`cargo test --locked --workspace --features allocation-profile`, and
+`cargo test --locked -p fdu --no-default-features` passed. The full workspace
+check and release build, plus the summary-only release build, passed. These
+results include the allocation-profile release build and cover the macOS
+scanner, browser, terminal backend, and deletion fixtures; they do not
+establish Linux runtime behavior.
+
+## Historical Linux summary-scanner study
+
+The earlier sections below record the Linux 6.0+ summary scanner optimization
+study and its captures. That study measures aggregate immediate-child
+directory totals, excludes root-level files, and does not retain a full tree.
+Its scanner returns one row per child directory, sorted largest first. The
+supplied root path resolves symlinks normally; discovered symlinks and
+hardlinked paths are counted without following or deduplicating them. It
+excludes child directories on another filesystem or mount.
+
+## Historical quantified optimization goal
 
 The optimization objective is: **double FDU's throughput on the default ext4 fixture, halve CPU work and allocation traffic, and reduce peak memory while preserving its current accounting, four default Rayon workers, and libc-plus-Rayon dependency boundary.** The targets below define success; they are aspirations, not measured improvements.
 
@@ -32,7 +103,10 @@ Retain one file-metadata operation per non-directory path or fewer, and no extra
 
 The goal is achieved when all targets and requirements pass the validation procedure below and the implementation, captures, and interpretation are committed. Partial gains or exhausted experiments should be reported with their measured gap to the targets rather than described as completion.
 
-Work is paused at the user's request. The settled implementation meets the measured memory and user-instruction budgets; throughput and total CPU targets remain unmet. The investigation handoff below records the remaining checks and hypotheses.
+At the end of this Linux summary-scanner investigation, the settled
+implementation met the measured memory and user-instruction budgets; its
+throughput and total CPU targets remained unmet. The handoff below preserves
+the remaining checks and hypotheses from that work.
 
 ## Implementation state
 

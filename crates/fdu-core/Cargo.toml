@@ -1,0 +1,8 @@
+[package]
+name = "fdu-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Filesystem-independent index and protocol types for fdu"
+
+[dependencies]

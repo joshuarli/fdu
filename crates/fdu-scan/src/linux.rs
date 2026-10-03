@@ -420,6 +420,7 @@ fn scan_mode<const APPARENT: bool>(path: &Path) -> io::Result<ScanReport> {
         directories,
         skipped_entries: skipped_entries.load(Ordering::Relaxed),
         mount_boundaries: mount_boundaries.load(Ordering::Relaxed),
+        unsupported_aliases: 0,
     })
 }
 
@@ -466,6 +467,7 @@ fn scan_top_level_entry<const APPARENT: bool>(
     Ok(Some(TopLevelDirectory {
         name: OsString::from_vec(entry.as_c_str(names).to_bytes().to_vec()),
         disk_size,
+        exclusion: None,
     }))
 }
 

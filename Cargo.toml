@@ -5,14 +5,27 @@ edition = "2021"
 license = "MIT"
 description = "A disk usage scanner for Linux and macOS"
 
+[workspace]
+members = [
+    ".",
+    "crates/fdu-core",
+    "crates/fdu-scan",
+    "crates/fdu-delete",
+    "crates/fdu-tui",
+]
+resolver = "2"
+
 [features]
 allocation-profile = []
+default = ["interactive"]
+interactive = ["dep:fdu-tui", "dep:fdu-delete"]
 
 [dependencies]
 libc = "0.2"
-
-[target.'cfg(target_os = "linux")'.dependencies]
-rayon = "1.5.1"
+fdu-core = { path = "crates/fdu-core" }
+fdu-scan = { path = "crates/fdu-scan" }
+fdu-delete = { path = "crates/fdu-delete", optional = true }
+fdu-tui = { path = "crates/fdu-tui", optional = true }
 
 [profile.release]
 lto = "thin"

@@ -1,4 +1,4 @@
-use fdu::{scan, ScanOptions, ScanReport};
+use fdu_scan::{scan, ScanOptions, ScanReport};
 use std::ffi::{CString, OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{self, Write};

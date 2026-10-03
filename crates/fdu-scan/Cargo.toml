@@ -1,0 +1,13 @@
+[package]
+name = "fdu-scan"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Read-only filesystem scanning for fdu"
+
+[dependencies]
+fdu-core = { path = "../fdu-core" }
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rayon = "1.5.1"

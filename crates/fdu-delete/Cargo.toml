@@ -1,0 +1,10 @@
+[package]
+name = "fdu-delete"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Descriptor-relative deletion for fdu indexes"
+
+[dependencies]
+fdu-core = { path = "../fdu-core" }
+libc = "0.2"
