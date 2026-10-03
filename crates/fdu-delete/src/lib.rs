@@ -27,9 +27,18 @@ impl DeletionPlan {
     }
 }
 
+/// One selected root that cannot be deleted. `node` is `None` for problems with
+/// the selection as a whole, such as an empty selection or a byte total that
+/// overflows.
+#[derive(Debug)]
+pub struct Rejection {
+    pub node: Option<NodeId>,
+    pub reason: String,
+}
+
 #[derive(Debug)]
 pub struct PlanError {
-    pub rejected: Vec<String>,
+    pub rejected: Vec<Rejection>,
 }
 
 impl fmt::Display for PlanError {
@@ -64,33 +73,35 @@ pub enum DeleteEvent {
     Finished,
 }
 
+/// Plans the permanent removal of `selected` roots, which may live in different
+/// directories. The whole selection is accepted or rejected; an ineligible root
+/// is never dropped to let the others through. Roots must not overlap, because a
+/// directory root already covers every descendant.
 pub fn create_plan(tree: Arc<Tree>, selected: &[NodeId]) -> Result<DeletionPlan, PlanError> {
     let mut rejected = Vec::new();
     if selected.is_empty() {
-        rejected.push("no entries are selected".to_owned());
+        rejected.push(Rejection { node: None, reason: "no entries are selected".to_owned() });
     }
-    let parent = selected
-        .first()
-        .and_then(|id| tree.record(*id))
-        .and_then(|record| record.parent());
     let mut unique = Vec::with_capacity(selected.len());
     let mut seen = HashSet::with_capacity(selected.len());
     for id in selected {
-        if !seen.insert(*id) {
-            continue;
+        if seen.insert(*id) {
+            unique.push(*id);
         }
-        unique.push(*id);
+    }
+    for id in &unique {
+        let reject = |reason: &str| Rejection { node: Some(*id), reason: reason.to_owned() };
         match tree.record(*id) {
-            None => rejected.push(format!("entry {} is absent from the index", id.index())),
+            None => rejected.push(reject("absent from the index")),
             Some(record) if *id == tree.root() || record.entry_type == EntryType::Root => {
-                rejected.push("the scan root is protected".to_owned());
+                rejected.push(reject("the scan root is protected"));
             }
-            Some(record) if record.parent() != parent => {
-                rejected.push("all selected entries must be siblings".to_owned());
+            Some(_) if has_selected_ancestor(&tree, &seen, *id) => {
+                rejected.push(reject("already covered by a selected parent directory"));
             }
             Some(record) => {
                 if let Some(reason) = ineligible_reason(&tree, *id, record.entry_type) {
-                    rejected.push(format!("entry {}: {reason}", id.index()));
+                    rejected.push(reject(reason));
                 }
             }
         }
@@ -99,27 +110,16 @@ pub fn create_plan(tree: Arc<Tree>, selected: &[NodeId]) -> Result<DeletionPlan,
         return Err(PlanError { rejected });
     }
 
+    let overflow = |what: &str| PlanError {
+        rejected: vec![Rejection { node: None, reason: format!("selected {what} byte total exceeds u64") }],
+    };
     let mut targets = Vec::new();
     let mut apparent_bytes = 0u64;
     let mut allocated_bytes = 0u64;
     for root in &unique {
         let record = tree.record(*root).expect("validated deletion root");
-        apparent_bytes = match apparent_bytes.checked_add(record.apparent_bytes) {
-            Some(value) => value,
-            None => {
-                return Err(PlanError {
-                    rejected: vec!["selected apparent byte total exceeds u64".to_owned()],
-                })
-            }
-        };
-        allocated_bytes = match allocated_bytes.checked_add(record.allocated_bytes) {
-            Some(value) => value,
-            None => {
-                return Err(PlanError {
-                    rejected: vec!["selected allocated byte total exceeds u64".to_owned()],
-                })
-            }
-        };
+        apparent_bytes = apparent_bytes.checked_add(record.apparent_bytes).ok_or_else(|| overflow("apparent"))?;
+        allocated_bytes = allocated_bytes.checked_add(record.allocated_bytes).ok_or_else(|| overflow("allocated"))?;
         append_postorder(&tree, *root, &mut targets);
     }
     Ok(DeletionPlan {
@@ -129,6 +129,17 @@ pub fn create_plan(tree: Arc<Tree>, selected: &[NodeId]) -> Result<DeletionPlan,
         apparent_bytes,
         allocated_bytes,
     })
+}
+
+fn has_selected_ancestor(tree: &Tree, selected: &HashSet<NodeId>, id: NodeId) -> bool {
+    let mut current = tree.record(id).and_then(|record| record.parent());
+    while let Some(ancestor) = current {
+        if selected.contains(&ancestor) {
+            return true;
+        }
+        current = tree.record(ancestor).and_then(|record| record.parent());
+    }
+    false
 }
 
 fn ineligible_reason(tree: &Tree, id: NodeId, entry_type: EntryType) -> Option<&'static str> {
@@ -686,6 +697,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn plan_accepts_roots_from_different_directories() {
+        let (tree, _, file, _) = test_tree();
+        let mut mutable = Arc::try_unwrap(tree).ok().unwrap();
+        let top_level = mutable
+            .append(mutable.root(), b"top", EntryType::RegularFile, FileIdentity { device: 1, inode: 9 }, 1, 5, 512, NodeState::Complete)
+            .unwrap();
+        let tree = Arc::new(mutable);
+        let plan = create_plan(tree, &[file, top_level]).unwrap();
+        assert_eq!(plan.roots, vec![file, top_level]);
+        assert_eq!(plan.operation_count(), 2);
+        assert_eq!(plan.apparent_bytes, 15);
+    }
+
+    #[test]
+    fn plan_rejects_a_root_covered_by_another_selected_directory() {
+        let (tree, directory, file, _) = test_tree();
+        let rejection = create_plan(tree, &[directory, file]).err().expect("selection is rejected");
+        assert_eq!(rejection.rejected.len(), 1);
+        assert_eq!(rejection.rejected[0].node, Some(file));
+        assert!(rejection.rejected[0].reason.contains("covered"));
+    }
+
+    #[test]
+    fn plan_names_each_ineligible_root_and_deletes_none_of_the_selection() {
+        let (tree, _, file, _) = test_tree();
+        let mut mutable = Arc::try_unwrap(tree).ok().unwrap();
+        let blocked = mutable
+            .append(mutable.root(), b"blocked", EntryType::RegularFile, FileIdentity { device: 1, inode: 9 }, 1, 5, 512, NodeState::Incomplete)
+            .unwrap();
+        let tree = Arc::new(mutable);
+        let rejection = create_plan(tree, &[file, blocked]).err().expect("selection is rejected");
+        assert_eq!(rejection.rejected.len(), 1);
+        assert_eq!(rejection.rejected[0].node, Some(blocked));
+    }
+
     #[cfg(target_os = "macos")]
     mod macos_filesystem {
         use crate::macos::run_with;
@@ -904,6 +951,31 @@ mod tests {
             let outcomes = execute_plan(&temp.root, plan, None);
             assert_eq!(outcome(&outcomes, target_id), OutcomeKind::Changed);
             assert_eq!(fs::read(&target)?, b"replacement stays");
+            Ok(())
+        }
+
+        #[test]
+        fn selections_from_several_directories_are_removed_together() -> io::Result<()> {
+            let temp = TempRoot::new()?;
+            fs::create_dir(temp.root.join("left"))?;
+            fs::create_dir(temp.root.join("right"))?;
+            fs::write(temp.root.join("left/a"), b"a")?;
+            fs::write(temp.root.join("left/keep"), b"keep")?;
+            fs::write(temp.root.join("right/b"), b"b")?;
+            fs::write(temp.root.join("top"), b"top")?;
+            let tree = index_root(&temp.root)?;
+            let left = child(&tree, tree.root(), b"left");
+            let right = child(&tree, tree.root(), b"right");
+            let a = child(&tree, left, b"a");
+            let b = child(&tree, right, b"b");
+            let top = child(&tree, tree.root(), b"top");
+            let plan = create_plan(Arc::clone(&tree), &[a, b, top]).unwrap();
+            let outcomes = execute_plan(&temp.root, plan, None);
+            assert!(outcomes.iter().all(|item| item.kind == OutcomeKind::Deleted));
+            assert!(!temp.root.join("left/a").exists());
+            assert!(!temp.root.join("right/b").exists());
+            assert!(!temp.root.join("top").exists());
+            assert!(temp.root.join("left/keep").exists());
             Ok(())
         }
 

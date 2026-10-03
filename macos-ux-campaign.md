@@ -44,23 +44,37 @@ explicit confirmation before work starts.
 
 ## Current behavior
 
-- A macOS terminal session opens the interactive browser. The header shows the
-  current breadcrumb, size mode, sort mode, and mark count.
+- A macOS terminal session opens the interactive browser: a minimal title
+  strip, a plainly framed listing (size, share of the directory, bar, name), a
+  marked-items pane, and a status strip that shows only the entry count
+  (ending in `…` while scanning). There is no key-hint strip; `?` opens help.
+  The focused pane is drawn at normal weight and the other dimmed; `[x]` marks
+  and `[=]` covered rows do not depend on color.
 - Navigation can descend into indexed directories and return to the opened
   root, but cannot move above it. Discovered symlinks are selectable leaves and
   are never followed.
 - Scanning results appear as they arrive. Browsing and marking remain available
   during scanning; delete and refresh wait for scanning to finish.
-- Marks apply to siblings in the current directory. Filtering and sorting keep
-  marks; entering a directory, returning to its parent, or rescanning clears
-  them.
-- `d` opens a permanent-deletion confirmation. Enter starts it and Esc returns
-  without deleting. The review shows totals and up to four selected names.
-- While deleting, the browser ignores commands other than Esc. Esc asks the
+- `d` marks; Space does nothing. Marks are a root-wide basket. They survive
+  filtering, sorting, and moving between directories, and clear on rescan or
+  after a deletion. Overlapping marks are refused with a reason. The pane lists
+  marks by root-relative path, including ones a filter hides, and Enter in the
+  pane shows a mark in its directory.
+- The marked pane opens with the first mark and closes with the last. Tab
+  switches panes and `-` toggles side-by-side and stacked layouts. When the
+  terminal is too small for both (under 60 columns side by side, under 12 rows
+  stacked) only the focused pane is shown.
+- Ctrl-R in the marked pane asks for confirmation in the status strip (there
+  is no modal); the pane is the review. Enter starts permanent deletion and Esc
+  withdraws the question. If any mark is ineligible nothing is deleted or
+  narrowed and the status strip names the first reason.
+- While deleting, the browser ignores every command except Esc. Esc asks the
   worker to stop scheduling work after the current operation; it cannot restore
-  entries already removed. Progress shows a current name and completed count.
-- The interface is keyboard-first, with `?` help, a name filter, sorting,
-  allocated/apparent size modes, range marks, and a read-only mode.
+  entries already removed. The status strip shows progress, then a summary of
+  deleted, already absent, changed, failed, and not attempted entries.
+- The interface is keyboard-first, with `?` help, a name filter, `s` to toggle
+  size/name order, `a` for allocated/apparent sizes, range marks, and a
+  read-only mode.
 
 ## UX anchors
 

@@ -3,7 +3,10 @@ use fdu_core::{
 };
 use fdu_delete::{create_plan, DeleteEvent, DeleteOutcome, DeletionPlan, OutcomeKind};
 use fdu_scan::{open_root, start_indexed_scan_with_metrics, RootAnchor, ScanQueueMetrics};
-use fdu_tui::{self, Cursor, Intent, Modal, Phase, SizeMode, SortMode, TerminalSession, View};
+use fdu_tui::{
+    self, Cursor, Intent, Modal, Operation, Pane, Phase, SizeMode, Split, SortMode, TerminalSession,
+    TerminalSize, View,
+};
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,7 +22,7 @@ const DELETE_CHANNEL_CAPACITY: usize = 8;
 const MAX_SCAN_EVENTS_PER_TICK: usize = 128;
 const MAX_DELETE_EVENTS_PER_TICK: usize = 32;
 const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(20);
-const SCAN_INPUT_POLL_INTERVAL: Duration = Duration::from_millis(1);
+const WORKER_INPUT_POLL_INTERVAL: Duration = Duration::from_millis(1);
 const SCAN_REDRAW_INTERVAL: Duration = Duration::from_millis(100);
 
 enum AppPhase {
@@ -168,11 +171,70 @@ enum DialogState {
     None,
     Help,
     Filter(String),
-    Confirm {
-        plan: Option<DeletionPlan>,
-        selected: Vec<NodeId>,
-        rejected: Vec<String>,
-    },
+}
+
+/// The deletion basket: marked roots in the order they were marked, with
+/// constant-time membership checks for row rendering.
+#[derive(Default)]
+struct MarkSet {
+    members: HashSet<NodeId>,
+    order: Vec<NodeId>,
+}
+
+impl MarkSet {
+    fn contains(&self, id: &NodeId) -> bool {
+        self.members.contains(id)
+    }
+
+    fn insert(&mut self, id: NodeId) -> bool {
+        let added = self.members.insert(id);
+        if added {
+            self.order.push(id);
+        }
+        added
+    }
+
+    fn remove(&mut self, id: &NodeId) -> bool {
+        let removed = self.members.remove(id);
+        if removed {
+            self.order.retain(|candidate| candidate != id);
+        }
+        removed
+    }
+
+    fn remove_at(&mut self, index: usize) -> Option<NodeId> {
+        if index >= self.order.len() {
+            return None;
+        }
+        let id = self.order.remove(index);
+        self.members.remove(&id);
+        Some(id)
+    }
+
+    fn clear(&mut self) {
+        self.members.clear();
+        self.order.clear();
+    }
+
+    fn len(&self) -> usize {
+        self.order.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.order.is_empty()
+    }
+
+    fn get(&self, index: usize) -> Option<NodeId> {
+        self.order.get(index).copied()
+    }
+}
+
+/// Why an entry cannot join the marks.
+enum MarkBlock {
+    /// A marked directory already covers the entry.
+    Covered(NodeId),
+    /// The entry is a directory with a marked entry inside it.
+    ContainsMark,
 }
 
 enum Action {
@@ -192,13 +254,19 @@ struct BrowserModel {
     cursor: Cursor,
     cursor_index: Option<usize>,
     cursor_moved_during_scan: bool,
-    marks: HashSet<NodeId>,
+    marks: MarkSet,
+    marked_cursor: usize,
+    focus: Pane,
+    terminal: TerminalSize,
+    split: Split,
     filter: String,
     size_mode: SizeMode,
     sort_mode: SortMode,
     range_mode: bool,
     range_anchor: Option<NodeId>,
     dialog: DialogState,
+    /// A frozen plan awaiting Enter. While set, only Enter and Esc act.
+    pending_delete: Option<DeletionPlan>,
     message: Option<String>,
     status_by_node: HashMap<NodeId, String>,
     indexed_entries: usize,
@@ -299,7 +367,7 @@ fn duration_ms(duration: Option<Duration>) -> u128 {
 }
 
 impl BrowserModel {
-    fn new(root: &RootAnchor, read_only: bool, apparent: bool) -> io::Result<Self> {
+    fn new(root: &RootAnchor, read_only: bool, apparent: bool, terminal: TerminalSize) -> io::Result<Self> {
         let tree = Tree::new(&root.name, root.identity, root.link_count).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "root path exceeds index limits")
         })?;
@@ -313,13 +381,18 @@ impl BrowserModel {
             cursor: Cursor::None,
             cursor_index: None,
             cursor_moved_during_scan: false,
-            marks: HashSet::new(),
+            marks: MarkSet::default(),
+            marked_cursor: 0,
+            focus: Pane::Browser,
+            terminal,
+            split: Split::Vertical,
             filter: String::new(),
             size_mode: SizeMode::Allocated,
             sort_mode: SortMode::Size,
             range_mode: false,
             range_anchor: None,
             dialog: DialogState::None,
+            pending_delete: None,
             message: None,
             status_by_node: HashMap::new(),
             indexed_entries: 0,
@@ -349,10 +422,13 @@ impl BrowserModel {
         self.cursor_index = None;
         self.cursor_moved_during_scan = false;
         self.marks.clear();
+        self.marked_cursor = 0;
+        self.normalize_focus();
         self.filter.clear();
         self.range_mode = false;
         self.range_anchor = None;
         self.dialog = DialogState::None;
+        self.pending_delete = None;
         self.message = None;
         self.status_by_node.clear();
         self.indexed_entries = 0;
@@ -561,6 +637,11 @@ impl BrowserModel {
     }
 
     fn handle_intent(&mut self, intent: Intent, phase: Phase) -> (Action, bool) {
+        if let Intent::Resize(size) = intent {
+            self.terminal = size;
+            self.normalize_focus();
+            return (Action::None, true);
+        }
         if matches!(&self.dialog, DialogState::Help) {
             if matches!(intent, Intent::Cancel | Intent::Help) {
                 self.dialog = DialogState::None;
@@ -596,25 +677,20 @@ impl BrowserModel {
                 _ => return (Action::None, false),
             }
         }
-        if matches!(&self.dialog, DialogState::Confirm { .. }) {
-            match intent {
-                Intent::Cancel => {
-                    self.dialog = DialogState::None;
-                    return (Action::None, true);
-                }
+        if self.pending_delete.is_some() {
+            return match intent {
                 Intent::Enter => {
-                    let DialogState::Confirm { plan, .. } = std::mem::replace(&mut self.dialog, DialogState::None) else {
-                        unreachable!()
-                    };
-                    if let Some(plan) = plan {
-                        return (Action::Delete(plan), true);
-                    }
-                    self.dialog = DialogState::None;
-                    return (Action::None, true);
+                    let plan = self.pending_delete.take().expect("a plan is pending");
+                    (Action::Delete(plan), true)
                 }
-                _ => return (Action::None, false),
-            }
+                Intent::Cancel => {
+                    self.pending_delete = None;
+                    (Action::None, true)
+                }
+                _ => (Action::None, false),
+            };
         }
+        // Deletion owns the interface: Esc is the only command that does anything.
         if phase == Phase::Deleting {
             return if matches!(intent, Intent::Cancel) {
                 (Action::CancelDeletion, true)
@@ -632,10 +708,22 @@ impl BrowserModel {
             }
             return (Action::Quit, true);
         }
-        if matches!(intent, Intent::StartFilter) {
-            self.dialog = DialogState::Filter(self.filter.clone());
-            self.message = None;
-            return (Action::None, true);
+        match intent {
+            Intent::SwitchPane => return (Action::None, self.switch_pane()),
+            Intent::ToggleSplit => {
+                self.split = self.split.toggled();
+                return (Action::None, true);
+            }
+            Intent::StartFilter if self.focus == Pane::Browser => {
+                self.dialog = DialogState::Filter(self.filter.clone());
+                self.message = None;
+                return (Action::None, true);
+            }
+            Intent::StartFilter | Intent::ToggleRange | Intent::MarkAll => {
+                self.message = Some("That command applies to the browser list; press Tab to return to it.".to_owned());
+                return (Action::None, true);
+            }
+            _ => {}
         }
         if phase == Phase::Scanning {
             match intent {
@@ -651,83 +739,178 @@ impl BrowserModel {
             }
         }
         match intent {
-            Intent::MoveUp => (Action::None, self.move_cursor(-1)),
-            Intent::MoveDown => (Action::None, self.move_cursor(1)),
-            Intent::PageUp => (Action::None, self.move_cursor(-15)),
-            Intent::PageDown => (Action::None, self.move_cursor(15)),
-            Intent::Home => (Action::None, self.move_to_edge(false)),
-            Intent::End => (Action::None, self.move_to_edge(true)),
-            Intent::Enter => (Action::None, self.enter_cursor()),
-            Intent::Parent => (Action::None, self.go_parent()),
-            Intent::ToggleMark => (Action::None, self.toggle_mark()),
-            Intent::ToggleRange => (Action::None, self.toggle_range()),
-            Intent::MarkAll => (Action::None, self.mark_all_visible()),
-            Intent::ClearMarks => {
-                let changed = !self.marks.is_empty();
-                self.marks.clear();
-                (Action::None, changed)
-            }
             Intent::ToggleSizeMode => {
                 self.size_mode = match self.size_mode {
                     SizeMode::Allocated => SizeMode::Apparent,
                     SizeMode::Apparent => SizeMode::Allocated,
                 };
                 let changed = if phase == Phase::Ready { self.sort_visible_if_needed() } else { true };
-                (Action::None, changed)
+                return (Action::None, changed);
             }
-            Intent::SortByName => (Action::None, self.set_sort(SortMode::Name, phase)),
-            Intent::SortBySize => (Action::None, self.set_sort(SortMode::Size, phase)),
-            Intent::Delete => self.begin_delete(),
-            Intent::Refresh if phase == Phase::Ready => (Action::Refresh, true),
+            Intent::ToggleSort => {
+                let next = match self.sort_mode {
+                    SortMode::Size => SortMode::Name,
+                    SortMode::Name => SortMode::Size,
+                };
+                return (Action::None, self.set_sort(next, phase));
+            }
+            Intent::ClearMarks => {
+                let changed = !self.marks.is_empty();
+                self.marks.clear();
+                self.marked_cursor = 0;
+                self.normalize_focus();
+                return (Action::None, changed);
+            }
+            Intent::Delete => return self.begin_delete(),
+            Intent::Refresh if phase == Phase::Ready => return (Action::Refresh, true),
             Intent::Refresh => {
                 self.message = Some("A full rescan is only available when the index is ready.".to_owned());
-                (Action::None, true)
+                return (Action::None, true);
             }
-            Intent::Cancel => (Action::None, false),
-            Intent::FilterCharacter(_)
-            | Intent::FilterBackspace
-            | Intent::SubmitFilter
-            | Intent::StartFilter
-            | Intent::Help
-            | Intent::Quit => (Action::None, false),
+            _ => {}
+        }
+        match self.focus {
+            Pane::Browser => self.handle_browser_intent(intent),
+            Pane::Marked => self.handle_marked_intent(intent),
         }
     }
 
+    fn handle_browser_intent(&mut self, intent: Intent) -> (Action, bool) {
+        let changed = match intent {
+            Intent::MoveUp => self.move_cursor(-1),
+            Intent::MoveDown => self.move_cursor(1),
+            Intent::PageUp => self.move_cursor(-15),
+            Intent::PageDown => self.move_cursor(15),
+            Intent::Home => self.move_to_edge(false),
+            Intent::End => self.move_to_edge(true),
+            Intent::Enter => self.enter_cursor(),
+            Intent::Parent => self.go_parent(),
+            Intent::ToggleMark => self.toggle_mark(),
+            Intent::ToggleRange => self.toggle_range(),
+            Intent::MarkAll => self.mark_all_visible(),
+            _ => false,
+        };
+        (Action::None, changed)
+    }
+
+    fn handle_marked_intent(&mut self, intent: Intent) -> (Action, bool) {
+        let changed = match intent {
+            Intent::MoveUp => self.move_marked_cursor(-1),
+            Intent::MoveDown => self.move_marked_cursor(1),
+            Intent::PageUp => self.move_marked_cursor(-15),
+            Intent::PageDown => self.move_marked_cursor(15),
+            Intent::Home => self.move_marked_cursor(isize::MIN),
+            Intent::End => self.move_marked_cursor(isize::MAX),
+            Intent::Enter => self.reveal_marked(),
+            Intent::ToggleMark => self.unmark_at_cursor(),
+            _ => false,
+        };
+        (Action::None, changed)
+    }
+
+    /// The marked-items pane is shown whenever something is marked. A terminal
+    /// too narrow for both panes shows only the one that has focus.
+    fn side_visible(&self) -> bool {
+        !self.marks.is_empty() && (fdu_tui::fits_two_panes(self.split, self.terminal) || self.focus == Pane::Marked)
+    }
+
+    /// Focus belongs on the browser whenever nothing is marked.
+    fn normalize_focus(&mut self) {
+        if self.marks.is_empty() {
+            self.focus = Pane::Browser;
+        }
+    }
+
+    fn switch_pane(&mut self) -> bool {
+        if self.marks.is_empty() {
+            self.message = Some("Nothing is marked.".to_owned());
+        } else {
+            self.focus = match self.focus {
+                Pane::Browser => Pane::Marked,
+                Pane::Marked => Pane::Browser,
+            };
+        }
+        true
+    }
+
+    fn move_marked_cursor(&mut self, amount: isize) -> bool {
+        let count = self.marks.len();
+        if count == 0 {
+            return false;
+        }
+        let next = (self.marked_cursor as isize).saturating_add(amount).clamp(0, count as isize - 1) as usize;
+        let changed = next != self.marked_cursor;
+        self.marked_cursor = next;
+        changed
+    }
+
+    fn unmark_at_cursor(&mut self) -> bool {
+        if self.marks.remove_at(self.marked_cursor).is_none() {
+            return false;
+        }
+        self.marked_cursor = self.marked_cursor.min(self.marks.len().saturating_sub(1));
+        self.normalize_focus();
+        true
+    }
+
+    /// Shows the highlighted marked entry in the browser, in its own directory.
+    fn reveal_marked(&mut self) -> bool {
+        let Some(id) = self.marks.get(self.marked_cursor) else {
+            return false;
+        };
+        let Some(parent) = self.tree.record(id).and_then(|record| record.parent()) else {
+            return false;
+        };
+        let filter_hid_it = !self.filter.is_empty();
+        self.filter.clear();
+        self.current_directory = parent;
+        self.range_mode = false;
+        self.range_anchor = None;
+        self.message = filter_hid_it.then(|| "Filter cleared to show the marked entry.".to_owned());
+        self.rebuild_listing(false);
+        if self.visible.contains(&id) {
+            self.cursor = Cursor::Entry(id);
+            self.refresh_cursor_index();
+        }
+        self.cursor_moved_during_scan = self.scanning;
+        self.focus = Pane::Browser;
+        self.normalize_focus();
+        true
+    }
+
+    /// Freezes a deletion plan for every mark and asks for confirmation. The
+    /// marked-items pane is the review, so deletion starts only from there.
     fn begin_delete(&mut self) -> (Action, bool) {
         if self.read_only {
             self.message = Some("This session is read only; deletion is disabled.".to_owned());
             return (Action::None, true);
         }
+        if self.focus != Pane::Marked {
+            self.message = Some("Press Tab to review the marked items, then Ctrl-R to delete them.".to_owned());
+            return (Action::None, true);
+        }
         self.range_mode = false;
         self.range_anchor = None;
-        let selected = if self.marks.is_empty() {
-            match self.cursor {
-                Cursor::Entry(id) => vec![id],
-                _ => Vec::new(),
-            }
-        } else {
-            self.listing
-                .iter()
-                .copied()
-                .filter(|id| self.marks.contains(id))
-                .collect()
-        };
-        match create_plan(Arc::clone(&self.tree), &selected) {
+        if self.marks.is_empty() {
+            self.message = Some("Nothing is marked.".to_owned());
+            return (Action::None, true);
+        }
+        match create_plan(Arc::clone(&self.tree), &self.marks.order) {
             Ok(plan) => {
-                self.dialog = DialogState::Confirm {
-                    plan: Some(plan),
-                    selected,
-                    rejected: Vec::new(),
-                };
+                self.pending_delete = Some(plan);
                 self.message = None;
             }
             Err(error) => {
-                self.dialog = DialogState::Confirm {
-                    plan: None,
-                    selected,
-                    rejected: error.rejected,
-                };
-                self.message = Some("The full selection is ineligible; no entries were narrowed or removed.".to_owned());
+                let blocked = error.rejected.len();
+                let first = error.rejected.first().map(|rejection| match rejection.node {
+                    Some(node) => format!("{}: {}", self.display_path(node), rejection.reason),
+                    None => rejection.reason.clone(),
+                });
+                self.message = Some(format!(
+                    "Nothing was deleted or narrowed: {blocked} marked entr{} cannot be removed ({})",
+                    if blocked == 1 { "y" } else { "ies" },
+                    first.unwrap_or_default(),
+                ));
             }
         }
         (Action::None, true)
@@ -735,39 +918,24 @@ impl BrowserModel {
 
     fn view<'a>(&'a self, phase: &'a AppPhase) -> View<'a> {
         let modal = match &self.dialog {
-            DialogState::None => match phase {
-                AppPhase::Deleting(worker) => Modal::Deleting {
-                    attempted: worker.completed,
-                    total: worker.total,
-                    current: &worker.current,
-                    cancellable: !worker.cancelled.load(Ordering::Relaxed),
-                },
-                _ => Modal::None,
-            },
-            DialogState::Help => Modal::Help,
+            DialogState::None => Modal::None,
+            DialogState::Help => Modal::Help { focus: self.focus },
             DialogState::Filter(value) => Modal::Filter { value },
-            DialogState::Confirm {
-                plan,
-                selected,
-                rejected,
-            } => match plan {
-                Some(plan) => Modal::ConfirmDelete {
-                    roots: &plan.roots,
-                    descendants: plan.operation_count(),
-                    apparent_bytes: plan.apparent_bytes,
-                    allocated_bytes: plan.allocated_bytes,
-                    rejected,
-                    eligible: true,
-                },
-                None => Modal::ConfirmDelete {
-                    roots: selected,
-                    descendants: 0,
-                    apparent_bytes: 0,
-                    allocated_bytes: 0,
-                    rejected,
-                    eligible: false,
-                },
+        };
+        let operation = match (&self.pending_delete, phase) {
+            (_, AppPhase::Deleting(worker)) => Operation::Deleting {
+                completed: worker.completed,
+                total: worker.total,
+                current: &worker.current,
+                stopping: worker.cancelled.load(Ordering::Relaxed),
             },
+            (Some(plan), _) => Operation::ConfirmDelete {
+                roots: plan.roots.len(),
+                entries: plan.operation_count(),
+                allocated_bytes: plan.allocated_bytes,
+                apparent_bytes: plan.apparent_bytes,
+            },
+            (None, _) => Operation::Idle,
         };
         let detail_message = match self.cursor {
             Cursor::Entry(id) => self.status_by_node.get(&id).map(String::as_str),
@@ -779,7 +947,13 @@ impl BrowserModel {
             rows: &self.visible,
             has_parent_row: self.has_parent_row(),
             cursor_index: self.cursor_index,
-            marks: &self.marks,
+            marks: &self.marks.members,
+            marked: &self.marks.order,
+            marked_cursor: (!self.marks.is_empty()).then(|| self.marked_cursor.min(self.marks.len() - 1)),
+            covered_by: self.covering_mark(),
+            focus: self.focus,
+            side_visible: self.side_visible(),
+            split: self.split,
             filter: &self.filter,
             size_mode: self.size_mode,
             sort_mode: self.sort_mode,
@@ -794,6 +968,7 @@ impl BrowserModel {
             message: self.message.as_deref(),
             detail_message,
             modal,
+            operation,
         }
     }
 
@@ -818,52 +993,56 @@ impl BrowserModel {
         let preserve_cursor = self.cursor_moved_during_scan;
         self.cursor_moved_during_scan = false;
         self.rebuild_listing(preserve_cursor);
-        if self.message.is_none() {
-            self.message = Some(format!("Index ready · {} entries · {} scan errors", self.indexed_entries, self.scan_errors));
-        }
     }
 
     fn apply_delete_outcomes(&mut self, outcomes: Vec<DeleteOutcome>, worker_error: Option<String>) {
-        let mut deleted = 0usize;
-        let mut absent = 0usize;
-        let mut failures = 0usize;
-        let mut cancelled = 0usize;
+        let mut summary = DeleteSummary::default();
         for outcome in outcomes {
             match outcome.kind {
                 OutcomeKind::Deleted => {
-                    deleted = deleted.saturating_add(1);
+                    summary.deleted = summary.deleted.saturating_add(1);
                     if self.tombstone(outcome.node).is_none() {
-                        failures = failures.saturating_add(1);
+                        summary.failed = summary.failed.saturating_add(1);
                         self.mark_stale_chain(outcome.node);
                         self.status_by_node.insert(outcome.node, "Deleted on disk; index accounting could not be reconciled. Refresh required.".to_owned());
                     }
                 }
                 OutcomeKind::AlreadyAbsent => {
-                    absent = absent.saturating_add(1);
+                    summary.already_absent = summary.already_absent.saturating_add(1);
                     if self.tombstone(outcome.node).is_none() {
-                        failures = failures.saturating_add(1);
+                        summary.failed = summary.failed.saturating_add(1);
                         self.mark_stale_chain(outcome.node);
                     }
                 }
                 OutcomeKind::Changed | OutcomeKind::Failed => {
-                    failures = failures.saturating_add(1);
+                    if outcome.kind == OutcomeKind::Changed {
+                        summary.changed = summary.changed.saturating_add(1);
+                    } else {
+                        summary.failed = summary.failed.saturating_add(1);
+                    }
                     let message = outcome.message.unwrap_or_else(|| "entry could not be removed".to_owned());
                     self.mark_stale_chain(outcome.node);
                     self.status_by_node.insert(outcome.node, message);
                 }
-                OutcomeKind::Cancelled => cancelled = cancelled.saturating_add(1),
+                OutcomeKind::Cancelled => summary.not_attempted = summary.not_attempted.saturating_add(1),
             }
         }
-        if let Some(error) = worker_error {
-            self.message = Some(error);
+        if let Some(error) = &worker_error {
             self.mark_stale_chain(self.tree.root());
+            self.message = Some(format!(
+                "Deletion stopped: {error} · {} deleted, {} not attempted",
+                summary.deleted, summary.not_attempted
+            ));
         } else {
             self.message = Some(format!(
-                "Deleted {deleted} · {absent} already absent · {failures} changed or failed · {cancelled} not attempted"
+                "Deleted {} · {} already absent · {} changed · {} failed · {} not attempted",
+                summary.deleted, summary.already_absent, summary.changed, summary.failed, summary.not_attempted
             ));
         }
-        self.actual_deletions = self.actual_deletions.saturating_add(deleted);
+        self.actual_deletions = self.actual_deletions.saturating_add(summary.deleted);
         self.marks.clear();
+        self.marked_cursor = 0;
+        self.normalize_focus();
         self.range_mode = false;
         self.range_anchor = None;
         self.rebuild_listing(true);
@@ -1035,8 +1214,9 @@ impl BrowserModel {
             self.rebuild_visible(true);
             self.cursor = self.valid_cursor(cursor).unwrap_or_else(|| self.first_cursor());
             self.refresh_cursor_index();
+            self.message = Some(format!("Sorted by {}", sort_name(sort)));
         } else {
-            self.message = Some("The chosen sort order will apply after scanning.".to_owned());
+            self.message = Some(format!("Will sort by {} after scanning.", sort_name(sort)));
         }
         true
     }
@@ -1132,17 +1312,126 @@ impl BrowserModel {
         changed
     }
 
+    /// Marked directories that contain at least one other mark.
+    fn ancestors_of_marks(&self) -> HashSet<NodeId> {
+        let mut ancestors = HashSet::new();
+        for mark in &self.marks.order {
+            let mut current = self.tree.record(*mark).and_then(|record| record.parent());
+            while let Some(node) = current {
+                if !ancestors.insert(node) {
+                    break;
+                }
+                current = self.tree.record(node).and_then(|record| record.parent());
+            }
+        }
+        ancestors
+    }
+
+    /// The nearest marked directory above `id`, if any.
+    fn marked_ancestor(&self, id: NodeId) -> Option<NodeId> {
+        let mut current = self.tree.record(id).and_then(|record| record.parent());
+        while let Some(node) = current {
+            if self.marks.contains(&node) {
+                return Some(node);
+            }
+            current = self.tree.record(node).and_then(|record| record.parent());
+        }
+        None
+    }
+
+    /// The marked directory that already covers everything in the current
+    /// directory, which may be the current directory itself.
+    fn covering_mark(&self) -> Option<NodeId> {
+        if self.marks.contains(&self.current_directory) {
+            Some(self.current_directory)
+        } else {
+            self.marked_ancestor(self.current_directory)
+        }
+    }
+
+    fn mark_blocker(&self, id: NodeId, ancestors_of_marks: &HashSet<NodeId>) -> Option<MarkBlock> {
+        if let Some(ancestor) = self.marked_ancestor(id) {
+            Some(MarkBlock::Covered(ancestor))
+        } else if ancestors_of_marks.contains(&id) {
+            Some(MarkBlock::ContainsMark)
+        } else {
+            None
+        }
+    }
+
+    fn describe_block(&self, id: NodeId, block: &MarkBlock) -> String {
+        match block {
+            MarkBlock::Covered(ancestor) => format!(
+                "Already covered by marked directory {}; unmark it to choose individual entries.",
+                self.display_path(*ancestor)
+            ),
+            MarkBlock::ContainsMark => {
+                let inner = self
+                    .marks
+                    .order
+                    .iter()
+                    .find(|mark| self.is_inside(**mark, id))
+                    .map_or_else(String::new, |mark| format!(" ({})", self.display_path(*mark)));
+                format!("Cannot mark a directory that contains a marked entry{inner}; unmark that entry first.")
+            }
+        }
+    }
+
+    fn is_inside(&self, node: NodeId, ancestor: NodeId) -> bool {
+        let mut current = self.tree.record(node).and_then(|record| record.parent());
+        while let Some(candidate) = current {
+            if candidate == ancestor {
+                return true;
+            }
+            current = self.tree.record(candidate).and_then(|record| record.parent());
+        }
+        false
+    }
+
+    fn display_path(&self, id: NodeId) -> String {
+        self.tree
+            .materialize_path(id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(fdu_tui::escape_name)
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
+    /// Marks `id` unless it would overlap an existing mark. Returns the reason
+    /// it was refused.
+    fn try_mark(&mut self, id: NodeId, ancestors_of_marks: &HashSet<NodeId>) -> Result<bool, String> {
+        if self.marks.contains(&id) {
+            return Ok(false);
+        }
+        if self.tree.record(id).is_none_or(|record| record.state == NodeState::Tombstone) {
+            return Err("That entry has already been removed.".to_owned());
+        }
+        if let Some(block) = self.mark_blocker(id, ancestors_of_marks) {
+            return Err(self.describe_block(id, &block));
+        }
+        Ok(self.marks.insert(id))
+    }
+
     fn toggle_mark(&mut self) -> bool {
         let Cursor::Entry(id) = self.cursor else {
             return false;
         };
         let changed = if self.marks.remove(&id) {
+            self.marked_cursor = self.marked_cursor.min(self.marks.len().saturating_sub(1));
             true
-        } else if self.tree.record(id).is_some_and(|record| record.state != NodeState::Tombstone) {
-            self.marks.insert(id)
         } else {
-            false
+            let ancestors = self.ancestors_of_marks();
+            match self.try_mark(id, &ancestors) {
+                Ok(added) => added,
+                Err(reason) => {
+                    // Stay on the refused row so the reason reads against it.
+                    self.message = Some(reason);
+                    return true;
+                }
+            }
         };
+        self.normalize_focus();
         self.move_cursor(1);
         changed
     }
@@ -1157,9 +1446,14 @@ impl BrowserModel {
         let Cursor::Entry(id) = self.cursor else {
             return false;
         };
+        let ancestors = self.ancestors_of_marks();
+        if let Err(reason) = self.try_mark(id, &ancestors) {
+            self.message = Some(reason);
+            return true;
+        }
         self.range_anchor = Some(id);
         self.range_mode = true;
-        self.marks.insert(id);
+        self.normalize_focus();
         true
     }
 
@@ -1173,15 +1467,33 @@ impl BrowserModel {
         let Some(end) = self.visible.iter().position(|id| *id == target) else {
             return;
         };
-        for id in &self.visible[start.min(end)..=start.max(end)] {
-            self.marks.insert(*id);
-        }
+        let range: Vec<NodeId> = self.visible[start.min(end)..=start.max(end)].to_vec();
+        self.mark_many(range);
     }
 
     fn mark_all_visible(&mut self) -> bool {
         let before = self.marks.len();
-        self.marks.extend(self.visible.iter().copied());
-        self.marks.len() != before
+        self.mark_many(self.visible.clone());
+        self.marks.len() != before || self.message.is_some()
+    }
+
+    /// Marks each entry that does not overlap an existing mark and reports how
+    /// many were skipped.
+    fn mark_many(&mut self, entries: Vec<NodeId>) {
+        let ancestors = self.ancestors_of_marks();
+        let mut skipped = 0usize;
+        for id in entries {
+            if self.try_mark(id, &ancestors).is_err() {
+                skipped += 1;
+            }
+        }
+        self.normalize_focus();
+        if skipped > 0 {
+            self.message = Some(format!(
+                "{skipped} entr{} skipped: already covered by, or containing, a marked entry.",
+                if skipped == 1 { "y" } else { "ies" }
+            ));
+        }
     }
 
     fn enter_cursor(&mut self) -> bool {
@@ -1206,13 +1518,7 @@ impl BrowserModel {
                     }
                     _ => {}
                 }
-                self.current_directory = id;
-                self.cursor_moved_during_scan = false;
-                self.marks.clear();
-                self.range_mode = false;
-                self.range_anchor = None;
-                self.message = None;
-                self.rebuild_listing(false);
+                self.change_directory(id);
                 true
             }
             Cursor::None => false,
@@ -1223,14 +1529,23 @@ impl BrowserModel {
         let Some(parent) = self.tree.record(self.current_directory).and_then(|record| record.parent()) else {
             return false;
         };
-        self.current_directory = parent;
+        self.change_directory(parent);
+        true
+    }
+
+    /// Marks belong to the whole root, so they stay when the directory changes.
+    fn change_directory(&mut self, directory: NodeId) {
+        self.current_directory = directory;
         self.cursor_moved_during_scan = false;
-        self.marks.clear();
         self.range_mode = false;
         self.range_anchor = None;
-        self.message = None;
+        self.message = self.covering_mark().map(|marked| {
+            format!(
+                "Inside marked directory {}; its entries are already covered.",
+                self.display_path(marked)
+            )
+        });
         self.rebuild_listing(false);
-        true
     }
 
     fn is_scanning(&self) -> bool {
@@ -1246,6 +1561,23 @@ fn same_cursor(left: Cursor, right: Cursor) -> bool {
     }
 }
 
+fn sort_name(sort: SortMode) -> &'static str {
+    match sort {
+        SortMode::Size => "size",
+        SortMode::Name => "name",
+    }
+}
+
+/// Outcome counts for one deletion, reported in the status strip.
+#[derive(Default)]
+struct DeleteSummary {
+    deleted: usize,
+    already_absent: usize,
+    changed: usize,
+    failed: usize,
+    not_attempted: usize,
+}
+
 fn size_for(record: &fdu_core::NodeRecord, mode: SizeMode) -> u64 {
     match mode {
         SizeMode::Allocated => record.allocated_bytes,
@@ -1256,7 +1588,7 @@ fn size_for(record: &fdu_core::NodeRecord, mode: SizeMode) -> u64 {
 pub fn run(path: std::path::PathBuf, read_only: bool, apparent: bool) -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = TerminalSession::enter()?;
     let root = open_root(&path)?;
-    let mut model = BrowserModel::new(&root, read_only, apparent)?;
+    let mut model = BrowserModel::new(&root, read_only, apparent, fdu_tui::terminal_size()?)?;
     let profiling_enabled = std::env::var_os("FDU_PROFILE").is_some();
     let scan_metrics = ScanQueueMetrics::new(SCAN_EVENT_CHANNEL_CAPACITY, profiling_enabled);
     let mut profile = BrowserProfile::new(profiling_enabled, scan_metrics.clone());
@@ -1266,8 +1598,10 @@ pub fn run(path: std::path::PathBuf, read_only: bool, apparent: bool) -> Result<
     let mut first_live_listing_directory = None;
     loop {
         let text_input = matches!(&model.dialog, DialogState::Filter(_));
-        let input_poll_interval = if matches!(&phase, AppPhase::Scanning(_)) {
-            SCAN_INPUT_POLL_INTERVAL
+        // A worker feeds events through a small bounded channel, so a long idle
+        // wait here would cap how fast scanning or deletion can run.
+        let input_poll_interval = if matches!(&phase, AppPhase::Scanning(_) | AppPhase::Deleting(_)) {
+            WORKER_INPUT_POLL_INTERVAL
         } else {
             INPUT_POLL_INTERVAL
         };
@@ -1304,7 +1638,7 @@ pub fn run(path: std::path::PathBuf, read_only: bool, apparent: bool) -> Result<
             Action::CancelDeletion => {
                 if let AppPhase::Deleting(worker) = &phase {
                     worker.cancel();
-                    model.message = Some("Stopping after the current deletion operation.".to_owned());
+                    model.message = Some("Stopping after the current operation; entries already removed cannot be restored.".to_owned());
                     draw_pending = true;
                 }
             }
@@ -1432,11 +1766,11 @@ pub fn run(path: std::path::PathBuf, read_only: bool, apparent: bool) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use super::{create_plan, Action, BrowserModel};
+    use super::{create_plan, Action, BrowserModel, DialogState};
     use fdu_core::{DirectoryToken, EntryType, FileIdentity, NodeId, NodeState, ScanEvent};
     use fdu_delete::{DeleteOutcome, OutcomeKind};
     use fdu_scan::{open_root, RootAnchor};
-    use fdu_tui::{Cursor, Intent, Phase, SizeMode, SortMode};
+    use fdu_tui::{Cursor, Intent, Pane, Phase, SizeMode, SortMode, Split, TerminalSize};
     use std::fs;
     use std::io;
     use std::path::PathBuf;
@@ -1516,7 +1850,7 @@ mod tests {
 
     fn make_model(temp: &TempDir, read_only: bool) -> io::Result<(RootAnchor, BrowserModel)> {
         let root = temp.root()?;
-        let model = BrowserModel::new(&root, read_only, false)?;
+        let model = BrowserModel::new(&root, read_only, false, TerminalSize { columns: 120, rows: 40 })?;
         Ok((root, model))
     }
 
@@ -1554,7 +1888,7 @@ mod tests {
     }
 
     #[test]
-    fn directory_local_marks_survive_filter_and_sort_and_clear_on_navigation_or_rescan() -> io::Result<()> {
+    fn marks_survive_filter_sort_and_navigation_and_clear_on_rescan() -> io::Result<()> {
         let temp = TempDir::new()?;
         let (root, mut model) = make_model(&temp, false)?;
         let root_node = model.tree.root();
@@ -1565,8 +1899,8 @@ mod tests {
         let charlie = append(&mut model, root_node, b"charlie", EntryType::RegularFile, 25, 6);
         ready(&mut model);
 
-        model.marks.insert(alpha);
         model.marks.insert(bravo);
+        model.marks.insert(charlie);
         model.filter = "charlie".to_owned();
         model.rebuild_visible(true);
         assert_eq!(model.visible, vec![charlie]);
@@ -1579,16 +1913,357 @@ mod tests {
         model.cursor = Cursor::Entry(alpha);
         model.refresh_cursor_index();
         assert!(model.enter_cursor());
-        assert!(model.marks.is_empty());
         assert_eq!(model.current_directory, alpha);
         assert_eq!(model.visible, vec![nested]);
+        assert_eq!(model.marks.len(), 2, "marks outlive navigation");
+        assert!(model.go_parent());
+        assert!(!model.go_parent(), "navigation stops at the opened root");
+        assert_eq!(model.current_directory, root_node);
 
-        model.marks.insert(nested);
         model.reset_for_rescan(&root)?;
         assert!(model.marks.is_empty());
         assert_eq!(model.current_directory, model.tree.root());
         assert!(model.is_scanning());
         assert!(matches!(model.size_mode, SizeMode::Allocated));
+        Ok(())
+    }
+
+    #[test]
+    fn marks_accumulate_across_directories_in_marking_order() -> io::Result<()> {
+        let temp = TempDir::new()?;
+        let (_, mut model) = make_model(&temp, false)?;
+        let root = model.tree.root();
+        let alpha = append(&mut model, root, b"alpha", EntryType::Directory, 0, 2);
+        let inner = append(&mut model, alpha, b"inner.bin", EntryType::RegularFile, 9, 3);
+        let top = append(&mut model, root, b"top.bin", EntryType::RegularFile, 5, 4);
+        ready(&mut model);
+
+        model.cursor = Cursor::Entry(top);
+        model.refresh_cursor_index();
+        assert!(model.toggle_mark());
+        model.cursor = Cursor::Entry(alpha);
+        model.refresh_cursor_index();
+        assert!(model.enter_cursor());
+        model.cursor = Cursor::Entry(inner);
+        model.refresh_cursor_index();
+        assert!(model.toggle_mark());
+
+        assert_eq!(model.marks.order, vec![top, inner]);
+        Ok(())
+    }
+
+    #[test]
+    fn overlapping_marks_are_refused_with_a_reason_in_both_directions() -> io::Result<()> {
+        let temp = TempDir::new()?;
+        let (_, mut model) = make_model(&temp, false)?;
+        let root = model.tree.root();
+        let alpha = append(&mut model, root, b"alpha", EntryType::Directory, 0, 2);
+        let inner = append(&mut model, alpha, b"inner.bin", EntryType::RegularFile, 9, 3);
+        ready(&mut model);
+
+        // A marked directory covers its descendants.
+        model.marks.insert(alpha);
+        let ancestors = model.ancestors_of_marks();
+        let reason = model.try_mark(inner, &ancestors).unwrap_err();
+        assert!(reason.contains("covered by marked directory alpha"), "{reason}");
+        model.cursor = Cursor::Entry(alpha);
+        model.refresh_cursor_index();
+        assert!(model.enter_cursor());
+        assert!(model.message.as_deref().unwrap().contains("Inside marked directory alpha"));
+        assert_eq!(model.covering_mark(), Some(alpha));
+
+        // A marked descendant keeps its ancestor from being marked.
+        model.marks.clear();
+        model.marks.insert(inner);
+        let ancestors = model.ancestors_of_marks();
+        let reason = model.try_mark(alpha, &ancestors).unwrap_err();
+        assert!(reason.contains("contains a marked entry (alpha/inner.bin)"), "{reason}");
+
+        // Once the descendant is unmarked the ancestor is allowed.
+        model.marks.clear();
+        let ancestors = model.ancestors_of_marks();
+        assert_eq!(model.try_mark(alpha, &ancestors), Ok(true));
+        Ok(())
+    }
+
+    #[test]
+    fn bulk_marking_skips_overlapping_entries_and_says_so() -> io::Result<()> {
+        let temp = TempDir::new()?;
+        let (_, mut model) = make_model(&temp, false)?;
+        let root = model.tree.root();
+        let alpha = append(&mut model, root, b"alpha", EntryType::Directory, 0, 2);
+        let inner = append(&mut model, alpha, b"inner.bin", EntryType::RegularFile, 9, 3);
+        let beta = append(&mut model, root, b"beta.bin", EntryType::RegularFile, 5, 4);
+        ready(&mut model);
+        model.marks.insert(inner);
+
+        assert!(model.mark_all_visible());
+        assert!(model.marks.contains(&beta));
+        assert!(!model.marks.contains(&alpha));
+        assert!(model.message.as_deref().unwrap().contains("1 entry skipped"));
+        Ok(())
+    }
+
+    #[test]
+    fn marked_pane_opens_with_the_first_mark_and_closes_with_the_last() -> io::Result<()> {
+        let temp = TempDir::new()?;
+        let (_, mut model) = make_model(&temp, false)?;
+        let root = model.tree.root();
+        let file = append(&mut model, root, b"file", EntryType::RegularFile, 5, 2);
+        ready(&mut model);
+
+        assert!(!model.side_visible(), "no marks, no pane");
+        model.handle_intent(Intent::SwitchPane, Phase::Ready);
+        assert!(model.message.as_deref().unwrap().contains("Nothing is marked"));
+        assert_eq!(model.focus, Pane::Browser);
+
+        model.handle_intent(Intent::ToggleMark, Phase::Ready);
+        assert!(model.marks.contains(&file));
+        assert!(model.side_visible(), "marking opens the pane");
+        model.handle_intent(Intent::SwitchPane, Phase::Ready);
+        assert_eq!(model.focus, Pane::Marked);
+        model.handle_intent(Intent::SwitchPane, Phase::Ready);
+        assert_eq!(model.focus, Pane::Browser);
+        assert!(model.side_visible(), "the pane stays open while marks remain");
+
+        // Unmarking the last entry from the pane closes it and returns focus.
+        model.handle_intent(Intent::SwitchPane, Phase::Ready);
+        model.handle_intent(Intent::ToggleMark, Phase::Ready);
+        assert!(model.marks.is_empty());
+        assert!(!model.side_visible());
+        assert_eq!(model.focus, Pane::Browser);
+        Ok(())
+    }
+
+    #[test]
+    fn narrow_terminal_shows_only_the_focused_pane_and_resize_preserves_focus() -> io::Result<()> {
+        let temp = TempDir::new()?;
+        let (_, mut model) = make_model(&temp, false)?;
+        let root = model.tree.root();
+        let file = append(&mut model, root, b"file", EntryType::RegularFile, 5, 2);
+        ready(&mut model);
+        model.marks.insert(file);
+        assert!(model.side_visible());
+
+        // Narrowing keeps the list; the pane is one Tab away.
+        model.handle_intent(Intent::Resize(TerminalSize { columns: 50, rows: 40 }), Phase::Ready);
+        assert!(!model.side_visible());
+        assert_eq!(model.focus, Pane::Browser);
+        model.handle_intent(Intent::SwitchPane, Phase::Ready);
+        assert!(model.side_visible());
+        assert_eq!(model.focus, Pane::Marked);
+
+        // Widening shows both and keeps focus; narrowing again keeps the pane.
+        model.handle_intent(Intent::Resize(TerminalSize { columns: 140, rows: 40 }), Phase::Ready);
+        assert_eq!(model.focus, Pane::Marked);
+        model.handle_intent(Intent::Resize(TerminalSize { columns: 40, rows: 40 }), Phase::Ready);
+        assert!(model.side_visible());
+        assert_eq!(model.focus, Pane::Marked);
+
+        // Tab returns to the list, which hides the pane at this width.
+        model.handle_intent(Intent::SwitchPane, Phase::Ready);
+        assert!(!model.side_visible());
+        assert_eq!(model.focus, Pane::Browser);
+        Ok(())
+    }
+
+    #[test]
+    fn minus_stacks_the_panes_and_the_fit_rule_follows_the_orientation() -> io::Result<()> {
+        let temp = TempDir::new()?;
+        let (_, mut model) = make_model(&temp, false)?;
+        let root = model.tree.root();
+        let file = append(&mut model, root, b"file", EntryType::RegularFile, 5, 2);
+        ready(&mut model);
+        model.marks.insert(file);
+        assert_eq!(model.split, Split::Vertical);
+
+        // Wide but short: side by side fits, stacked does not.
+        model.handle_intent(Intent::Resize(TerminalSize { columns: 120, rows: 8 }), Phase::Ready);
+        assert!(model.side_visible());
+        model.handle_intent(Intent::ToggleSplit, Phase::Ready);
+        assert_eq!(model.split, Split::Horizontal);
+        assert!(!model.side_visible(), "no height for two stacked panes");
+
+        // Narrow but tall: the reverse.
+        model.handle_intent(Intent::Resize(TerminalSize { columns: 40, rows: 40 }), Phase::Ready);
+        assert!(model.side_visible());
+        model.handle_intent(Intent::ToggleSplit, Phase::Ready);
+        assert_eq!(model.split, Split::Vertical);
+        assert!(!model.side_visible());
+        Ok(())
+    }
+
+    #[test]
+    fn marked_pane_removes_marks_and_shows_entries_in_their_directory() -> io::Result<()> {
+        let temp = TempDir::new()?;
+        let (_, mut model) = make_model(&temp, false)?;
+        let root = model.tree.root();
+        let alpha = append(&mut model, root, b"alpha", EntryType::Directory, 0, 2);
+        let inner = append(&mut model, alpha, b"inner.bin", EntryType::RegularFile, 9, 3);
+        let top = append(&mut model, root, b"top.bin", EntryType::RegularFile, 5, 4);
+        ready(&mut model);
+        model.marks.insert(inner);
+        model.marks.insert(top);
+        model.filter = "top".to_owned();
+        model.rebuild_visible(true);
+        model.handle_intent(Intent::SwitchPane, Phase::Ready);
+        assert_eq!(model.focus, Pane::Marked);
+
+        // The pane lists marks the filter hides; Enter shows one where it lives.
+        let (_, changed) = model.handle_intent(Intent::Enter, Phase::Ready);
+        assert!(changed);
+        assert_eq!(model.current_directory, alpha);
+        assert!(model.filter.is_empty());
+        assert!(matches!(model.cursor, Cursor::Entry(id) if id == inner));
+        assert_eq!(model.focus, Pane::Browser);
+
+        model.handle_intent(Intent::SwitchPane, Phase::Ready);
+        model.handle_intent(Intent::MoveDown, Phase::Ready);
+        assert_eq!(model.marked_cursor, 1);
+        model.handle_intent(Intent::ToggleMark, Phase::Ready);
+        assert_eq!(model.marks.order, vec![inner]);
+        assert_eq!(model.marked_cursor, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn deletion_locks_every_command_except_the_stop_request() -> io::Result<()> {
+        let temp = TempDir::new()?;
+        let (_, mut model) = make_model(&temp, false)?;
+        let root = model.tree.root();
+        let file = append(&mut model, root, b"file", EntryType::RegularFile, 5, 2);
+        let other = append(&mut model, root, b"other", EntryType::RegularFile, 5, 3);
+        ready(&mut model);
+        model.marks.insert(file);
+        let cursor_before = model.cursor_index();
+
+        for intent in [
+            Intent::SwitchPane,
+            Intent::ToggleSplit,
+            Intent::MoveDown,
+            Intent::ToggleMark,
+            Intent::ToggleRange,
+            Intent::MarkAll,
+            Intent::ClearMarks,
+            Intent::ToggleSort,
+            Intent::ToggleSizeMode,
+            Intent::StartFilter,
+            Intent::Refresh,
+            Intent::Delete,
+            Intent::Enter,
+            Intent::Parent,
+            Intent::Help,
+            Intent::Quit,
+            Intent::FilterCharacter('x'),
+        ] {
+            let (action, changed) = model.handle_intent(intent, Phase::Deleting);
+            assert!(matches!(action, Action::None));
+            assert!(!changed);
+        }
+        assert_eq!(model.marks.order, vec![file]);
+        assert!(!model.marks.contains(&other));
+        assert_eq!(model.cursor_index(), cursor_before);
+        assert!(matches!(model.dialog, DialogState::None));
+        assert_eq!(model.focus, Pane::Browser);
+
+        let (action, _) = model.handle_intent(Intent::Cancel, Phase::Deleting);
+        assert!(matches!(action, Action::CancelDeletion));
+        Ok(())
+    }
+
+    /// Marks `ids`, moves focus to the marked pane, and presses Ctrl-R.
+    fn press_delete_on_marks(model: &mut BrowserModel, ids: &[NodeId]) -> Action {
+        for id in ids {
+            model.marks.insert(*id);
+        }
+        model.handle_intent(Intent::SwitchPane, Phase::Ready);
+        model.handle_intent(Intent::Delete, Phase::Ready).0
+    }
+
+    #[test]
+    fn delete_from_the_marked_pane_asks_once_and_commits_every_root_together() -> io::Result<()> {
+        let temp = TempDir::new()?;
+        let (_, mut model) = make_model(&temp, false)?;
+        let root = model.tree.root();
+        let alpha = append(&mut model, root, b"alpha", EntryType::Directory, 0, 2);
+        let inner = append(&mut model, alpha, b"inner.bin", EntryType::RegularFile, 9, 3);
+        let top = append(&mut model, root, b"top.bin", EntryType::RegularFile, 5, 4);
+        ready(&mut model);
+
+        assert!(matches!(press_delete_on_marks(&mut model, &[inner, top]), Action::None));
+        assert!(model.pending_delete.is_some(), "Ctrl-R only asks");
+
+        // Everything but Enter and Esc is ignored while the question is open.
+        for intent in [Intent::ToggleMark, Intent::MoveDown, Intent::ClearMarks, Intent::SwitchPane, Intent::Quit] {
+            let (action, changed) = model.handle_intent(intent, Phase::Ready);
+            assert!(matches!(action, Action::None));
+            assert!(!changed);
+        }
+        assert_eq!(model.marks.len(), 2);
+
+        let (action, _) = model.handle_intent(Intent::Enter, Phase::Ready);
+        match action {
+            Action::Delete(plan) => assert_eq!(plan.operation_count(), 2),
+            _ => panic!("Enter commits the frozen plan"),
+        }
+        assert!(model.pending_delete.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn escape_withdraws_the_question_and_keeps_the_marks() -> io::Result<()> {
+        let temp = TempDir::new()?;
+        let (_, mut model) = make_model(&temp, false)?;
+        let root = model.tree.root();
+        let file = append(&mut model, root, b"file", EntryType::RegularFile, 9, 2);
+        ready(&mut model);
+        press_delete_on_marks(&mut model, &[file]);
+        let (action, _) = model.handle_intent(Intent::Cancel, Phase::Ready);
+        assert!(matches!(action, Action::None));
+        assert!(model.pending_delete.is_none());
+        assert_eq!(model.marks.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn ineligible_marks_block_the_whole_deletion_and_say_why() -> io::Result<()> {
+        let temp = TempDir::new()?;
+        let (_, mut model) = make_model(&temp, false)?;
+        let root = model.tree.root();
+        let good = append(&mut model, root, b"good.bin", EntryType::RegularFile, 9, 2);
+        let bad = append(&mut model, root, b"bad.bin", EntryType::RegularFile, 5, 3);
+        ready(&mut model);
+        model.set_state(bad, NodeState::Incomplete);
+
+        assert!(matches!(press_delete_on_marks(&mut model, &[good, bad]), Action::None));
+        assert!(model.pending_delete.is_none());
+        let message = model.message.as_deref().unwrap();
+        assert!(message.contains("Nothing was deleted or narrowed"), "{message}");
+        assert!(message.contains("bad.bin: scan is incomplete"), "{message}");
+        assert_eq!(model.marks.len(), 2, "no mark is dropped");
+        Ok(())
+    }
+
+    #[test]
+    fn delete_is_only_offered_from_the_marked_pane_with_marks() -> io::Result<()> {
+        let temp = TempDir::new()?;
+        let (_, mut model) = make_model(&temp, false)?;
+        let root = model.tree.root();
+        let file = append(&mut model, root, b"file", EntryType::RegularFile, 9, 2);
+        ready(&mut model);
+
+        // From the list nothing is armed, even with a mark.
+        model.marks.insert(file);
+        model.handle_intent(Intent::Delete, Phase::Ready);
+        assert!(model.pending_delete.is_none());
+        assert!(model.message.as_deref().unwrap().contains("Tab"));
+
+        // With nothing marked there is nothing to delete.
+        model.marks.clear();
+        model.focus = Pane::Marked;
+        model.handle_intent(Intent::Delete, Phase::Ready);
+        assert!(model.pending_delete.is_none());
+        assert!(model.message.as_deref().unwrap().contains("Nothing is marked"));
         Ok(())
     }
 
@@ -1619,29 +2294,22 @@ mod tests {
         let (_, mut model) = make_model(&temp, false)?;
         let root_node = model.tree.root();
         let entry = append(&mut model, root_node, b"file", EntryType::RegularFile, 8, 2);
+        model.marks.insert(entry);
+        model.handle_intent(Intent::SwitchPane, Phase::Scanning);
         let (action, changed) = model.handle_intent(Intent::Delete, Phase::Scanning);
         assert!(matches!(action, Action::None));
         assert!(changed);
         assert!(model.message.as_deref().unwrap().contains("unavailable"));
+        assert!(model.pending_delete.is_none());
         let (action, _) = model.handle_intent(Intent::Refresh, Phase::Scanning);
         assert!(matches!(action, Action::None));
 
-        ready(&mut model);
-        model.cursor = Cursor::Entry(entry);
-        let (action, _) = model.handle_intent(Intent::Delete, Phase::Ready);
-        assert!(matches!(action, Action::None));
-        let (action, _) = model.handle_intent(Intent::Enter, Phase::Ready);
-        match action {
-            Action::Delete(plan) => assert_eq!(plan.operation_count(), 1),
-            _ => panic!("confirmation should freeze the selected deletion plan"),
-        }
-
         let (_, mut read_only) = make_model(&temp, true)?;
         let read_only_root = read_only.tree.root();
-        append(&mut read_only, read_only_root, b"file", EntryType::RegularFile, 8, 9);
+        let file = append(&mut read_only, read_only_root, b"file", EntryType::RegularFile, 8, 9);
         ready(&mut read_only);
-        let (action, _) = read_only.handle_intent(Intent::Delete, Phase::Ready);
-        assert!(matches!(action, Action::None));
+        assert!(matches!(press_delete_on_marks(&mut read_only, &[file]), Action::None));
+        assert!(read_only.pending_delete.is_none());
         assert!(read_only.message.as_deref().unwrap().contains("read only"));
         Ok(())
     }
@@ -1671,7 +2339,7 @@ mod tests {
             Ok(_) => panic!("incomplete directories cannot be planned for deletion"),
             Err(rejection) => rejection,
         };
-        assert!(rejection.rejected[0].contains("scan is incomplete"));
+        assert!(rejection.rejected[0].reason.contains("scan is incomplete"));
         Ok(())
     }
 

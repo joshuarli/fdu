@@ -48,31 +48,62 @@ descriptor mount-ID fallback.
 
 ## Browser controls
 
+The screen has a title strip, a framed listing, and a status strip. Marking
+opens the marked-items pane beside the listing. The title strip shows only
+non-default state (`read only`, `apparent sizes`, an active filter). The status
+strip shows the total entry count, ending in `…` while the scan is still adding
+to it; transient messages and deletion prompts appear there too. The listing
+shows each entry's size, share of the directory, and a bar. `[x]` marks an
+entry, `[=]` shows an entry already covered by a marked parent directory, and
+`!`, `~`, `M`, and `A` flag incomplete, stale, mount-boundary, and
+unsupported-alias entries. Directories end in `/` and symlinks in `@`;
+symlinks are never followed. `?` opens help.
+
 Use arrows or `j`/`k` to move, Enter/right/`l` to open, and left/`h`/Backspace
-to return. Page Up/Down and Home/End move through a listing. Space toggles a
-mark; `v` starts or ends a stable range; `*` marks the currently matching
-entries; `c` clears marks. Marks apply only to immediate children in the
-current directory and remain through filtering and sorting. They clear when
-you navigate or rescan. The marked count includes filtered-out entries.
+to return; navigation stops at the directory fdu was started in. Page Up/Down
+and Home/End move through a listing. `d` toggles a mark and moves down; `v`
+starts or ends a stable range; `*` marks the currently matching entries; `c`
+clears marks. `s` toggles the order between size and name, and `a` switches
+between allocated and apparent sizes.
 
-Press `d` to review and permanently delete the marked siblings, or the current
-entry if none are marked. The confirmation waits for an explicit Enter; Esc
-cancels. Directories are eligible only when their indexed subtrees were
-complete and had no traversal exclusions or errors. Scanning progress is shown
-as results arrive. Navigation, filtering, sorting, and marking remain available
-while scanning; deletion and refresh wait until workers stop. Press `r` to
-rebuild the full root index, `/` to filter names in the current directory, `n`
-or `s` to sort, `a` to switch between allocated and apparent sizes, `?` for
-help, and `q` or Ctrl-C to quit.
+Marks form a deletion basket for the whole root. They survive filtering,
+sorting, and moving between directories, and clear only on rescan or after a
+deletion. The marked-items pane lists each mark by its path relative to the
+root, including marks the current filter hides, with a count and size total.
+Tab moves focus between the listing and the pane; the other pane is dimmed.
+`-` switches between side-by-side and stacked panes. In the pane, `d` removes
+the highlighted mark, Enter shows it in the listing, and `c` clears all marks.
+The pane closes when the last mark is removed. When the terminal is too small
+for both panes (under 60 columns side by side, under 12 rows stacked), only the
+focused pane is shown and Tab swaps them.
 
-The browser shows a breadcrumb, entry counts, size bars, scan progress, and
-error or exclusion markers. Unknown and incomplete sizes are displayed as
-incomplete. `*` marks only entries already known to match while a scan is in
-progress. Individually indexed files and symlinks remain selectable when an
-unrelated entry has an error; directories with incomplete or excluded
-subtrees are rejected. Failed metadata entries are omitted from totals and
-reported as incomplete, and root-level open or enumeration errors stop the
-scan.
+Marks never overlap. A marked directory covers its whole indexed subtree, so
+entries inside it cannot be marked, and a directory that contains a marked entry
+cannot be marked until that mark is removed. The status strip says which mark
+is in the way. `*` and range marking skip such entries and report how many.
+
+Deletion starts from the marked-items pane, which is the review of what will be
+removed: press Ctrl-R there. The status strip then asks for confirmation;
+Enter deletes permanently and Esc cancels, and other keys do nothing. There is
+no Trash. If any marked entry is ineligible nothing is deleted or narrowed and
+the status strip names the first reason. Directories are eligible only when
+their indexed subtrees were complete and had no traversal exclusions or errors.
+While deleting, the status strip shows progress and every command except Esc is
+ignored. Esc stops scheduling later removals; it cannot restore entries already
+removed. The status strip then reports how many entries were deleted, already
+absent, changed since scanning, failed, or not attempted.
+
+Scanning progress is shown as results arrive. Navigation, filtering, sorting,
+and marking remain available while scanning; deletion and refresh wait until
+workers stop. Press `r` to rebuild the full root index, `/` to filter names in
+the current directory, `?` for help, and `q` or Ctrl-C to quit.
+
+Unknown and incomplete sizes are displayed as incomplete. `*` marks only
+entries already known to match while a scan is in progress. Individually
+indexed files and symlinks remain selectable when an unrelated entry has an
+error; directories with incomplete or excluded subtrees are rejected. Failed
+metadata entries are omitted from totals and reported as incomplete, and
+root-level open or enumeration errors stop the scan.
 
 Deletion uses the completed index as its manifest and attempts only indexed
 entries. A child created after confirmation is left in place. Each target is
@@ -88,7 +119,8 @@ amount of storage the filesystem releases.
   types; it has no filesystem or terminal operations.
 - `fdu-scan` owns summary and indexed read-only scanning and platform backends.
 - `fdu-delete` plans and executes descriptor-relative deletion independently
-  of scanning and the terminal.
+  of scanning and the terminal. A plan may span directories but never contains
+  overlapping roots.
 - `fdu-tui` maps input to intents and renders borrowed model state; it performs
   no filesystem I/O.
 - `src/browser.rs` coordinates scan, ready, and delete phases on the macOS
@@ -110,6 +142,9 @@ cargo build --locked --release
 cargo test --locked --workspace
 cargo test --locked -p fdu --no-default-features
 ```
+
+The macOS terminal tests in `tests/interactive_pty.rs` use the sibling
+`../ptytest` crate, so that checkout must be present. They cover macOS only.
 
 Linux uses four Rayon workers by default; `RAYON_NUM_THREADS` selects another
 count. The macOS summary scanner is sequential. The directory tree is live,
