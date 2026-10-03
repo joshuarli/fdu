@@ -7,7 +7,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
 
-const OUTCOME_BATCH_SIZE: usize = 128;
+const OUTCOME_BATCH_SIZE: usize = 2048;
+/// Progress is advisory, so it is sent at most this often instead of once per
+/// operation. A send per operation made the worker wait on the interface.
+const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
 pub struct DeletionPlan {
     tree: Arc<Tree>,
@@ -301,7 +304,8 @@ mod macos {
         let total = plan.targets.len();
         let mut outcomes = Vec::with_capacity(OUTCOME_BATCH_SIZE);
         let mut completed = 0usize;
-        let mut last_parent: Option<(NodeId, File)> = None;
+        let mut chain = AncestorChain::default();
+        let mut last_progress = std::time::Instant::now() - PROGRESS_INTERVAL;
         for (index, node) in plan.targets.iter().copied().enumerate() {
             if cancelled.load(Ordering::Relaxed) {
                 for remaining in plan.targets[index..].iter().copied() {
@@ -325,17 +329,7 @@ mod macos {
                 continue;
             };
             let parent = record.parent().expect("deletion targets have parents");
-            let parent_fd = match last_parent.as_ref() {
-                Some((cached, file)) if *cached == parent => Ok(file.as_raw_fd()),
-                _ => match open_parent(root_fd, expected_root, &root_mount, &plan.tree, parent) {
-                    Ok(file) => {
-                        let fd = file.as_raw_fd();
-                        last_parent = Some((parent, file));
-                        Ok(fd)
-                    }
-                    Err(error) => Err(error),
-                },
-            };
+            let parent_fd = chain.open(root_fd, &root_mount, &plan.tree, parent);
             let result = match parent_fd {
                 Ok(parent_fd) => delete_one(parent_fd, &root_mount, &plan.tree, node),
                 Err(error) => Err((OutcomeKind::Failed, error.to_string())),
@@ -346,15 +340,18 @@ mod macos {
             };
             completed = completed.saturating_add(1);
             after_operation(completed);
-            if sender
-                .send(DeleteEvent::Progress {
+            if last_progress.elapsed() >= PROGRESS_INTERVAL {
+                last_progress = std::time::Instant::now();
+                match sender.try_send(DeleteEvent::Progress {
                     completed,
                     total,
                     current: node,
-                })
-                .is_err()
-            {
-                return;
+                }) {
+                    // A full queue means the interface is behind; the next
+                    // report supersedes this one.
+                    Ok(()) | Err(std::sync::mpsc::TrySendError::Full(_)) => {}
+                    Err(std::sync::mpsc::TrySendError::Disconnected(_)) => return,
+                }
             }
             outcomes.push(outcome);
             if outcomes.len() == OUTCOME_BATCH_SIZE && !flush(&sender, &mut outcomes) {
@@ -425,15 +422,20 @@ mod macos {
         } else {
             0
         };
-        let latest = match stat_at(parent_fd, &name) {
-            Ok(stat) => stat,
-            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => return Ok(OutcomeKind::AlreadyAbsent),
-            Err(error) => return Err((OutcomeKind::Failed, error.to_string())),
-        };
-        if identity(&latest).map_err(|error| (OutcomeKind::Failed, error.to_string()))? != record.identity
-            || entry_type(latest.st_mode) != record.entry_type
-        {
-            return Err((OutcomeKind::Changed, "entry changed immediately before removal".to_owned()));
+        // Opening a directory to validate it takes time, so re-check what is
+        // there just before removal. A non-directory was checked an instant
+        // ago with nothing in between, so a second look would only repeat it.
+        if flags == libc::AT_REMOVEDIR {
+            let latest = match stat_at(parent_fd, &name) {
+                Ok(stat) => stat,
+                Err(error) if error.raw_os_error() == Some(libc::ENOENT) => return Ok(OutcomeKind::AlreadyAbsent),
+                Err(error) => return Err((OutcomeKind::Failed, error.to_string())),
+            };
+            if identity(&latest).map_err(|error| (OutcomeKind::Failed, error.to_string()))? != record.identity
+                || entry_type(latest.st_mode) != record.entry_type
+            {
+                return Err((OutcomeKind::Changed, "entry changed immediately before removal".to_owned()));
+            }
         }
         if unsafe { libc::unlinkat(parent_fd, name.as_ptr(), flags) } == 0 {
             Ok(OutcomeKind::Deleted)
@@ -454,68 +456,87 @@ mod macos {
         }
     }
 
-    fn open_parent(
-        root_fd: RawFd,
-        expected_root: FileIdentity,
-        root_mount: &MountIdentity,
-        tree: &Tree,
-        parent: NodeId,
-    ) -> io::Result<File> {
-        if parent == tree.root() {
-            return duplicate_fd(root_fd);
-        }
-        let mut components = Vec::new();
-        let mut current = Some(parent);
-        while let Some(node) = current {
-            if node == tree.root() {
-                break;
-            }
-            let record = tree.record(node).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "parent missing from index"))?;
-            components.push(node);
-            current = record.parent();
-        }
-        let mut directory = duplicate_fd(root_fd)?;
-        if identity_of_fd(directory.as_raw_fd())? != expected_root {
-            return Err(io::Error::new(io::ErrorKind::Other, "scan root identity changed"));
-        }
-        for node in components.into_iter().rev() {
-            let name = CString::new(tree.name(node).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "directory name missing"))?)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-            let child = retry_interrupted(|| {
-                let fd = unsafe {
-                    libc::openat(
-                        directory.as_raw_fd(),
-                        name.as_ptr(),
-                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                    )
-                };
-                if fd < 0 {
-                    Err(io::Error::last_os_error())
-                } else {
-                    Ok(unsafe { File::from_raw_fd(fd) })
-                }
-            })?;
-            let expected = tree.record(node).expect("path node exists");
-            if identity_of_fd(child.as_raw_fd())? != expected.identity {
-                return Err(io::Error::new(io::ErrorKind::Other, "ancestor directory was replaced"));
-            }
-            if mount_identity(child.as_raw_fd())? != *root_mount {
-                return Err(io::Error::new(io::ErrorKind::Other, "ancestor became a mount boundary"));
-            }
-            directory = child;
-        }
-        Ok(directory)
+    /// The open directories from just below the scan root down to the most
+    /// recent parent. Deletion visits an entry's children before the entry, so
+    /// consecutive parents share most of their path; keeping the shared
+    /// directories open avoids re-walking and re-validating it from the root
+    /// for every directory. Each directory is opened once, relative to its
+    /// parent and checked against its indexed identity, so an ancestor replaced
+    /// after it was opened is never followed.
+    #[derive(Default)]
+    struct AncestorChain {
+        directories: Vec<(NodeId, File)>,
     }
 
-    fn duplicate_fd(fd: RawFd) -> io::Result<File> {
-        retry_interrupted(|| {
-            let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
-            if duplicate < 0 {
+    impl AncestorChain {
+        /// Returns the descriptor of `parent`, opening only the directories not
+        /// already in the chain.
+        fn open(
+            &mut self,
+            root_fd: RawFd,
+            root_mount: &MountIdentity,
+            tree: &Tree,
+            parent: NodeId,
+        ) -> io::Result<RawFd> {
+            let mut path = Vec::new();
+            let mut current = Some(parent);
+            while let Some(node) = current {
+                if node == tree.root() {
+                    break;
+                }
+                let record = tree
+                    .record(node)
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "parent missing from index"))?;
+                path.push(node);
+                current = record.parent();
+            }
+            path.reverse();
+            let shared = self
+                .directories
+                .iter()
+                .zip(&path)
+                .take_while(|((cached, _), wanted)| cached == *wanted)
+                .count();
+            self.directories.truncate(shared);
+            for node in &path[shared..] {
+                let directory_fd = self.directories.last().map_or(root_fd, |(_, file)| file.as_raw_fd());
+                let child = open_validated_child(directory_fd, root_mount, tree, *node)?;
+                self.directories.push((*node, child));
+            }
+            Ok(self.directories.last().map_or(root_fd, |(_, file)| file.as_raw_fd()))
+        }
+    }
+
+    fn open_validated_child(
+        directory_fd: RawFd,
+        root_mount: &MountIdentity,
+        tree: &Tree,
+        node: NodeId,
+    ) -> io::Result<File> {
+        let name = CString::new(tree.name(node).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "directory name missing"))?)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let child = retry_interrupted(|| {
+            let fd = unsafe {
+                libc::openat(
+                    directory_fd,
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if fd < 0 {
                 Err(io::Error::last_os_error())
             } else {
-                Ok(unsafe { File::from_raw_fd(duplicate) })
+                Ok(unsafe { File::from_raw_fd(fd) })
             }
-        })
+        })?;
+        let expected = tree.record(node).expect("path node exists");
+        if identity_of_fd(child.as_raw_fd())? != expected.identity {
+            return Err(io::Error::new(io::ErrorKind::Other, "ancestor directory was replaced"));
+        }
+        if mount_identity(child.as_raw_fd())? != *root_mount {
+            return Err(io::Error::new(io::ErrorKind::Other, "ancestor became a mount boundary"));
+        }
+        Ok(child)
     }
 
     fn stat_at(parent: RawFd, name: &CString) -> io::Result<libc::stat> {
@@ -976,6 +997,27 @@ mod tests {
             assert!(!temp.root.join("right/b").exists());
             assert!(!temp.root.join("top").exists());
             assert!(temp.root.join("left/keep").exists());
+            Ok(())
+        }
+
+        #[test]
+        fn deep_trees_are_removed_while_reusing_the_open_ancestor_chain() -> io::Result<()> {
+            let temp = TempRoot::new()?;
+            let deep = temp.root.join("a/b/c/d");
+            fs::create_dir_all(&deep)?;
+            fs::create_dir_all(temp.root.join("a/b/side"))?;
+            for directory in ["a", "a/b", "a/b/c", "a/b/c/d", "a/b/side"] {
+                fs::write(temp.root.join(directory).join("one"), b"1")?;
+                fs::write(temp.root.join(directory).join("two"), b"22")?;
+            }
+            let tree = index_root(&temp.root)?;
+            let top = child(&tree, tree.root(), b"a");
+            let plan = create_plan(Arc::clone(&tree), &[top]).unwrap();
+            assert_eq!(plan.operation_count(), 15);
+            let outcomes = execute_plan(&temp.root, plan, None);
+            assert_eq!(outcomes.len(), 15);
+            assert!(outcomes.iter().all(|item| item.kind == OutcomeKind::Deleted), "{outcomes:?}");
+            assert!(!temp.root.join("a").exists());
             Ok(())
         }
 

@@ -22,7 +22,7 @@ const DELETE_CHANNEL_CAPACITY: usize = 8;
 const MAX_SCAN_EVENTS_PER_TICK: usize = 128;
 const MAX_DELETE_EVENTS_PER_TICK: usize = 32;
 const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(20);
-const WORKER_INPUT_POLL_INTERVAL: Duration = Duration::from_millis(1);
+const SCAN_INPUT_POLL_INTERVAL: Duration = Duration::from_millis(1);
 const SCAN_REDRAW_INTERVAL: Duration = Duration::from_millis(100);
 
 enum AppPhase {
@@ -119,6 +119,7 @@ struct DeleteRun {
     completed: usize,
     total: usize,
     current: String,
+    started: Instant,
 }
 
 impl DeleteRun {
@@ -139,6 +140,7 @@ impl DeleteRun {
             completed: 0,
             total,
             current: String::new(),
+            started: Instant::now(),
         }
     }
 
@@ -284,6 +286,9 @@ struct BrowserProfile {
     first_render: Option<Duration>,
     first_usable_listing: Option<Duration>,
     initial_scan_settled: Option<Duration>,
+    /// Time the deletion worker ran, and time spent reconciling its outcomes.
+    delete_worker: Option<Duration>,
+    delete_apply: Option<Duration>,
     pending_input: Option<Instant>,
     input_render_micros: Vec<u64>,
     queue_metrics: ScanQueueMetrics,
@@ -297,6 +302,8 @@ impl BrowserProfile {
             first_render: None,
             first_usable_listing: None,
             initial_scan_settled: None,
+            delete_worker: None,
+            delete_apply: None,
             pending_input: None,
             input_render_micros: Vec::new(),
             queue_metrics,
@@ -346,7 +353,7 @@ impl BrowserProfile {
         let entries = model.indexed_entries;
         let arena_bytes = model.tree.retained_arena_bytes();
         eprintln!(
-            "fdu-profile elapsed_ms={} initial_scan_settled_ms={} first_render_ms={} first_usable_listing_ms={} entries={} tree_arena_bytes={} tree_arena_bytes_per_entry={:.2} scan_event_queue_high_water={} input_render_samples={} input_render_p50_us={} input_render_max_us={}",
+            "fdu-profile elapsed_ms={} initial_scan_settled_ms={} first_render_ms={} first_usable_listing_ms={} entries={} tree_arena_bytes={} tree_arena_bytes_per_entry={:.2} scan_event_queue_high_water={} input_render_samples={} input_render_p50_us={} input_render_max_us={} delete_worker_ms={} delete_apply_ms={}",
             self.started.elapsed().as_millis(),
             duration_ms(self.initial_scan_settled),
             duration_ms(self.first_render),
@@ -358,6 +365,8 @@ impl BrowserProfile {
             self.input_render_micros.len(),
             median.unwrap_or(0),
             maximum.unwrap_or(0),
+            duration_ms(self.delete_worker),
+            duration_ms(self.delete_apply),
         );
     }
 }
@@ -719,7 +728,7 @@ impl BrowserModel {
                 self.message = None;
                 return (Action::None, true);
             }
-            Intent::StartFilter | Intent::ToggleRange | Intent::MarkAll => {
+            Intent::StartFilter | Intent::ToggleRange | Intent::MarkAll if self.focus == Pane::Marked => {
                 self.message = Some("That command applies to the browser list; press Tab to return to it.".to_owned());
                 return (Action::None, true);
             }
@@ -1598,10 +1607,11 @@ pub fn run(path: std::path::PathBuf, read_only: bool, apparent: bool) -> Result<
     let mut first_live_listing_directory = None;
     loop {
         let text_input = matches!(&model.dialog, DialogState::Filter(_));
-        // A worker feeds events through a small bounded channel, so a long idle
-        // wait here would cap how fast scanning or deletion can run.
-        let input_poll_interval = if matches!(&phase, AppPhase::Scanning(_) | AppPhase::Deleting(_)) {
-            WORKER_INPUT_POLL_INTERVAL
+        // The scanner feeds events through a small bounded channel, so a long
+        // idle wait here would cap how fast scanning can run. Deletion reports
+        // progress without blocking, so it can wait the usual interval.
+        let input_poll_interval = if matches!(&phase, AppPhase::Scanning(_)) {
+            SCAN_INPUT_POLL_INTERVAL
         } else {
             INPUT_POLL_INTERVAL
         };
@@ -1723,13 +1733,18 @@ pub fn run(path: std::path::PathBuf, read_only: bool, apparent: bool) -> Result<
         }
         if delete_finished {
             let (outcomes, delete_error) = match &mut phase {
-                AppPhase::Deleting(worker) => match worker.finish() {
-                    Ok((outcomes, failure)) => (outcomes, failure),
-                    Err(error) => (Vec::new(), Some(error)),
-                },
+                AppPhase::Deleting(worker) => {
+                    profile.delete_worker = Some(worker.started.elapsed());
+                    match worker.finish() {
+                        Ok((outcomes, failure)) => (outcomes, failure),
+                        Err(error) => (Vec::new(), Some(error)),
+                    }
+                }
                 _ => (Vec::new(), None),
             };
+            let applying = Instant::now();
             model.apply_delete_outcomes(outcomes, delete_error);
+            profile.delete_apply = Some(applying.elapsed());
             phase = AppPhase::Ready;
             model_changed = true;
         }
@@ -2264,6 +2279,39 @@ mod tests {
         model.handle_intent(Intent::Delete, Phase::Ready);
         assert!(model.pending_delete.is_none());
         assert!(model.message.as_deref().unwrap().contains("Nothing is marked"));
+        Ok(())
+    }
+
+    #[test]
+    fn mark_all_and_range_marking_work_from_the_list_and_are_refused_in_the_marked_pane() -> io::Result<()> {
+        let temp = TempDir::new()?;
+        let (_, mut model) = make_model(&temp, false)?;
+        let root = model.tree.root();
+        let first = append(&mut model, root, b"first", EntryType::RegularFile, 1, 2);
+        let second = append(&mut model, root, b"second", EntryType::RegularFile, 1, 3);
+        let third = append(&mut model, root, b"third", EntryType::RegularFile, 1, 4);
+        ready(&mut model);
+
+        model.cursor = Cursor::Entry(first);
+        model.refresh_cursor_index();
+        model.handle_intent(Intent::ToggleRange, Phase::Ready);
+        assert!(model.range_mode);
+        model.handle_intent(Intent::MoveDown, Phase::Ready);
+        model.handle_intent(Intent::ToggleRange, Phase::Ready);
+        assert_eq!(model.marks.len(), 2, "a range marks both ends and what lies between");
+        model.handle_intent(Intent::ClearMarks, Phase::Ready);
+
+        model.handle_intent(Intent::MarkAll, Phase::Ready);
+        assert_eq!(model.marks.len(), 3);
+        assert!(model.marks.contains(&first) && model.marks.contains(&second) && model.marks.contains(&third));
+
+        model.handle_intent(Intent::SwitchPane, Phase::Ready);
+        model.handle_intent(Intent::ClearMarks, Phase::Ready);
+        model.marks.insert(first);
+        model.focus = Pane::Marked;
+        model.handle_intent(Intent::MarkAll, Phase::Ready);
+        assert_eq!(model.marks.len(), 1);
+        assert!(model.message.as_deref().unwrap().contains("applies to the browser list"));
         Ok(())
     }
 

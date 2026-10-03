@@ -130,14 +130,22 @@ impl Session {
     }
 
     /// Quits and checks the process exits cleanly and gives the terminal back.
-    pub fn quit(mut self) {
+    pub fn quit(self) {
+        self.quit_with_output();
+    }
+
+    /// Like [`quit`](Self::quit), returning everything the program wrote, which
+    /// includes anything it printed after leaving the alternate screen.
+    pub fn quit_with_output(mut self) -> String {
         self.text("q");
         let deadline = self.terminal.deadline(self.step);
         let status = self.terminal.wait_for_exit(deadline).unwrap();
         assert_eq!(status, ExitStatus::Code(0));
         self.terminal.assert_terminal_restored(&self.baseline).unwrap();
+        let output = String::from_utf8_lossy(self.terminal.raw_output()).into_owned();
         let deadline = self.terminal.deadline(self.step);
         self.terminal.finish(deadline).unwrap();
+        output
     }
 }
 

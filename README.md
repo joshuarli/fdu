@@ -153,6 +153,9 @@ layout fixture at `/tmp/fdu-layout-fixture` (built once with a fixed seed by
 mode so the frames do not depend on the machine. Re-record after an intended
 UI change with `PTYTEST_UPDATE_SNAPSHOTS=1 cargo test --test ui_snapshots` and
 review the diff.
+`tests/delete_performance.rs` deletes a copy-on-write clone of that fixture
+through the interface and reports how long it took; run it with
+`cargo test --release --test delete_performance -- --ignored --nocapture`.
 
 Linux uses four Rayon workers by default; `RAYON_NUM_THREADS` selects another
 count. The macOS summary scanner is sequential. The directory tree is live,
