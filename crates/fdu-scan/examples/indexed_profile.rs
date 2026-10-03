@@ -128,6 +128,17 @@ fn main() -> io::Result<()> {
                     }
                 }
             }
+            ScanEvent::DirectoriesFinished(directories) => {
+                for (directory, complete) in directories {
+                    if let Some(node) = token_nodes.get(directory.0 as usize).copied().flatten() {
+                        if complete && tree.record(node).is_some_and(|record| record.state == NodeState::Scanning) {
+                            tree.set_state(node, NodeState::Complete);
+                        } else if !complete {
+                            tree.mark_incomplete_to_root(node);
+                        }
+                    }
+                }
+            }
             ScanEvent::DirectoryExcluded { directory, reason } => {
                 if let Some(node) = token_nodes.get(directory.0 as usize).copied().flatten() {
                     tree.set_state(node, NodeState::Excluded(reason));

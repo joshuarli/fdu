@@ -42,6 +42,7 @@ struct IndexedResult {
     tree: Tree,
     errors: Vec<String>,
     batches: Vec<usize>,
+    directory_finish_batch_sizes: Vec<usize>,
 }
 
 fn scan_to_tree(root: RootAnchor, capacity: usize) -> io::Result<IndexedResult> {
@@ -59,6 +60,7 @@ fn scan_to_tree(root: RootAnchor, capacity: usize) -> io::Result<IndexedResult> 
     let worker = start_indexed_scan(root.clone(), sender, batch_receiver, Arc::clone(&cancelled));
     let mut errors = Vec::new();
     let mut batches = Vec::new();
+    let mut directory_finish_batch_sizes = Vec::new();
     let mut done = false;
     while !done {
         let event = receiver
@@ -120,11 +122,24 @@ fn scan_to_tree(root: RootAnchor, capacity: usize) -> io::Result<IndexedResult> 
                 let _ = batch_sender.try_send(batch);
             }
             ScanEvent::DirectoryFinished { directory, complete } => {
+                directory_finish_batch_sizes.push(1);
                 if let Some(node) = tokens.get(directory.0 as usize).copied().flatten() {
                     if complete && tree.record(node).unwrap().state == NodeState::Scanning {
                         tree.set_state(node, NodeState::Complete);
                     } else if !complete {
                         tree.mark_incomplete_to_root(node);
+                    }
+                }
+            }
+            ScanEvent::DirectoriesFinished(directories) => {
+                directory_finish_batch_sizes.push(directories.len());
+                for (directory, complete) in directories {
+                    if let Some(node) = tokens.get(directory.0 as usize).copied().flatten() {
+                        if complete && tree.record(node).unwrap().state == NodeState::Scanning {
+                            tree.set_state(node, NodeState::Complete);
+                        } else if !complete {
+                            tree.mark_incomplete_to_root(node);
+                        }
                     }
                 }
             }
@@ -147,7 +162,12 @@ fn scan_to_tree(root: RootAnchor, capacity: usize) -> io::Result<IndexedResult> 
     worker
         .join()
         .map_err(|_| io::Error::new(io::ErrorKind::Other, "scanner worker panicked"))?;
-    Ok(IndexedResult { tree, errors, batches })
+    Ok(IndexedResult {
+        tree,
+        errors,
+        batches,
+        directory_finish_batch_sizes,
+    })
 }
 
 fn child_named(tree: &Tree, parent: NodeId, name: &[u8]) -> Option<NodeId> {
@@ -293,6 +313,27 @@ fn indexed_policy_keeps_both_size_modes_and_entry_identity() -> io::Result<()> {
         assert_eq!(outer_summary.disk_size, indexed_size);
         assert_eq!(outer_summary.exclusion, None);
     }
+    Ok(())
+}
+
+#[test]
+fn indexed_scan_batches_directory_finish_events_without_losing_states() -> io::Result<()> {
+    let temp = TempDir::new()?;
+    for index in 0..300 {
+        fs::create_dir(temp.0.join(format!("directory-{index:03}")))?;
+    }
+
+    let result = scan_to_tree(open_root(&temp.0)?, 8)?;
+
+    assert!(result.errors.is_empty(), "scan errors: {:?}", result.errors);
+    assert!(result
+        .directory_finish_batch_sizes
+        .iter()
+        .any(|size| *size > 1));
+    assert_eq!(result.tree.record(result.tree.root()).unwrap().state, NodeState::Complete);
+    assert!(result.tree.children(result.tree.root()).all(|node| {
+        result.tree.record(node).unwrap().state == NodeState::Complete
+    }));
     Ok(())
 }
 

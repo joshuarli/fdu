@@ -94,6 +94,8 @@ pub enum ScanEvent {
         directory: DirectoryToken,
         complete: bool,
     },
+    /// Completion updates grouped to reduce event traffic on scans with many directories.
+    DirectoriesFinished(Vec<(DirectoryToken, bool)>),
     DirectoryExcluded {
         directory: DirectoryToken,
         reason: ExclusionReason,

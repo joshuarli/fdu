@@ -17,9 +17,10 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
 const INDEXED_BATCH_SIZE: usize = 1024;
-const INDEXED_SCAN_WORKER_LIMIT: usize = 16;
-const INDEXED_SCAN_WORKER_HEADROOM: usize = 6;
+const INDEXED_SCAN_WORKER_LIMIT: usize = 128;
+const INDEXED_SCAN_WORKER_HEADROOM: usize = 118;
 const INDEXED_TASKS_PER_WORKER: usize = 8;
+const DIRECTORY_FINISH_BATCH_SIZE: usize = 256;
 
 struct ScanEventSender<'a> {
     sender: &'a SyncSender<ScanEvent>,
@@ -61,6 +62,7 @@ struct DirectoryProgress {
 struct ScanProgress<'a> {
     directories: Mutex<HashMap<DirectoryToken, DirectoryProgress>>,
     finish_order: Mutex<()>,
+    pending_finishes: Mutex<Vec<(DirectoryToken, bool)>>,
     sender: &'a ScanEventSender<'a>,
 }
 
@@ -92,7 +94,7 @@ impl ScanProgress<'_> {
             .finish_order
             .lock()
             .expect("directory finish order is not poisoned");
-        let events = {
+        let finished = {
             let mut directories = self
                 .directories
                 .lock()
@@ -115,10 +117,7 @@ impl ScanProgress<'_> {
                 progress.finished = true;
                 let directory_complete = progress.complete;
                 let parent = progress.parent;
-                events.push(ScanEvent::DirectoryFinished {
-                    directory: token,
-                    complete: directory_complete,
-                });
+                events.push((token, directory_complete));
                 current = parent;
                 current_complete = directory_complete;
                 finishing_own_enumeration = false;
@@ -137,9 +136,41 @@ impl ScanProgress<'_> {
             }
             events
         };
-        events
-            .into_iter()
-            .all(|event| self.sender.send(event).is_ok())
+        if finished.is_empty() {
+            return true;
+        }
+        let pending = {
+            let mut pending = self
+                .pending_finishes
+                .lock()
+                .expect("pending directory finishes are not poisoned");
+            pending.extend(finished);
+            (pending.len() >= DIRECTORY_FINISH_BATCH_SIZE)
+                .then(|| std::mem::take(&mut *pending))
+        };
+        pending.is_none_or(|finished| {
+            self.sender
+                .send(ScanEvent::DirectoriesFinished(finished))
+                .is_ok()
+        })
+    }
+
+    fn flush_finishes(&self) -> bool {
+        let _send_guard = self
+            .finish_order
+            .lock()
+            .expect("directory finish order is not poisoned");
+        let finished = std::mem::take(
+            &mut *self
+                .pending_finishes
+                .lock()
+                .expect("pending directory finishes are not poisoned"),
+        );
+        finished.is_empty()
+            || self
+                .sender
+                .send(ScanEvent::DirectoriesFinished(finished))
+                .is_ok()
     }
 }
 
@@ -313,6 +344,7 @@ pub(super) fn scan_indexed(
             },
         )])),
         finish_order: Mutex::new(()),
+        pending_finishes: Mutex::new(Vec::with_capacity(DIRECTORY_FINISH_BATCH_SIZE)),
         sender: &event_sender,
     };
     // Directory reads can block in the filesystem, so bounded worker headroom keeps other
@@ -369,6 +401,7 @@ pub(super) fn scan_indexed(
             }
         }
     });
+    let _ = progress.flush_finishes();
     let _ = event_sender.send(ScanEvent::Finished);
 }
 

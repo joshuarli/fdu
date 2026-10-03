@@ -381,17 +381,12 @@ impl BrowserModel {
             }
             ScanEvent::Entries(_) => false,
             ScanEvent::DirectoryFinished { directory, complete } => {
-                if let Some(node) = self.node_for_token(directory) {
-                    let old = self.tree.record(node).map(|record| record.state);
-                    if old.is_some_and(|state| !matches!(state, NodeState::Excluded(_) | NodeState::Tombstone)) {
-                        if complete {
-                            if old == Some(NodeState::Scanning) {
-                                self.set_state(node, NodeState::Complete);
-                            }
-                        } else {
-                            self.mark_incomplete_chain(node);
-                        }
-                    }
+                self.finish_directory(directory, complete);
+                true
+            }
+            ScanEvent::DirectoriesFinished(directories) => {
+                for (directory, complete) in directories {
+                    self.finish_directory(directory, complete);
                 }
                 true
             }
@@ -426,6 +421,21 @@ impl BrowserModel {
                 true
             }
             ScanEvent::Finished => true,
+        }
+    }
+
+    fn finish_directory(&mut self, directory: DirectoryToken, complete: bool) {
+        if let Some(node) = self.node_for_token(directory) {
+            let old = self.tree.record(node).map(|record| record.state);
+            if old.is_some_and(|state| !matches!(state, NodeState::Excluded(_) | NodeState::Tombstone)) {
+                if complete {
+                    if old == Some(NodeState::Scanning) {
+                        self.set_state(node, NodeState::Complete);
+                    }
+                } else {
+                    self.mark_incomplete_chain(node);
+                }
+            }
         }
     }
 
