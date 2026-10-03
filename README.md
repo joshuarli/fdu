@@ -126,3 +126,17 @@ target/release/fdu --summary perf/fixture
 
 The generated fixture is ignored by Git. Check free inode capacity before
 choosing large custom counts; see the generator's `--help` for scaling options.
+
+To generate the anonymized workspace-layout fixture used for macOS indexing
+benchmarks:
+
+```sh
+python3 scripts/generate_layout_fixture.py /tmp/fdu-workspace-layout
+```
+
+The committed profile in `perf/fixture_profiles/workspace-layout.json` is an
+anonymized snapshot of the parent tree used during profiling. It stores only
+per-directory entry-type counts by depth. The generator uses synthetic names,
+writes 1-, 4-, and 8-byte payloads to every sixteenth regular file, and
+represents symbolic links and special entries as dangling links and FIFOs. It
+reads no source tree or file contents.
