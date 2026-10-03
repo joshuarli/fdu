@@ -284,6 +284,48 @@ fn interactive_read_only_session_rejects_delete_and_restores_terminal_state() ->
 }
 
 #[test]
+fn interactive_renders_first_listing_before_scan_settles() -> io::Result<()> {
+    const DIRECTORIES: usize = 512;
+
+    let temp = TempDir::new()?;
+    let root = temp.0.join("root");
+    fs::create_dir(&root)?;
+    for index in 0..DIRECTORIES {
+        let child = root.join(format!("child-{index:03}"));
+        fs::create_dir(&child)?;
+        fs::write(child.join("payload"), b"x")?;
+    }
+
+    let mut pty = Pty::new()?;
+    let mut child = pty.spawn_with_profile(&root, true, true)?;
+    pty.wait_for(&mut child, b"Ready")?;
+    pty.send(b"q")?;
+    let (status, output) = pty.wait_for_exit_output(&mut child)?;
+    assert!(status.success(), "fdu exited unsuccessfully: {status}");
+    pty.assert_restored()?;
+
+    let output = String::from_utf8_lossy(&output);
+    let profile_field = |name: &str| {
+        output
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix(name))
+    };
+    let first_listing_ms: u128 = profile_field("first_usable_listing_ms=")
+        .expect("profile output must report the first usable listing time")
+        .parse()
+        .expect("listing time must be an integer number of milliseconds");
+    let settled_ms: u128 = profile_field("initial_scan_settled_ms=")
+        .expect("profile output must report the initial scan settle time")
+        .parse()
+        .expect("settle time must be an integer number of milliseconds");
+    assert!(
+        first_listing_ms < settled_ms,
+        "the root listing should be drawn before its nested scan completes; first listing {first_listing_ms} ms, settled {settled_ms} ms"
+    );
+    Ok(())
+}
+
+#[test]
 #[ignore = "host-dependent release-tree timing; run cargo test --release --test interactive_pty release_artifact_tree_reaches_ready_under_100ms -- --ignored --exact"]
 fn release_artifact_tree_reaches_ready_under_100ms() -> io::Result<()> {
     const RUNS: usize = 5;

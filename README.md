@@ -1,6 +1,7 @@
 # fdu
 
-`fdu` is a disk-usage browser and summary scanner for Linux 6.0+ and macOS.
+`fdu` is a disk-usage browser and summary scanner for Linux 6.0+ and macOS 26+.
+macOS releases earlier than 26 are outside the support guarantee.
 On macOS, terminal sessions open the interactive browser by default. Piped and
 redirected runs use the summary scanner. Linux currently provides summary mode;
 indexed browsing and deletion are implemented for macOS.

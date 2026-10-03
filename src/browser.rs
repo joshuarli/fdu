@@ -13,7 +13,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const SCAN_EVENT_CHANNEL_CAPACITY: usize = 512;
-const SCAN_BATCH_CAPACITY: usize = 256;
+const SCAN_BATCH_CAPACITY: usize = 1024;
 const SCAN_BATCH_POOL_CAPACITY: usize = 8;
 const DELETE_CHANNEL_CAPACITY: usize = 8;
 const MAX_SCAN_EVENTS_PER_TICK: usize = 128;
@@ -191,6 +191,7 @@ struct BrowserModel {
     visible: Vec<NodeId>,
     cursor: Cursor,
     cursor_index: Option<usize>,
+    cursor_moved_during_scan: bool,
     marks: HashSet<NodeId>,
     filter: String,
     size_mode: SizeMode,
@@ -311,6 +312,7 @@ impl BrowserModel {
             visible: Vec::new(),
             cursor: Cursor::None,
             cursor_index: None,
+            cursor_moved_during_scan: false,
             marks: HashSet::new(),
             filter: String::new(),
             size_mode: SizeMode::Allocated,
@@ -345,6 +347,7 @@ impl BrowserModel {
         self.visible.clear();
         self.cursor = Cursor::None;
         self.cursor_index = None;
+        self.cursor_moved_during_scan = false;
         self.marks.clear();
         self.filter.clear();
         self.range_mode = false;
@@ -802,7 +805,9 @@ impl BrowserModel {
         self.range_mode = false;
         self.range_anchor = None;
         self.scanning = false;
-        self.rebuild_listing(true);
+        let preserve_cursor = self.cursor_moved_during_scan;
+        self.cursor_moved_during_scan = false;
+        self.rebuild_listing(preserve_cursor);
         if self.message.is_none() {
             self.message = Some(format!("Index ready · {} entries · {} scan errors", self.indexed_entries, self.scan_errors));
         }
@@ -1111,6 +1116,9 @@ impl BrowserModel {
         let changed = !same_cursor(self.cursor, next);
         self.cursor = next;
         self.cursor_index = Some(index);
+        if changed && self.scanning {
+            self.cursor_moved_during_scan = true;
+        }
         changed
     }
 
@@ -1189,6 +1197,7 @@ impl BrowserModel {
                     _ => {}
                 }
                 self.current_directory = id;
+                self.cursor_moved_during_scan = false;
                 self.marks.clear();
                 self.range_mode = false;
                 self.range_anchor = None;
@@ -1205,6 +1214,7 @@ impl BrowserModel {
             return false;
         };
         self.current_directory = parent;
+        self.cursor_moved_during_scan = false;
         self.marks.clear();
         self.range_mode = false;
         self.range_anchor = None;
@@ -1243,6 +1253,7 @@ pub fn run(path: std::path::PathBuf, read_only: bool, apparent: bool) -> Result<
     let mut phase = AppPhase::Scanning(ScanRun::start(root.clone(), scan_metrics));
     let mut last_draw = Instant::now() - SCAN_REDRAW_INTERVAL;
     let mut draw_pending = true;
+    let mut first_live_listing_directory = None;
     loop {
         let text_input = matches!(&model.dialog, DialogState::Filter(_));
         let input_poll_interval = if matches!(&phase, AppPhase::Scanning(_)) {
@@ -1264,6 +1275,7 @@ pub fn run(path: std::path::PathBuf, read_only: bool, apparent: bool) -> Result<
             Action::Quit => break,
             Action::Refresh => {
                 model.reset_for_rescan(&root)?;
+                first_live_listing_directory = None;
                 let metrics = ScanQueueMetrics::new(SCAN_EVENT_CHANNEL_CAPACITY, profiling_enabled);
                 profile.reset_scan_queue(metrics.clone());
                 phase = AppPhase::Scanning(ScanRun::start(root.clone(), metrics));
@@ -1381,16 +1393,23 @@ pub fn run(path: std::path::PathBuf, read_only: bool, apparent: bool) -> Result<
         if input_changed || model_changed {
             draw_pending = true;
         }
+        let first_live_listing_pending = !model.visible.is_empty()
+            && first_live_listing_directory != Some(model.current_directory);
         let draw_now = match &phase {
-            AppPhase::Scanning(_) | AppPhase::Deleting(_) => {
-                draw_pending && last_draw.elapsed() >= SCAN_REDRAW_INTERVAL || input_changed
+            AppPhase::Scanning(_) => {
+                draw_pending && (last_draw.elapsed() >= SCAN_REDRAW_INTERVAL || first_live_listing_pending)
+                    || input_changed
             }
+            AppPhase::Deleting(_) => draw_pending && last_draw.elapsed() >= SCAN_REDRAW_INTERVAL || input_changed,
             AppPhase::Ready => draw_pending,
         };
         if draw_now {
             let view = model.view(&phase);
             terminal.draw(&view)?;
             profile.note_render(&model, phase.view_phase());
+            if !model.visible.is_empty() {
+                first_live_listing_directory = Some(model.current_directory);
+            }
             draw_pending = false;
             last_draw = Instant::now();
         }
@@ -1482,15 +1501,46 @@ mod tests {
     }
 
     fn ready(model: &mut BrowserModel) {
-        model.set_state(model.tree.root(), NodeState::Complete);
-        model.scanning = false;
-        model.rebuild_listing(true);
+        model.finish_scan(None);
     }
 
     fn make_model(temp: &TempDir, read_only: bool) -> io::Result<(RootAnchor, BrowserModel)> {
         let root = temp.root()?;
         let model = BrowserModel::new(&root, read_only, false)?;
         Ok((root, model))
+    }
+
+    #[test]
+    fn finish_scan_selects_sorted_top_entry_when_cursor_was_untouched() -> io::Result<()> {
+        let temp = TempDir::new()?;
+        let (_, mut model) = make_model(&temp, false)?;
+        let root = model.tree.root();
+        append(&mut model, root, b"first-discovered", EntryType::RegularFile, 1, 2);
+        let largest = append(&mut model, root, b"largest", EntryType::RegularFile, 100, 3);
+
+        ready(&mut model);
+
+        assert!(matches!(model.cursor, Cursor::Entry(id) if id == largest));
+        assert_eq!(model.cursor_index(), Some(0));
+        Ok(())
+    }
+
+    #[test]
+    fn finish_scan_preserves_deliberate_cursor_movement_by_node_id() -> io::Result<()> {
+        let temp = TempDir::new()?;
+        let (_, mut model) = make_model(&temp, false)?;
+        let root = model.tree.root();
+        append(&mut model, root, b"first-discovered", EntryType::RegularFile, 1, 2);
+        let selected = append(&mut model, root, b"selected", EntryType::RegularFile, 10, 3);
+        append(&mut model, root, b"largest", EntryType::RegularFile, 100, 4);
+
+        let (_, changed) = model.handle_intent(Intent::MoveDown, Phase::Scanning);
+        assert!(changed);
+        ready(&mut model);
+
+        assert!(matches!(model.cursor, Cursor::Entry(id) if id == selected));
+        assert_eq!(model.cursor_index(), Some(1));
+        Ok(())
     }
 
     #[test]

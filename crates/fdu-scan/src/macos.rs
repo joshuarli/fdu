@@ -1,22 +1,24 @@
 use crate::{RootAnchor, ScanQueueMetrics, ScanReport, TopLevelDirectory};
 use fdu_core::{
-    DirectoryToken, EntryBatch, EntryType, ExclusionReason, FileIdentity, NodeState, ScanEntry,
-    ScanEvent,
+    EntryBatch, EntryType, ExclusionReason, FileIdentity, NodeState, ScanEvent,
 };
+use std::cell::RefCell;
 use std::ffi::{CStr, CString, OsString};
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::mem;
-use std::ops::Range;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::ptr::NonNull;
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::Arc;
+
+mod attributes;
+mod indexed;
 
 const DIRECTORY_OPEN_FLAGS: libc::c_int =
     libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
@@ -24,6 +26,19 @@ const DIRECTORY_ENTRY: libc::c_uchar = libc::DT_DIR;
 const UNKNOWN_ENTRY: libc::c_uchar = libc::DT_UNKNOWN;
 const FILE_TYPE_MASK: libc::mode_t = libc::S_IFMT;
 const DIRECTORY_TYPE: libc::mode_t = libc::S_IFDIR;
+const BULK_RECORD_BUFFER_BYTES: usize = 64 * 1024;
+
+// Each scanning thread handles one directory at a time, so it can reuse its aligned bulk buffer.
+thread_local! {
+    static INDEXED_DIRECTORY_BUFFER: RefCell<Box<attributes::AlignedBuffer<BULK_RECORD_BUFFER_BYTES>>> =
+        RefCell::new(Box::new(attributes::AlignedBuffer::new()));
+}
+
+fn with_indexed_directory_buffer<T>(
+    use_buffer: impl FnOnce(&mut attributes::AlignedBuffer<BULK_RECORD_BUFFER_BYTES>) -> T,
+) -> T {
+    INDEXED_DIRECTORY_BUFFER.with(|buffer| use_buffer(buffer.borrow_mut().as_mut()))
+}
 
 struct DirectoryEntry {
     name: CString,
@@ -155,6 +170,131 @@ impl Drop for DirectoryStream {
     }
 }
 
+struct IndexedDirectoryStream<'buffer> {
+    directory: Option<File>,
+    buffer: &'buffer mut attributes::AlignedBuffer<BULK_RECORD_BUFFER_BYTES>,
+    offset: usize,
+    remaining: usize,
+    exhausted: bool,
+    returned_any: bool,
+    fallback: Option<DirectoryStream>,
+}
+
+impl<'buffer> IndexedDirectoryStream<'buffer> {
+    fn from_file(
+        directory: File,
+        buffer: &'buffer mut attributes::AlignedBuffer<BULK_RECORD_BUFFER_BYTES>,
+    ) -> Self {
+        Self {
+            directory: Some(directory),
+            buffer,
+            offset: 0,
+            remaining: 0,
+            exhausted: false,
+            returned_any: false,
+            fallback: None,
+        }
+    }
+
+    fn fd(&self) -> RawFd {
+        self.fallback
+            .as_ref()
+            .map_or_else(
+                || {
+                    self.directory
+                        .as_ref()
+                        .expect("bulk directory remains open before fallback")
+                        .as_raw_fd()
+                },
+                DirectoryStream::fd,
+            )
+    }
+
+    fn next_entry_name(&mut self) -> io::Result<Option<(&CStr, Option<attributes::BulkMetadata>)>> {
+        loop {
+            if let Some(fallback) = &mut self.fallback {
+                return fallback
+                    .next_entry_name()
+                    .map(|entry| entry.map(|(name, _)| (name, None)));
+            }
+            if self.exhausted {
+                return Ok(None);
+            }
+            if self.remaining == 0 {
+                if !self.refill()? {
+                    return Ok(None);
+                }
+            }
+
+            let start = self.offset;
+            let length = attributes::read_record_length(&self.buffer.as_bytes()[start..])?;
+            let end = start
+                .checked_add(length)
+                .filter(|end| length >= 24 && *end <= self.buffer.as_bytes().len())
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "macOS directory record exceeds its buffer",
+                    )
+                })?;
+            self.offset = end;
+            self.remaining -= 1;
+            self.returned_any = true;
+            let entry = attributes::parse_record(&self.buffer.as_bytes()[start..end])?;
+            return Ok(Some((entry.name, entry.metadata)));
+        }
+    }
+
+    fn refill(&mut self) -> io::Result<bool> {
+        loop {
+            let mut requested = attributes::requested_attributes();
+            // SAFETY: the descriptor remains open, the attrlist is initialized, and the aligned
+            // buffer is writable for its full size.
+            let count = unsafe {
+                libc::getattrlistbulk(
+                    self.directory
+                        .as_ref()
+                        .expect("bulk directory remains open before fallback")
+                        .as_raw_fd(),
+                    (&mut requested as *mut libc::attrlist).cast(),
+                    self.buffer.as_mut_bytes().as_mut_ptr().cast(),
+                    self.buffer.as_bytes().len(),
+                    u64::from(libc::FSOPT_PACK_INVAL_ATTRS),
+                )
+            };
+            if count > 0 {
+                self.offset = 0;
+                self.remaining = usize::try_from(count).map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidData, "invalid macOS directory record count")
+                })?;
+                return Ok(true);
+            }
+            if count == 0 {
+                self.exhausted = true;
+                return Ok(false);
+            }
+
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            let fallback_error = matches!(
+                error.raw_os_error(),
+                Some(libc::EACCES | libc::EPERM | libc::ENOTSUP | libc::EOPNOTSUPP | libc::ENOSYS)
+            ) || error.kind() == io::ErrorKind::Unsupported;
+            if !self.returned_any && fallback_error {
+                let directory = self
+                    .directory
+                    .take()
+                    .expect("bulk directory remains open before fallback");
+                self.fallback = Some(DirectoryStream::from_file(directory)?);
+                return Ok(true);
+            }
+            return Err(error);
+        }
+    }
+}
+
 pub(super) fn scan(path: &Path, apparent: bool) -> io::Result<ScanReport> {
     let root = OpenOptions::new()
         .read(true)
@@ -257,29 +397,6 @@ pub(super) fn scan(path: &Path, apparent: bool) -> io::Result<ScanReport> {
     Ok(report)
 }
 
-struct IndexedDirectoryPath {
-    parent: Option<usize>,
-    name: Option<Range<u32>>,
-    identity: FileIdentity,
-    token: DirectoryToken,
-    children_remaining: usize,
-    enumerated: bool,
-    complete: bool,
-}
-
-const INDEXED_BATCH_SIZE: usize = 256;
-
-struct ScanEventSender<'a> {
-    sender: &'a SyncSender<ScanEvent>,
-    metrics: &'a ScanQueueMetrics,
-}
-
-impl ScanEventSender<'_> {
-    fn send(&self, event: ScanEvent) -> Result<(), ScanEvent> {
-        self.metrics.send(self.sender, event)
-    }
-}
-
 pub(super) fn scan_indexed(
     anchor: &RootAnchor,
     sender: SyncSender<ScanEvent>,
@@ -287,488 +404,7 @@ pub(super) fn scan_indexed(
     cancelled: Arc<AtomicBool>,
     metrics: ScanQueueMetrics,
 ) {
-    let event_sender = ScanEventSender {
-        sender: &sender,
-        metrics: &metrics,
-    };
-    if let Err(error) = scan_indexed_inner(anchor, &event_sender, &returned_batches, &cancelled) {
-        let _ = event_sender.send(ScanEvent::Failed {
-            message: error.to_string(),
-        });
-    }
-    let _ = event_sender.send(ScanEvent::Finished);
-}
-
-fn scan_indexed_inner(
-    anchor: &RootAnchor,
-    sender: &ScanEventSender<'_>,
-    returned_batches: &Receiver<EntryBatch>,
-    cancelled: &AtomicBool,
-) -> io::Result<()> {
-    let root = File::from(anchor.try_clone_fd()?);
-    let root_identity = identity_for_fd(root.as_raw_fd())?;
-    let root_mount = mount_identity(root.as_raw_fd())?;
-    if root_identity != anchor.identity {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            "scan root identity changed after it was opened",
-        ));
-    }
-    let root_metadata = anchor.identity;
-    sender
-        .send(ScanEvent::Started {
-            root_name: anchor.name.clone(),
-            identity: root_metadata,
-            link_count: anchor.link_count,
-        })
-        .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "scan receiver was closed"))?;
-
-    let mut directory_names = Vec::new();
-    let mut paths = vec![IndexedDirectoryPath {
-        parent: None,
-        name: None,
-        identity: root_metadata,
-        token: DirectoryToken(0),
-        children_remaining: 0,
-        enumerated: false,
-        complete: true,
-    }];
-    let mut pending = vec![0usize];
-    let mut seen_directories = HashSet::new();
-    seen_directories.insert(root_metadata);
-    let mut batch = take_indexed_batch(returned_batches, DirectoryToken(0));
-
-    while let Some(path_index) = pending.pop() {
-        if cancelled.load(Ordering::Relaxed) {
-            let _ = sender.send(ScanEvent::Cancelled);
-            return Ok(());
-        }
-        let token = paths[path_index].token;
-        batch.clear_for_directory(token);
-        let directory = if path_index == 0 {
-            root.try_clone().map(OpenedDirectory::InsideRoot)
-        } else {
-            open_indexed_directory(
-                root.as_raw_fd(),
-                &root_mount,
-                &paths,
-                &directory_names,
-                path_index,
-            )
-        };
-        let directory = match directory {
-            Ok(OpenedDirectory::InsideRoot(directory)) => directory,
-            Ok(OpenedDirectory::MountBoundary) => {
-                let _ = sender.send(ScanEvent::DirectoryExcluded {
-                    directory: token,
-                    reason: ExclusionReason::MountBoundary,
-                });
-                paths[path_index].complete = false;
-                paths[path_index].enumerated = true;
-                if !finish_indexed_directory(path_index, &mut paths, sender)? {
-                    return Ok(());
-                }
-                continue;
-            }
-            Err(error) => {
-                paths[path_index].complete = false;
-                if !send_scan_event(
-                    sender,
-                    ScanEvent::DirectoryFailed {
-                        directory: token,
-                        message: error.to_string(),
-                    },
-                ) {
-                    return Ok(());
-                }
-                paths[path_index].enumerated = true;
-                if !finish_indexed_directory(path_index, &mut paths, sender)? {
-                    return Ok(());
-                }
-                continue;
-            }
-        };
-        let directory = match keep_directory_on_root_mount(directory, &root_mount)? {
-            OpenedDirectory::InsideRoot(directory) => directory,
-            OpenedDirectory::MountBoundary => {
-                if !send_scan_event(
-                    sender,
-                    ScanEvent::DirectoryExcluded {
-                        directory: token,
-                        reason: ExclusionReason::MountBoundary,
-                    },
-                ) {
-                    return Ok(());
-                }
-                paths[path_index].complete = false;
-                paths[path_index].enumerated = true;
-                if !finish_indexed_directory(path_index, &mut paths, sender)? {
-                    return Ok(());
-                }
-                continue;
-            }
-        };
-        if identity_for_fd(directory.as_raw_fd())? != paths[path_index].identity {
-            paths[path_index].complete = false;
-            if !send_scan_event(
-                sender,
-                ScanEvent::DirectoryFailed {
-                    directory: token,
-                    message: "directory identity changed during scan".to_owned(),
-                },
-            ) {
-                return Ok(());
-            }
-            paths[path_index].enumerated = true;
-            if !finish_indexed_directory(path_index, &mut paths, sender)? {
-                return Ok(());
-            }
-            continue;
-        }
-        let mut stream = match DirectoryStream::from_file(directory) {
-            Ok(stream) => stream,
-            Err(error) => {
-                paths[path_index].complete = false;
-                if !send_scan_event(
-                    sender,
-                    ScanEvent::DirectoryFailed {
-                        directory: token,
-                        message: error.to_string(),
-                    },
-                ) {
-                    return Ok(());
-                }
-                paths[path_index].enumerated = true;
-                if !finish_indexed_directory(path_index, &mut paths, sender)? {
-                    return Ok(());
-                }
-                continue;
-            }
-        };
-        loop {
-            if cancelled.load(Ordering::Relaxed) {
-                if !publish_indexed_batch(sender, returned_batches, &mut batch) {
-                    return Ok(());
-                }
-                let _ = sender.send(ScanEvent::Cancelled);
-                return Ok(());
-            }
-            let directory_fd = stream.fd();
-            let (name, _) = match stream.next_entry_name() {
-                Ok(Some(entry)) => entry,
-                Ok(None) => break,
-                Err(error) => {
-                    paths[path_index].complete = false;
-                    if !publish_indexed_batch(sender, returned_batches, &mut batch)
-                        || !send_scan_event(
-                            sender,
-                            ScanEvent::DirectoryFailed {
-                                directory: token,
-                                message: error.to_string(),
-                            },
-                        )
-                    {
-                        return Ok(());
-                    }
-                    break;
-                }
-            };
-            let name_bytes = name.to_bytes();
-            if name_bytes == b"." || name_bytes == b".." {
-                continue;
-            }
-
-            let mut entry_type = EntryType::Other;
-            let mut identity = FileIdentity { device: 0, inode: 0 };
-            let mut link_count = 0;
-            let mut apparent_bytes = 0;
-            let mut allocated_bytes = 0;
-            let mut state = NodeState::Complete;
-            let mut child_path = None;
-            let metadata = with_stat_at(directory_fd, name, |stat| {
-                let identity = file_identity(stat)?;
-                let link_count = u64::try_from(stat.st_nlink).map_err(|_| {
-                    io::Error::new(io::ErrorKind::InvalidData, "negative link count")
-                })?;
-                Ok((identity, link_count, entry_type_for_mode(stat.st_mode), file_size(stat, true), file_size(stat, false)))
-            });
-            match metadata {
-                Ok((found_identity, found_link_count, found_type, apparent, allocated)) => {
-                    identity = found_identity;
-                    link_count = found_link_count;
-                    entry_type = found_type;
-                    match (apparent, allocated) {
-                        (Ok(apparent), Ok(allocated)) if entry_type != EntryType::Directory => {
-                            apparent_bytes = apparent;
-                            allocated_bytes = allocated;
-                        }
-                        (Err(error), _) | (_, Err(error)) if entry_type != EntryType::Directory => {
-                            state = NodeState::Incomplete;
-                            paths[path_index].complete = false;
-                            if !send_scan_event(
-                                sender,
-                                ScanEvent::DirectoryFailed {
-                                    directory: token,
-                                    message: error.to_string(),
-                                },
-                            ) {
-                                return Ok(());
-                            }
-                        }
-                        _ => {}
-                    }
-                    if entry_type == EntryType::Directory {
-                        match open_child_directory(directory_fd, name) {
-                            Ok(child) => {
-                                let opened_identity = match identity_for_fd(child.as_raw_fd()) {
-                                    Ok(identity) => identity,
-                                    Err(error) => {
-                                        state = NodeState::Incomplete;
-                                        paths[path_index].complete = false;
-                                        if !send_scan_event(
-                                            sender,
-                                            ScanEvent::DirectoryFailed {
-                                                directory: token,
-                                                message: error.to_string(),
-                                            },
-                                        ) {
-                                            return Ok(());
-                                        }
-                                        identity
-                                    }
-                                };
-                                if opened_identity != identity {
-                                    state = NodeState::Incomplete;
-                                    paths[path_index].complete = false;
-                                    if !send_scan_event(
-                                        sender,
-                                        ScanEvent::DirectoryFailed {
-                                            directory: token,
-                                            message: "directory identity changed during scan".to_owned(),
-                                        },
-                                    ) {
-                                        return Ok(());
-                                    }
-                                } else {
-                                    match keep_directory_on_root_mount(child, &root_mount)? {
-                                        OpenedDirectory::MountBoundary => {
-                                            state = NodeState::Excluded(ExclusionReason::MountBoundary);
-                                            paths[path_index].complete = false;
-                                        }
-                                        OpenedDirectory::InsideRoot(child) => {
-                                            if !seen_directories.insert(identity) {
-                                                state = NodeState::Excluded(ExclusionReason::UnsupportedAlias);
-                                                paths[path_index].complete = false;
-                                            } else {
-                                                let name_start = u32::try_from(directory_names.len()).map_err(|_| {
-                                                    io::Error::new(io::ErrorKind::OutOfMemory, "directory names exceed index limits")
-                                                })?;
-                                                let name_end = name_start
-                                                    .checked_add(u32::try_from(name_bytes.len()).map_err(|_| {
-                                                        io::Error::new(io::ErrorKind::InvalidData, "directory name is too long")
-                                                    })?)
-                                                    .ok_or_else(|| io::Error::new(io::ErrorKind::OutOfMemory, "directory names exceed index limits"))?;
-                                                directory_names.extend_from_slice(name_bytes);
-                                                let child_index = paths.len();
-                                                let child_token = DirectoryToken(u32::try_from(child_index).map_err(|_| {
-                                                    io::Error::new(io::ErrorKind::OutOfMemory, "too many directories in index")
-                                                })?);
-                                                paths.push(IndexedDirectoryPath {
-                                                    parent: Some(path_index),
-                                                    name: Some(name_start..name_end),
-                                                    identity,
-                                                    token: child_token,
-                                                    children_remaining: 0,
-                                                    enumerated: false,
-                                                    complete: true,
-                                                });
-                                                paths[path_index].children_remaining += 1;
-                                                pending.push(child_index);
-                                                child_path = Some(child_token);
-                                                drop(child);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            Err(error) => {
-                                state = NodeState::Incomplete;
-                                paths[path_index].complete = false;
-                                if !send_scan_event(
-                                    sender,
-                                    ScanEvent::DirectoryFailed {
-                                        directory: token,
-                                        message: error.to_string(),
-                                    },
-                                ) {
-                                    return Ok(());
-                                }
-                            }
-                        }
-                    }
-                }
-                Err(error) => {
-                    state = NodeState::Incomplete;
-                    paths[path_index].complete = false;
-                    if !send_scan_event(
-                        sender,
-                        ScanEvent::DirectoryFailed {
-                            directory: token,
-                            message: error.to_string(),
-                        },
-                    ) {
-                        return Ok(());
-                    }
-                }
-            }
-
-            let name_start = match u32::try_from(batch.names.len()) {
-                Ok(start) => start,
-                Err(_) => {
-                    paths[path_index].complete = false;
-                    if !send_scan_event(
-                        sender,
-                        ScanEvent::DirectoryFailed {
-                            directory: token,
-                            message: "directory batch exceeded supported name storage".to_owned(),
-                        },
-                    ) {
-                        return Ok(());
-                    }
-                    break;
-                }
-            };
-            let name_end = match name_start.checked_add(u32::try_from(name_bytes.len()).map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidData, "filename is too long")
-            })?) {
-                Some(end) => end,
-                None => {
-                    paths[path_index].complete = false;
-                    break;
-                }
-            };
-            batch.names.extend_from_slice(name_bytes);
-            batch.entries.push(ScanEntry {
-                name: name_start..name_end,
-                directory_token: child_path,
-                entry_type,
-                identity,
-                link_count,
-                apparent_bytes,
-                allocated_bytes,
-                state,
-            });
-            if batch.entries.len() >= INDEXED_BATCH_SIZE
-                && !publish_indexed_batch(sender, returned_batches, &mut batch)
-            {
-                return Ok(());
-            }
-        }
-        if !publish_indexed_batch(sender, returned_batches, &mut batch) {
-            return Ok(());
-        }
-        paths[path_index].enumerated = true;
-        if !finish_indexed_directory(path_index, &mut paths, sender)? {
-            return Ok(());
-        }
-    }
-    Ok(())
-}
-
-fn take_indexed_batch(
-    returned_batches: &Receiver<EntryBatch>,
-    directory: DirectoryToken,
-) -> EntryBatch {
-    returned_batches
-        .try_recv()
-        .unwrap_or_else(|_| EntryBatch::with_capacity(directory, INDEXED_BATCH_SIZE, INDEXED_BATCH_SIZE * 24))
-}
-
-fn publish_indexed_batch(
-    sender: &ScanEventSender<'_>,
-    returned_batches: &Receiver<EntryBatch>,
-    batch: &mut EntryBatch,
-) -> bool {
-    if batch.entries.is_empty() {
-        return true;
-    }
-    let mut next = take_indexed_batch(returned_batches, batch.directory);
-    next.clear_for_directory(batch.directory);
-    let current = std::mem::replace(batch, next);
-    sender.send(ScanEvent::Entries(current)).is_ok()
-}
-
-fn send_scan_event(sender: &ScanEventSender<'_>, event: ScanEvent) -> bool {
-    sender.send(event).is_ok()
-}
-
-fn finish_indexed_directory(
-    start: usize,
-    paths: &mut [IndexedDirectoryPath],
-    sender: &ScanEventSender<'_>,
-) -> io::Result<bool> {
-    let mut current = start;
-    loop {
-        if !paths[current].enumerated || paths[current].children_remaining != 0 {
-            return Ok(true);
-        }
-        let token = paths[current].token;
-        let complete = paths[current].complete;
-        if !send_scan_event(sender, ScanEvent::DirectoryFinished { directory: token, complete }) {
-            return Ok(false);
-        }
-        let Some(parent) = paths[current].parent else {
-            return Ok(true);
-        };
-        paths[current].enumerated = false;
-        paths[parent].children_remaining = paths[parent].children_remaining.saturating_sub(1);
-        if !complete {
-            paths[parent].complete = false;
-        }
-        current = parent;
-    }
-}
-
-fn open_indexed_directory(
-    root_fd: RawFd,
-    root_mount: &MountIdentity,
-    paths: &[IndexedDirectoryPath],
-    directory_names: &[u8],
-    path_index: usize,
-) -> io::Result<OpenedDirectory> {
-    let mut components = Vec::new();
-    let mut current_index = Some(path_index);
-    while let Some(index) = current_index {
-        let path = &paths[index];
-        let Some(parent) = path.parent else {
-            break;
-        };
-        components.push(index);
-        current_index = Some(parent);
-    }
-    let mut current = None;
-    for component in components.into_iter().rev() {
-        let parent_fd = current.as_ref().map_or(root_fd, AsRawFd::as_raw_fd);
-        let range = paths[component].name.as_ref().expect("directory path has a name");
-        let name = CString::new(&directory_names[range.start as usize..range.end as usize])
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        let child = open_child_directory(parent_fd, &name)?;
-        match keep_directory_on_root_mount(child, root_mount)? {
-            OpenedDirectory::MountBoundary => return Ok(OpenedDirectory::MountBoundary),
-            OpenedDirectory::InsideRoot(child) => {
-                if identity_for_fd(child.as_raw_fd())? != paths[component].identity {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Other,
-                        "directory identity changed during scan",
-                    ));
-                }
-                current = Some(child);
-            }
-        }
-    }
-    current.map(OpenedDirectory::InsideRoot).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "cannot reopen root as a child directory")
-    })
+    indexed::scan_indexed(anchor, sender, returned_batches, cancelled, metrics);
 }
 
 fn file_identity(stat: &libc::stat) -> io::Result<FileIdentity> {
@@ -783,6 +419,10 @@ fn file_identity(stat: &libc::stat) -> io::Result<FileIdentity> {
 }
 
 fn identity_for_fd(fd: RawFd) -> io::Result<FileIdentity> {
+    identity_and_link_count_for_fd(fd).map(|(identity, _)| identity)
+}
+
+fn identity_and_link_count_for_fd(fd: RawFd) -> io::Result<(FileIdentity, u64)> {
     let mut metadata = mem::MaybeUninit::<libc::stat>::uninit();
     retry_interrupted(|| {
         if unsafe { libc::fstat(fd, metadata.as_mut_ptr()) } < 0 {
@@ -791,7 +431,11 @@ fn identity_for_fd(fd: RawFd) -> io::Result<FileIdentity> {
             Ok(())
         }
     })?;
-    file_identity(unsafe { metadata.assume_init_ref() })
+    let metadata = unsafe { metadata.assume_init_ref() };
+    let identity = file_identity(metadata)?;
+    let link_count = u64::try_from(metadata.st_nlink)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "negative link count"))?;
+    Ok((identity, link_count))
 }
 
 fn entry_type_for_mode(mode: libc::mode_t) -> EntryType {
@@ -983,28 +627,29 @@ fn keep_directory_on_root_mount(
     directory: File,
     root_mount: &MountIdentity,
 ) -> io::Result<OpenedDirectory> {
-    let identity = mount_identity(directory.as_raw_fd())?;
-    if same_mount(&identity, root_mount) {
+    let device = identity_for_fd(directory.as_raw_fd())?.device;
+    keep_directory_on_root_mount_with_device(directory, root_mount, device)
+}
+
+fn keep_directory_on_root_mount_with_device(
+    directory: File,
+    root_mount: &MountIdentity,
+    device: u64,
+) -> io::Result<OpenedDirectory> {
+    if same_mount_on_fd(directory.as_raw_fd(), root_mount, device)? {
         Ok(OpenedDirectory::InsideRoot(directory))
     } else {
         Ok(OpenedDirectory::MountBoundary)
     }
 }
 
+#[cfg(test)]
 fn same_mount(left: &MountIdentity, right: &MountIdentity) -> bool {
     left == right
 }
 
 fn mount_identity(fd: RawFd) -> io::Result<MountIdentity> {
-    let mut metadata = mem::MaybeUninit::<libc::stat>::uninit();
-    retry_interrupted(|| {
-        if unsafe { libc::fstat(fd, metadata.as_mut_ptr()) } < 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
-    })?;
-
+    let device = identity_for_fd(fd)?.device;
     let mut filesystem = mem::MaybeUninit::<libc::statfs>::zeroed();
     retry_interrupted(|| {
         if unsafe { libc::fstatfs(fd, filesystem.as_mut_ptr()) } < 0 {
@@ -1013,7 +658,6 @@ fn mount_identity(fd: RawFd) -> io::Result<MountIdentity> {
             Ok(())
         }
     })?;
-    let metadata = unsafe { metadata.assume_init_ref() };
     let filesystem = unsafe { filesystem.assume_init_ref() };
     let filesystem_id = fsid_words(filesystem.f_fsid);
     let mount_point = filesystem
@@ -1024,10 +668,36 @@ fn mount_identity(fd: RawFd) -> io::Result<MountIdentity> {
         .collect();
 
     Ok(MountIdentity {
-        device: metadata.st_dev,
+        device: libc::dev_t::try_from(device).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "device number is outside supported range")
+        })?,
         filesystem_id,
         mount_point,
     })
+}
+
+fn same_mount_on_fd(
+    fd: RawFd,
+    root_mount: &MountIdentity,
+    device: u64,
+) -> io::Result<bool> {
+    let mut filesystem = mem::MaybeUninit::<libc::statfs>::zeroed();
+    retry_interrupted(|| {
+        if unsafe { libc::fstatfs(fd, filesystem.as_mut_ptr()) } < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    })?;
+    let filesystem = unsafe { filesystem.assume_init_ref() };
+    let mount_point = filesystem
+        .f_mntonname
+        .iter()
+        .take_while(|byte| **byte != 0)
+        .map(|byte| *byte as u8);
+    Ok(device == u64::try_from(root_mount.device).unwrap_or(u64::MAX)
+        && fsid_words(filesystem.f_fsid) == root_mount.filesystem_id
+        && mount_point.eq(root_mount.mount_point.iter().copied()))
 }
 
 const _: [(); 8] = [(); mem::size_of::<libc::fsid_t>()];

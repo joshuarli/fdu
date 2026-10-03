@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 static TEMP_ID: AtomicUsize = AtomicUsize::new(0);
-const BATCH_SIZE: usize = 256;
+const BATCH_SIZE: usize = 1024;
 
 struct TempDir(PathBuf);
 
@@ -182,6 +182,8 @@ fn indexed_policy_keeps_both_size_modes_and_entry_identity() -> io::Result<()> {
     let directory_link = outer.join("directory-link");
     let nested_payload = nested.join("nested-file");
     let root_file = actual.join("root-file");
+    let parallel = actual.join("parallel");
+    let parallel_payload = parallel.join("parallel-file");
     fs::write(&payload, b"payload data")?;
     fs::hard_link(&payload, &hardlink)?;
     File::create(&sparse)?.set_len(1 << 20)?;
@@ -191,6 +193,8 @@ fn indexed_policy_keeps_both_size_modes_and_entry_identity() -> io::Result<()> {
     symlink("nested", &directory_link)?;
     fs::write(&nested_payload, b"nested")?;
     fs::write(&root_file, b"direct root data")?;
+    fs::create_dir(&parallel)?;
+    fs::write(&parallel_payload, b"parallel branch data")?;
 
     let mut fifo_name = CString::new(outer.as_os_str().as_bytes()).unwrap().into_bytes();
     fifo_name.push(b'/');
@@ -206,6 +210,8 @@ fn indexed_policy_keeps_both_size_modes_and_entry_identity() -> io::Result<()> {
     let root_id = tree.root();
     let outer_id = child_named(&tree, root_id, b"outer").unwrap();
     let root_file_id = child_named(&tree, root_id, b"root-file").unwrap();
+    let parallel_id = child_named(&tree, root_id, b"parallel").unwrap();
+    let parallel_payload_id = child_named(&tree, parallel_id, b"parallel-file").unwrap();
     let payload_id = child_named(&tree, outer_id, b"payload").unwrap();
     let hardlink_id = child_named(&tree, outer_id, b"payload-hardlink").unwrap();
     let sparse_id = child_named(&tree, outer_id, b"sparse").unwrap();
@@ -216,6 +222,12 @@ fn indexed_policy_keeps_both_size_modes_and_entry_identity() -> io::Result<()> {
 
     assert_eq!(tree.name(root_id), Some(supplied.as_os_str().as_bytes()));
     assert_eq!(tree.record(outer_id).unwrap().state, NodeState::Complete);
+    assert_eq!(tree.record(parallel_id).unwrap().state, NodeState::Complete);
+    assert_eq!(tree.record(parallel_payload_id).unwrap().apparent_bytes, fs::metadata(&parallel_payload)?.len());
+    assert_eq!(
+        tree.record(outer_id).unwrap().link_count,
+        fs::symlink_metadata(&outer)?.nlink()
+    );
     assert_ne!(payload_id, hardlink_id);
     assert_eq!(tree.record(payload_id).unwrap().identity, tree.record(hardlink_id).unwrap().identity);
     assert_eq!(tree.record(payload_id).unwrap().link_count, 2);
@@ -256,8 +268,14 @@ fn indexed_policy_keeps_both_size_modes_and_entry_identity() -> io::Result<()> {
     assert_eq!(tree.record(outer_id).unwrap().allocated_bytes, outer_allocated);
     assert_eq!(tree.record(root_file_id).unwrap().apparent_bytes, fs::metadata(&root_file)?.len());
     assert_eq!(tree.record(root_file_id).unwrap().allocated_bytes, allocated(&root_file)?);
-    assert_eq!(tree.record(root_id).unwrap().apparent_bytes, outer_apparent + fs::metadata(root_file)?.len());
-    assert_eq!(tree.record(root_id).unwrap().allocated_bytes, outer_allocated + allocated(&actual.join("root-file"))?);
+    assert_eq!(
+        tree.record(root_id).unwrap().apparent_bytes,
+        outer_apparent + fs::metadata(root_file)?.len() + fs::metadata(&parallel_payload)?.len()
+    );
+    assert_eq!(
+        tree.record(root_id).unwrap().allocated_bytes,
+        outer_allocated + allocated(&actual.join("root-file"))? + allocated(&parallel_payload)?
+    );
 
     for apparent in [false, true] {
         let summary = scan(&ScanOptions { path: supplied.clone(), apparent })?;
@@ -279,9 +297,33 @@ fn indexed_policy_keeps_both_size_modes_and_entry_identity() -> io::Result<()> {
 }
 
 #[test]
+fn indexed_worker_reopens_sibling_directories_after_the_handle_cap() -> io::Result<()> {
+    let temp = TempDir::new()?;
+    let wide = temp.0.join("wide");
+    fs::create_dir(&wide)?;
+    for index in 0..140 {
+        let directory = wide.join(format!("branch-{index:03}"));
+        fs::create_dir(&directory)?;
+        fs::write(directory.join("payload"), b"x")?;
+    }
+
+    let result = scan_to_tree(open_root(&temp.0)?, 2)?;
+    assert!(result.errors.is_empty(), "scanner errors: {:?}", result.errors);
+    let wide_id = child_named(&result.tree, result.tree.root(), b"wide").unwrap();
+    assert_eq!(result.tree.children(wide_id).count(), 140);
+    for index in 0..140 {
+        let name = format!("branch-{index:03}");
+        let branch = child_named(&result.tree, wide_id, name.as_bytes()).unwrap();
+        assert_eq!(result.tree.record(branch).unwrap().state, NodeState::Complete);
+        assert_eq!(result.tree.children(branch).count(), 1);
+    }
+    Ok(())
+}
+
+#[test]
 fn indexed_worker_publishes_wide_directory_chunks_before_completion() -> io::Result<()> {
     let temp = TempDir::new()?;
-    for index in 0..600 {
+    for index in 0..2600 {
         fs::write(temp.0.join(format!("entry-{index:04}")), b"x")?;
     }
     let root = open_root(&temp.0)?;
