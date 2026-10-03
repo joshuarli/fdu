@@ -1,0 +1,209 @@
+size: columns=120 rows=36
+cursor: row=35 column=86 visible=false
+modes: alternate-screen=true application-cursor=false application-keypad=false bracketed-paste=false
+00│·Disk·Usage·Analyzer·v2.45.0····(press·?·for·help)······································································
+01│┌·/private/tmp/fdu-ux-reference-fixture·───────────────────┐┌Help───────────────·⇊·=·Ctrl·+·d|↓·=·j|⇈·=·Ctrl·+·u|↑·=·k·┐
+02││···8.19·KB·|···40.0%··████·······|·/Projects··············█│··························································│
+03││···8.19·KB·|···40.0%··████·······|·/Media·················█│·Pane·control·············································│
+04││···4.10·KB·|···20.0%··██·········|·/Logs··················█│··························································│
+05││··························································█│···········q·=>·Close·the·current·pane.·In·main·view,·qui·│
+06││··························································█│·······<Esc>·=>·Close·the·current·pane.···················│
+07││··························································█│················In·main·view,·ascend·to·the·parent·direct·│
+08││··························································█│·······<Tab>·=>·Cycle·between·visible·panes.··············│
+09││··························································█│················Activate·'Marked·Items'·pane·to·delete·se·│
+10││··························································█│···········]·=>·Minimize·or·restore·the·entire·right·side·│
+11││··························································█│···········?·=>·Show·or·hide·this·help·pane.··············│
+12││··························································█│··························································│
+13││··························································█│··························································│
+14││··························································█│·Navigation···············································│
+15││··························································█│··························································│
+16││··························································█│····j/<Down>·=>·Move·down·1·entry.························│
+17││··························································█│······k/<Up>·=>·Move·up·1·entry.··························│
+18││··························································█│·o/l/<Enter>/<Right>·=>·Descent·into·the·selected·directo·│
+19││··························································█│·u/h/<Backspace>/<Left>·=>·Ascent·one·level·into·the·pare·│
+20││··························································█│·Ctrl·+·d/<Page·Down>·=>·Move·down·10·entries.············│
+21││··························································█│·Ctrl·+·u/<Page·Up>·=>·Move·up·10·entries.················│
+22││··························································█│····H/<Home>·=>·Move·to·the·top·of·the·list.··············│
+23││··························································█│·····G/<End>·=>·Move·to·the·bottom·of·the·list.···········│
+24││··························································█│··························································│
+25││··························································█│··························································│
+26││··························································█│·Display··················································│
+27││··························································█│··························································│
+28││··························································█│···········s·=>·Toggle·sort·by·size·descending/ascending.·│
+29││··························································█│···········m·=>·Toggle·sort·by·modified·time·descending/a·│
+30││··························································█│···········M·=>·Show·modified·time·or·cycle·mtime·sort·mo·│
+31││··························································█│················While·sorting·by·mtime:·entry,·deep·newes·│
+32││··························································║│···········c·=>·Toggle·sort·by·entries·descending/ascendi·│
+33││··························································║│··························································│
+34│└──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
+35│Sort·mode:·size,·large·first··Total·disk·usage:·20.48·KB································································
+attr: row=0 columns=0..2 fg=Indexed(0) bg=Indexed(15) bold=true dim=false italic=false underline=false inverse=false
+attr: row=0 columns=2..6 fg=Indexed(0) bg=Indexed(15) bold=false dim=false italic=false underline=false inverse=false
+attr: row=0 columns=6..7 fg=Indexed(0) bg=Indexed(15) bold=true dim=false italic=false underline=false inverse=false
+attr: row=0 columns=7..12 fg=Indexed(0) bg=Indexed(15) bold=false dim=false italic=false underline=false inverse=false
+attr: row=0 columns=12..13 fg=Indexed(0) bg=Indexed(15) bold=true dim=false italic=false underline=false inverse=false
+attr: row=0 columns=13..32 fg=Indexed(0) bg=Indexed(15) bold=false dim=false italic=false underline=false inverse=false
+attr: row=0 columns=32..39 fg=Indexed(0) bg=Indexed(15) bold=false dim=false italic=false underline=true inverse=false
+attr: row=0 columns=39..40 fg=Indexed(0) bg=Indexed(15) bold=true dim=false italic=false underline=true inverse=false
+attr: row=0 columns=40..50 fg=Indexed(0) bg=Indexed(15) bold=false dim=false italic=false underline=true inverse=false
+attr: row=0 columns=50..120 fg=Default bg=Indexed(15) bold=false dim=false italic=false underline=false inverse=false
+attr: row=1 columns=0..60 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=1 columns=60..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=2 columns=0..1 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=2 columns=1..11 fg=Indexed(2) bg=Default bold=false dim=false italic=false underline=false inverse=true
+attr: row=2 columns=11..36 fg=Default bg=Default bold=false dim=false italic=false underline=false inverse=true
+attr: row=2 columns=36..59 fg=Indexed(6) bg=Default bold=false dim=false italic=false underline=false inverse=true
+attr: row=2 columns=59..60 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=2 columns=60..61 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=2 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=3 columns=0..1 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=3 columns=1..11 fg=Indexed(2) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=3 columns=36..59 fg=Indexed(6) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=3 columns=59..60 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=3 columns=60..61 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=3 columns=62..74 fg=Default bg=Default bold=true dim=false italic=false underline=true inverse=false
+attr: row=3 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=4 columns=0..1 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=4 columns=1..11 fg=Indexed(2) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=4 columns=36..59 fg=Indexed(6) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=4 columns=59..60 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=4 columns=60..61 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=4 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=5 columns=0..1 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=5 columns=59..60 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=5 columns=60..61 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=5 columns=62..73 fg=Indexed(2) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=5 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=6 columns=0..1 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=6 columns=59..60 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=6 columns=60..61 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=6 columns=62..73 fg=Indexed(2) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=6 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=7 columns=0..1 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=7 columns=59..60 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=7 columns=60..61 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=7 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=8 columns=0..1 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=8 columns=59..60 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=8 columns=60..61 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=8 columns=62..73 fg=Indexed(2) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=8 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=9 columns=0..1 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=9 columns=59..60 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=9 columns=60..61 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=9 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=10 columns=0..1 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=10 columns=59..60 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=10 columns=60..61 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=10 columns=62..73 fg=Indexed(2) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=10 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=11 columns=0..1 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=11 columns=59..60 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=11 columns=60..61 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=11 columns=62..73 fg=Indexed(2) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=11 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=12 columns=0..1 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=12 columns=59..60 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=12 columns=60..61 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=12 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=13 columns=0..1 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=13 columns=59..60 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=13 columns=60..61 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=13 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=14 columns=0..1 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=14 columns=59..60 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=14 columns=60..61 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=14 columns=62..72 fg=Default bg=Default bold=true dim=false italic=false underline=true inverse=false
+attr: row=14 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=15 columns=0..1 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=15 columns=59..60 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=15 columns=60..61 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=15 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=16 columns=0..1 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=16 columns=59..60 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=16 columns=60..61 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=16 columns=62..73 fg=Indexed(2) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=16 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=17 columns=0..1 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=17 columns=59..60 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=17 columns=60..61 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=17 columns=62..73 fg=Indexed(2) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=17 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=18 columns=0..1 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=18 columns=59..60 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=18 columns=60..61 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=18 columns=62..81 fg=Indexed(2) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=18 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=19 columns=0..1 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=19 columns=59..60 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=19 columns=60..61 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=19 columns=62..84 fg=Indexed(2) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=19 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=20 columns=0..1 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=20 columns=59..60 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=20 columns=60..61 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=20 columns=62..82 fg=Indexed(2) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=20 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=21 columns=0..1 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=21 columns=59..60 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=21 columns=60..61 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=21 columns=62..80 fg=Indexed(2) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=21 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=22 columns=0..1 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=22 columns=59..60 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=22 columns=60..61 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=22 columns=62..73 fg=Indexed(2) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=22 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=23 columns=0..1 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=23 columns=59..60 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=23 columns=60..61 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=23 columns=62..73 fg=Indexed(2) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=23 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=24 columns=0..1 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=24 columns=59..60 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=24 columns=60..61 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=24 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=25 columns=0..1 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=25 columns=59..60 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=25 columns=60..61 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=25 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=26 columns=0..1 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=26 columns=59..60 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=26 columns=60..61 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=26 columns=62..69 fg=Default bg=Default bold=true dim=false italic=false underline=true inverse=false
+attr: row=26 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=27 columns=0..1 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=27 columns=59..60 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=27 columns=60..61 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=27 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=28 columns=0..1 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=28 columns=59..60 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=28 columns=60..61 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=28 columns=62..73 fg=Indexed(2) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=28 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=29 columns=0..1 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=29 columns=59..60 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=29 columns=60..61 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=29 columns=62..73 fg=Indexed(2) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=29 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=30 columns=0..1 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=30 columns=59..60 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=30 columns=60..61 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=30 columns=62..73 fg=Indexed(2) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=30 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=31 columns=0..1 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=31 columns=59..60 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=31 columns=60..61 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=31 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=32 columns=0..1 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=32 columns=59..60 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=32 columns=60..61 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=32 columns=62..73 fg=Indexed(2) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=32 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=33 columns=0..1 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=33 columns=59..60 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=33 columns=60..61 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=33 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=34 columns=0..60 fg=Indexed(8) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=34 columns=60..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=35 columns=0..120 fg=Default bg=Default bold=false dim=false italic=false underline=false inverse=true

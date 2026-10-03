@@ -1,0 +1,123 @@
+size: columns=120 rows=36
+cursor: row=34 column=119 visible=false
+modes: alternate-screen=true application-cursor=false application-keypad=false bracketed-paste=false
+00│·Disk·Usage·Analyzer·v2.45.0····(press·?·for·help)······································································
+01│┌·/private/tmp/fdu-ux-reference-fixture·(3·visible,·8·total,·20.48·KB)·────────────────────────────────────────────────┐
+02││···8.19·KB·|···40.0%··████·······|·/Projects··········································································█
+03││···8.19·KB·|···40.0%··████·······|·/Media·············································································█
+04││···4.10·KB·|···20.0%··██·········|·/Logs··············································································█
+05││······················································································································█
+06││······················································································································█
+07││······················································································································█
+08││······················································································································█
+09││······················································································································█
+10││······················································································································█
+11││······················································································································█
+12││······················································································································█
+13││······················································································································█
+14││······················································································································█
+15││······················································································································█
+16││······················································································································█
+17││······················································································································█
+18││······················································································································█
+19││······················································································································█
+20││······················································································································█
+21││······················································································································█
+22││······················································································································█
+23││······················································································································█
+24││······················································································································█
+25││······················································································································█
+26││······················································································································█
+27││······················································································································█
+28││······················································································································█
+29││······················································································································█
+30││······················································································································█
+31││······················································································································█
+32││······················································································································║
+33││······················································································································║
+34│└───────────────────────────────────────·mark-move·=·d·|·mark-toggle·=·<Space>·|·cleanup·=·X·|·gitignore·=·I·|·all·=·a·┘
+35│Sort·mode:·size,·large·first··Total·disk·usage:·20.48·KB································································
+attr: row=0 columns=0..2 fg=Indexed(0) bg=Indexed(15) bold=true dim=false italic=false underline=false inverse=false
+attr: row=0 columns=2..6 fg=Indexed(0) bg=Indexed(15) bold=false dim=false italic=false underline=false inverse=false
+attr: row=0 columns=6..7 fg=Indexed(0) bg=Indexed(15) bold=true dim=false italic=false underline=false inverse=false
+attr: row=0 columns=7..12 fg=Indexed(0) bg=Indexed(15) bold=false dim=false italic=false underline=false inverse=false
+attr: row=0 columns=12..13 fg=Indexed(0) bg=Indexed(15) bold=true dim=false italic=false underline=false inverse=false
+attr: row=0 columns=13..32 fg=Indexed(0) bg=Indexed(15) bold=false dim=false italic=false underline=false inverse=false
+attr: row=0 columns=32..39 fg=Indexed(0) bg=Indexed(15) bold=false dim=false italic=false underline=true inverse=false
+attr: row=0 columns=39..40 fg=Indexed(0) bg=Indexed(15) bold=true dim=false italic=false underline=true inverse=false
+attr: row=0 columns=40..50 fg=Indexed(0) bg=Indexed(15) bold=false dim=false italic=false underline=true inverse=false
+attr: row=0 columns=50..120 fg=Default bg=Indexed(15) bold=false dim=false italic=false underline=false inverse=false
+attr: row=1 columns=0..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=2 columns=0..1 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=2 columns=1..11 fg=Indexed(2) bg=Default bold=true dim=false italic=false underline=false inverse=true
+attr: row=2 columns=11..36 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=true
+attr: row=2 columns=36..119 fg=Indexed(6) bg=Default bold=true dim=false italic=false underline=false inverse=true
+attr: row=2 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=3 columns=0..1 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=3 columns=1..11 fg=Indexed(2) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=3 columns=36..119 fg=Indexed(6) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=3 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=4 columns=0..1 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=4 columns=1..11 fg=Indexed(2) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=4 columns=36..119 fg=Indexed(6) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=4 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=5 columns=0..1 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=5 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=6 columns=0..1 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=6 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=7 columns=0..1 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=7 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=8 columns=0..1 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=8 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=9 columns=0..1 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=9 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=10 columns=0..1 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=10 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=11 columns=0..1 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=11 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=12 columns=0..1 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=12 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=13 columns=0..1 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=13 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=14 columns=0..1 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=14 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=15 columns=0..1 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=15 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=16 columns=0..1 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=16 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=17 columns=0..1 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=17 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=18 columns=0..1 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=18 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=19 columns=0..1 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=19 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=20 columns=0..1 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=20 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=21 columns=0..1 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=21 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=22 columns=0..1 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=22 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=23 columns=0..1 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=23 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=24 columns=0..1 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=24 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=25 columns=0..1 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=25 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=26 columns=0..1 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=26 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=27 columns=0..1 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=27 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=28 columns=0..1 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=28 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=29 columns=0..1 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=29 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=30 columns=0..1 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=30 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=31 columns=0..1 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=31 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=32 columns=0..1 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=32 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=33 columns=0..1 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=33 columns=119..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=34 columns=0..120 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=35 columns=0..120 fg=Default bg=Default bold=false dim=false italic=false underline=false inverse=true
