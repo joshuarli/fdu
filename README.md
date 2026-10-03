@@ -144,8 +144,15 @@ cargo test --locked --workspace
 cargo test --locked -p fdu --no-default-features
 ```
 
-The macOS terminal tests in `tests/interactive_pty.rs` use the sibling
-`../ptytest` crate, so that checkout must be present. They cover macOS only.
+The macOS terminal tests use the sibling `../ptytest` crate, so that checkout
+must be present. They cover macOS only. `tests/interactive_pty.rs` checks
+behavior on small trees. `tests/ui_snapshots.rs` freezes complete screens,
+including cell attributes, in `tests/snapshots/`; it opens the generated
+layout fixture at `/tmp/fdu-layout-fixture` (built once with a fixed seed by
+`scripts/generate_layout_fixture.py`, about a minute) in read-only apparent
+mode so the frames do not depend on the machine. Re-record after an intended
+UI change with `PTYTEST_UPDATE_SNAPSHOTS=1 cargo test --test ui_snapshots` and
+review the diff.
 
 Linux uses four Rayon workers by default; `RAYON_NUM_THREADS` selects another
 count. The macOS summary scanner is sequential. The directory tree is live,
