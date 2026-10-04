@@ -288,6 +288,7 @@ struct BrowserProfile {
     started: Instant,
     first_render: Option<Duration>,
     first_usable_listing: Option<Duration>,
+    first_entries: Option<Duration>,
     initial_scan_settled: Option<Duration>,
     /// Time the deletion worker ran, and time spent reconciling its outcomes.
     delete_worker: Option<Duration>,
@@ -316,6 +317,7 @@ impl BrowserProfile {
             started: Instant::now(),
             first_render: None,
             first_usable_listing: None,
+            first_entries: None,
             initial_scan_settled: None,
             delete_worker: None,
             delete_apply: None,
@@ -374,11 +376,12 @@ impl BrowserProfile {
         let entries = model.indexed_entries;
         let arena_bytes = model.tree.retained_arena_bytes();
         eprintln!(
-            "fdu-profile elapsed_ms={} initial_scan_settled_ms={} first_render_ms={} first_usable_listing_ms={} entries={} tree_arena_bytes={} tree_arena_bytes_per_entry={:.2} scan_event_queue_high_water={} input_render_samples={} input_render_p50_us={} input_render_max_us={} delete_worker_ms={} delete_apply_ms={} busy_entry_batches_ms={} entry_batches={} busy_other_events_ms={} busy_draw_ms={} draws={} waiting_for_input_ms={}",
+            "fdu-profile elapsed_ms={} initial_scan_settled_ms={} first_render_ms={} first_usable_listing_ms={} first_entries_ms={} entries={} tree_arena_bytes={} tree_arena_bytes_per_entry={:.2} scan_event_queue_high_water={} input_render_samples={} input_render_p50_us={} input_render_max_us={} delete_worker_ms={} delete_apply_ms={} busy_entry_batches_ms={} entry_batches={} busy_other_events_ms={} busy_draw_ms={} draws={} waiting_for_input_ms={}",
             self.started.elapsed().as_millis(),
             duration_ms(self.initial_scan_settled),
             duration_ms(self.first_render),
             duration_ms(self.first_usable_listing),
+            duration_ms(self.first_entries),
             entries,
             arena_bytes,
             if entries == 0 { 0.0 } else { arena_bytes as f64 / entries as f64 },
@@ -1043,6 +1046,9 @@ impl BrowserModel {
             self.bump_incomplete(changed);
         } else if self.tree.record(self.tree.root()).is_some_and(|record| record.state == NodeState::Scanning) {
             self.set_state(self.tree.root(), NodeState::Complete);
+        }
+        if let Some(tree) = Arc::get_mut(&mut self.tree) {
+            tree.shrink_to_fit();
         }
         self.range_mode = false;
         self.range_anchor = None;
@@ -1739,6 +1745,7 @@ pub fn run(path: std::path::PathBuf, read_only: bool, apparent: bool) -> Result<
                             match event {
                                 ScanEvent::Entries(batch) => {
                                     let applying = profile.timer();
+                                    if profile.enabled { profile.first_entries.get_or_insert_with(|| profile.started.elapsed()); }
                                     let batch = model.apply_entry_batch(batch);
                                     worker.return_batch(batch);
                                     model_changed = true;

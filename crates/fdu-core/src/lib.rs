@@ -1,15 +1,18 @@
 use std::ops::Range;
 
+/// An index into the tree, stored plus one so that `Option<NodeId>` is four bytes: every record
+/// holds four of them.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct NodeId(u32);
+pub struct NodeId(std::num::NonZeroU32);
 
 impl NodeId {
     pub fn index(self) -> usize {
-        self.0 as usize
+        self.0.get() as usize - 1
     }
 
     pub fn from_index(index: usize) -> Option<Self> {
-        u32::try_from(index).ok().map(Self)
+        let stored = u32::try_from(index).ok()?.checked_add(1)?;
+        std::num::NonZeroU32::new(stored).map(Self)
     }
 }
 
@@ -158,7 +161,7 @@ impl Tree {
         identity: FileIdentity,
         link_count: u64,
     ) -> Option<Self> {
-        let root = NodeId(0);
+        let root = NodeId::from_index(0).expect("index zero fits");
         let name_end = u32::try_from(root_name.len()).ok()?;
         let mut names = Vec::with_capacity(root_name.len());
         names.extend_from_slice(root_name);
@@ -191,6 +194,12 @@ impl Tree {
 
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
+    }
+
+    /// Gives back the capacity that growth left unused, once the tree stops growing.
+    pub fn shrink_to_fit(&mut self) {
+        self.nodes.shrink_to_fit();
+        self.names.shrink_to_fit();
     }
 
     pub fn retained_arena_bytes(&self) -> usize {

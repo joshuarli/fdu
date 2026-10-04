@@ -986,7 +986,8 @@ fn scan_indexed_directory_with_buffer(
         context.queue.note_sample(sample.was_blocked());
     }
     outbox.releases.push((token, complete));
-    if outbox.should_flush(context) && !outbox.flush(context) {
+    // The root's entries are what the interface shows first, so they are never held back.
+    if (token == DirectoryToken(0) || outbox.should_flush(context)) && !outbox.flush(context) {
         return Ok(false);
     }
     Ok(true)

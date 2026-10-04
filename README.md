@@ -138,9 +138,70 @@ that index and builds a new one. The operation phases are `Scanning → Ready �
 Deleting → Ready`; a full-root rescan returns to `Scanning`. Scan and deletion
 workers stop and their results are consumed before a phase transition. The
 Linux summary scanner keeps its four-worker Rayon traversal separate from
-indexed browser state; the Linux indexed scanner uses its own thread pool, sized
-from the CPU count and the file descriptor limit (each queued directory holds a
-descriptor, and the soft limit is raised toward the hard limit at start).
+indexed browser state.
+
+The indexed scanner (`crates/fdu-scan/src/indexed.rs`, shared by both platforms)
+is a pool of workers with work-stealing deques. Each worker keeps the
+directories it finds and scans them depth-first, and idle workers steal the
+oldest ones. A worker gathers the entries of consecutive directories into one
+batch (each entry names its parent), so the browser receives a few large
+messages rather than one per directory. Ordering is part of the contract with
+the browser: a directory's own entry is sent before anything found inside it,
+and a directory is reported finished only after the entries of everything below
+it. A worker therefore sends its entries first, then makes the directories it
+found available to others, and only then releases the directories it finished to
+their parents. On Linux the pool is sized for a cold cache (many threads wait on
+storage) but only twice the cores start; the rest are released if sampling shows
+scan time going to blocked I/O, since on a warm cache they only compete. Queued
+directories hold descriptors, so the pool is also bounded by the descriptor
+limit, which is raised toward the hard limit at start.
+
+Deletion (`crates/fdu-delete`) runs on a Rayon pool, one task per directory. A
+task opens its directory from its parent's descriptor, checks it against the
+index, removes its files in inode order, and spawns tasks for its
+subdirectories. The last task to finish a directory removes it and releases its
+parent. Every planned entry gets exactly one outcome, and entries not attempted
+after Esc are reported as not attempted.
+
+## Performance
+
+Benchmarks use [rustybench](https://github.com/joshuarli/rustybench), checked out
+beside this repository as `../rustybench`:
+
+```sh
+cargo bench --bench fixture                      # all benchmarks
+cargo bench --bench fixture -- scan              # summary and indexed scans
+cargo bench --bench fixture -- delete --sample-count 3
+```
+
+`benches/fixture.rs` times the summary scan, the indexed scan with its events
+dropped, the indexed scan building the tree the way the browser does, and
+deleting a fresh clone of the whole layout fixture (the clone is made outside the
+timed region and needs room for a copy under `FDU_BENCH_SCRATCH`, default the
+system temporary directory). `FDU_PROFILE=1` makes the interface report, on exit,
+the time to ready, when the first entries arrived, how much memory the index uses
+per entry, and how the main thread spent its time. Wall-clock times on a small VM
+vary by tens of milliseconds, so changes were judged by instruction counts
+(`valgrind --tool=callgrind`), syscall counts (`strace -f -c`), and CPU time as
+well as by the clock.
+
+On the 192 thousand entry layout fixture (4 vCPUs, ext4 with `discard`), compared with
+the first Linux port:
+
+| | before | now |
+|---|---|---|
+| time to ready, warm cache | 565 ms | about 195 ms |
+| time to ready, cold cache | about 1.4 s | about 0.8 s |
+| indexed scan alone (in process) | 270 ms | about 142 ms |
+| delete everything (in process) | 7.0 s | about 2.3 s |
+| delete everything (through the interface) | 5.6 s | about 2.1 s |
+| index memory per entry | 138 bytes | 84 bytes |
+
+The summary scan, which does nothing but read the metadata, takes about 105 ms and
+uses about 0.4 CPU-seconds in the kernel, so the indexed scan is within about 35 ms of
+the floor for this approach. Deleting is limited by the filesystem: removing a
+directory takes about 100 microseconds of waiting, against 5 for a file, which is why
+the deletion pool is much larger than the number of cores.
 
 ## Build and check
 
@@ -169,6 +230,15 @@ count. The macOS summary scanner is sequential. The directory tree is live,
 not an atomic snapshot, so concurrent filesystem changes may be observed at
 different times. See [PERF.md](PERF.md) for platform details, profiling
 methods, measured results, and coverage gaps.
+
+Two stress tests run many scans, or many deletions, at once over trees that split
+into tasks of very different sizes (deep chains, fan-outs of small directories, wide
+directories). They are part of the normal test run; raise `FDU_STRESS_SCANS` or
+`FDU_STRESS_DELETES` to soak, for example
+`FDU_STRESS_SCANS=300 cargo test --release -p fdu-scan --test indexed_policy concurrent_scans`.
+They exist because the pools coordinate through counters and wake-ups, and a missed
+wake-up shows up only as an occasional hang; the scan test caught one such bug in
+development.
 
 To generate the Linux inode-heavy scanner fixture:
 
