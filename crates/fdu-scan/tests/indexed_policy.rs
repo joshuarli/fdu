@@ -409,3 +409,84 @@ fn dropping_a_full_scan_queue_releases_a_blocked_worker() -> io::Result<()> {
     worker.join().map_err(|_| io::Error::new(io::ErrorKind::Other, "scanner worker panicked"))?;
     Ok(())
 }
+
+/// Mounts need privileges, so the test reports why it did nothing when they are missing.
+#[cfg(target_os = "linux")]
+struct Mount(PathBuf);
+
+#[cfg(target_os = "linux")]
+impl Mount {
+    fn new(source: &str, target: &Path, fstype: Option<&str>, flags: libc::c_ulong) -> io::Result<Self> {
+        let source = CString::new(source).unwrap();
+        let target_c = CString::new(target.as_os_str().as_bytes()).unwrap();
+        let fstype = fstype.map(|value| CString::new(value).unwrap());
+        let result = unsafe {
+            libc::mount(
+                source.as_ptr(),
+                target_c.as_ptr(),
+                fstype.as_ref().map_or(std::ptr::null(), |value| value.as_ptr()),
+                flags,
+                std::ptr::null(),
+            )
+        };
+        if result == 0 {
+            Ok(Self(target.to_owned()))
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for Mount {
+    fn drop(&mut self) {
+        let target = CString::new(self.0.as_os_str().as_bytes()).unwrap();
+        unsafe { libc::umount2(target.as_ptr(), libc::MNT_DETACH) };
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn mounts_and_bind_mounts_below_the_root_are_boundaries_without_children() -> io::Result<()> {
+    let temp = TempDir::new()?;
+    let plain = temp.0.join("plain");
+    let tmpfs = temp.0.join("tmpfs");
+    let bound = temp.0.join("bound");
+    for directory in [&plain, &tmpfs, &bound] {
+        fs::create_dir(directory)?;
+    }
+    fs::write(plain.join("payload"), b"counted once")?;
+    let _tmpfs = match Mount::new("tmpfs", &tmpfs, Some("tmpfs"), 0) {
+        Ok(mount) => mount,
+        Err(error) => {
+            eprintln!("skipping mount boundary test: cannot mount ({error})");
+            return Ok(());
+        }
+    };
+    let _bound = Mount::new(plain.to_str().unwrap(), &bound, None, libc::MS_BIND)?;
+    fs::write(tmpfs.join("hidden"), b"on another filesystem")?;
+
+    let result = scan_to_tree(open_root(&temp.0)?, 4)?;
+    assert!(result.errors.is_empty(), "scanner errors: {:?}", result.errors);
+    let tree = result.tree;
+    let root = tree.root();
+    for name in [&b"tmpfs"[..], b"bound"] {
+        let id = child_named(&tree, root, name).unwrap();
+        assert_eq!(
+            tree.record(id).unwrap().state,
+            NodeState::Excluded(fdu_core::ExclusionReason::MountBoundary),
+            "{}",
+            String::from_utf8_lossy(name)
+        );
+        assert_eq!(tree.children(id).count(), 0);
+    }
+    let plain_id = child_named(&tree, root, b"plain").unwrap();
+    assert_eq!(tree.record(plain_id).unwrap().state, NodeState::Complete);
+    assert_eq!(tree.record(plain_id).unwrap().apparent_bytes, 12);
+    assert_eq!(tree.record(root).unwrap().apparent_bytes, 12);
+    assert_ne!(tree.record(root).unwrap().state, NodeState::Complete);
+
+    let summary = scan(&ScanOptions { path: temp.0.clone(), apparent: true })?;
+    assert_eq!(summary.mount_boundaries, 2);
+    Ok(())
+}

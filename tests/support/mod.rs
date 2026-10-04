@@ -214,12 +214,14 @@ pub fn layout_fixture() -> &'static Path {
     Path::new(LAYOUT_FIXTURE)
 }
 
-/// A private copy of the layout fixture inside `temp`, made with APFS
-/// copy-on-write cloning so it is cheap. Destructive tests work on the copy.
+/// A private copy of the layout fixture inside `temp`, made with copy-on-write
+/// cloning where the filesystem supports it (APFS, or reflink-capable Linux
+/// filesystems) so it is cheap. Destructive tests work on the copy.
 pub fn clone_layout_fixture(temp: &TempDir) -> PathBuf {
     let destination = temp.0.join("layout");
+    let clone_flags: &[&str] = if cfg!(target_os = "macos") { &["-cR"] } else { &["-R", "--reflink=auto"] };
     let status = std::process::Command::new("cp")
-        .args(["-cR"])
+        .args(clone_flags)
         .arg(layout_fixture())
         .arg(&destination)
         .status()

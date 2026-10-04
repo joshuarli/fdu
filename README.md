@@ -2,9 +2,8 @@
 
 `fdu` is a disk-usage browser and summary scanner for Linux 6.0+ and macOS 26+.
 macOS releases earlier than 26 are outside the support guarantee.
-On macOS, terminal sessions open the interactive browser by default. Piped and
-redirected runs use the summary scanner. Linux currently provides summary mode;
-indexed browsing and deletion are implemented for macOS.
+On both platforms, terminal sessions open the interactive browser by default.
+Piped and redirected runs use the summary scanner.
 
 ```text
 fdu [--apparent] [--summary | --interactive] [--read-only] [PATH]
@@ -27,7 +26,9 @@ The macOS backend checks device, filesystem ID, and mount point from opened
 directory descriptors. Those checks are not atomic against concurrent mount
 or path changes, and some filesystems may not distinguish every same-filesystem
 remount. The Linux summary backend uses `openat2` with `RESOLVE_NO_XDEV` and a
-descriptor mount-ID fallback.
+descriptor mount-ID fallback. The Linux indexed backend and deletion compare the
+device and the kernel mount ID from `statx`, so bind mounts and btrfs subvolumes
+count as boundaries.
 
 ## Modes
 
@@ -36,9 +37,9 @@ descriptor mount-ID fallback.
   name with Rust debug escaping. Root-level files do not appear in this output.
   Summary formatting and accounting follow the original scanner; nested mount
   contents are now intentionally excluded.
-- Interactive mode on macOS retains an index for browsing and deletion. `--read-only`
+- Interactive mode retains an index for browsing and deletion. `--read-only`
   disables deletion. `--interactive` requires a usable terminal and reports an
-  error when this build or platform has no interactive implementation.
+  error when this is a summary-only build.
 - A summary-only binary omits terminal dependencies:
 
   ```sh
@@ -119,13 +120,16 @@ amount of storage the filesystem releases.
 - `fdu-core` owns compact indexed records, IDs, totals, and scanner protocol
   types; it has no filesystem or terminal operations.
 - `fdu-scan` owns summary and indexed read-only scanning and platform backends.
+  The indexed scan's worker queue and completion tracking are shared; each
+  platform supplies directory enumeration, metadata, and mount identity (macOS
+  `getattrlistbulk`, Linux `getdents64` plus `fstatat`).
 - `fdu-delete` plans and executes descriptor-relative deletion independently
   of scanning and the terminal. A plan may span directories but never contains
   overlapping roots.
 - `fdu-tui` maps input to intents and renders borrowed model state; it performs
   no filesystem I/O.
-- `src/browser.rs` coordinates scan, ready, and delete phases on the macOS
-  host build. `src/main.rs` parses options and preserves the summary CLI.
+- `src/browser.rs` coordinates scan, ready, and delete phases.
+  `src/main.rs` parses options and preserves the summary CLI.
 
 Workers use ordinary threads and bounded channels. The browser owns mutable
 state, streams batches into an append-only arena, and retains packed filename
@@ -133,8 +137,10 @@ bytes instead of one allocation or path per indexed entry. A rescan discards
 that index and builds a new one. The operation phases are `Scanning → Ready →
 Deleting → Ready`; a full-root rescan returns to `Scanning`. Scan and deletion
 workers stop and their results are consumed before a phase transition. The
-Linux scanner remains summary-only in this port; its four-worker Rayon
-traversal is kept separate from indexed browser state.
+Linux summary scanner keeps its four-worker Rayon traversal separate from
+indexed browser state; the Linux indexed scanner uses its own thread pool, sized
+from the CPU count and the file descriptor limit (each queued directory holds a
+descriptor, and the soft limit is raised toward the hard limit at start).
 
 ## Build and check
 
@@ -144,8 +150,9 @@ cargo test --locked --workspace
 cargo test --locked -p fdu --no-default-features
 ```
 
-The macOS terminal tests use the sibling `../ptytest` crate, so that checkout
-must be present. They cover macOS only. `tests/interactive_pty.rs` checks
+The terminal tests use the sibling `../ptytest` crate, so that checkout must be
+present (Cargo needs it to load the workspace even for other builds). They run
+on macOS and Linux. `tests/interactive_pty.rs` checks
 behavior on small trees. `tests/ui_snapshots.rs` freezes complete screens,
 including cell attributes, in `tests/snapshots/`; it opens the generated
 layout fixture at `/tmp/fdu-layout-fixture` (built once with a fixed seed by
@@ -173,7 +180,7 @@ target/release/fdu --summary perf/fixture
 The generated fixture is ignored by Git. Check free inode capacity before
 choosing large custom counts; see the generator's `--help` for scaling options.
 
-To generate the anonymized workspace-layout fixture used for macOS indexing
+To generate the anonymized workspace-layout fixture used for indexing
 benchmarks:
 
 ```sh

@@ -1,10 +1,10 @@
-//! Terminal-level tests of the macOS interactive browser.
+//! Terminal-level tests of the interactive browser.
 //!
 //! Each test runs the real binary on a kernel PTY and asserts on the semantic
 //! screen kept by `ptytest`, so layout and lifecycle behavior is checked as a
-//! user would see it. These tests cover macOS only; Linux has no interactive
-//! browser, and terminal behavior there is not evidence for macOS.
-#![cfg(all(target_os = "macos", feature = "interactive"))]
+//! user would see it. They run on both supported platforms; a pass on one is
+//! not evidence for the other.
+#![cfg(feature = "interactive")]
 
 mod support;
 

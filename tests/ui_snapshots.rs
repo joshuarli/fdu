@@ -1,11 +1,11 @@
 //! Frozen screens of the interactive browser, recorded from the generated
 //! layout fixture with cell attributes so layout, dimming, and reverse video
 //! are all pinned. Sizes are apparent bytes, which do not depend on the
-//! filesystem's block size. macOS only.
+//! filesystem's block size.
 //!
 //! After an intended UI change, review the diff and re-record with
 //! `PTYTEST_UPDATE_SNAPSHOTS=1 cargo test --test ui_snapshots`.
-#![cfg(all(target_os = "macos", feature = "interactive"))]
+#![cfg(feature = "interactive")]
 
 mod support;
 

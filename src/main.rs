@@ -1,6 +1,6 @@
 #[cfg(feature = "allocation-profile")]
 mod allocation_profile;
-#[cfg(all(feature = "interactive", target_os = "macos"))]
+#[cfg(feature = "interactive")]
 mod browser;
 
 use fdu_core::ExclusionReason;
@@ -196,7 +196,7 @@ fn parse_args() -> io::Result<Options> {
 }
 
 fn automatic_mode_uses_tui(terminal_available: bool) -> bool {
-    terminal_available && cfg!(all(feature = "interactive", target_os = "macos"))
+    terminal_available && cfg!(feature = "interactive")
 }
 
 #[cfg(target_os = "linux")]
@@ -250,18 +250,9 @@ fn print_help() {
 }
 
 fn run_interactive(path: PathBuf, read_only: bool, apparent: bool) -> Result<(), Box<dyn Error>> {
-    #[cfg(all(feature = "interactive", target_os = "macos"))]
+    #[cfg(feature = "interactive")]
     {
-        return browser::run(path, read_only, apparent);
-    }
-    #[cfg(all(feature = "interactive", target_os = "linux"))]
-    {
-        let _ = (path, read_only, apparent);
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "indexed browsing and deletion are currently implemented for macOS only",
-        )
-        .into())
+        browser::run(path, read_only, apparent)
     }
     #[cfg(not(feature = "interactive"))]
     {
@@ -300,11 +291,11 @@ mod tests {
     }
 
     #[test]
-    fn automatic_mode_uses_tui_only_when_the_host_build_supports_it() {
+    fn automatic_mode_uses_tui_only_when_the_build_supports_it() {
         assert!(!automatic_mode_uses_tui(false));
         assert_eq!(
             automatic_mode_uses_tui(true),
-            cfg!(all(feature = "interactive", target_os = "macos")),
+            cfg!(feature = "interactive"),
         );
     }
 }

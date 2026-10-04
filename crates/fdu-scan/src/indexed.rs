@@ -1,11 +1,22 @@
-use super::{
-    EntryType, ExclusionReason, FileIdentity, IndexedDirectoryStream, MountIdentity, NodeState,
-    RootAnchor, ScanQueueMetrics, ScanEvent, entry_type_for_mode, file_identity, file_size,
-    identity_and_link_count_for_fd, identity_for_fd, mount_identity, open_child_directory,
-    same_mount_on_fd, with_stat_at,
+//! Platform-independent orchestration of the indexed scan: the worker queue,
+//! directory completion tracking, and event batching. Each platform supplies
+//! directory enumeration, metadata, and mount-identity primitives.
+use crate::{DirectoryToken, EntryBatch, RootAnchor, ScanQueueMetrics};
+use fdu_core::{EntryType, ExclusionReason, FileIdentity, NodeState, ScanEntry, ScanEvent};
+#[cfg(target_os = "linux")]
+use crate::linux::platform::{
+    entry_type_for_mode, file_identity, file_size, identity_and_link_count_for_fd,
+    identity_for_fd, indexed_scan_limits, mount_identity, open_child_directory,
+    same_mount_on_fd, with_indexed_directory_buffer, with_stat_at, DirectoryBuffer,
+    IndexedDirectoryStream, MountIdentity,
 };
-use crate::{DirectoryToken, EntryBatch};
-use fdu_core::ScanEntry;
+#[cfg(target_os = "macos")]
+use crate::macos::{
+    entry_type_for_mode, file_identity, file_size, identity_and_link_count_for_fd,
+    identity_for_fd, indexed_scan_limits, mount_identity, open_child_directory,
+    same_mount_on_fd, with_indexed_directory_buffer, with_stat_at, DirectoryBuffer,
+    IndexedDirectoryStream, MountIdentity,
+};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::CString;
 use std::fs::File;
@@ -17,10 +28,26 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
 const INDEXED_BATCH_SIZE: usize = 1024;
-const INDEXED_SCAN_WORKER_LIMIT: usize = 128;
-const INDEXED_SCAN_WORKER_HEADROOM: usize = 118;
-const INDEXED_TASKS_PER_WORKER: usize = 8;
 const DIRECTORY_FINISH_BATCH_SIZE: usize = 256;
+
+/// Metadata that a platform's directory enumeration returns together with a
+/// name, sparing a separate stat call. Directories report only identity and type.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(target_os = "linux", allow(dead_code))]
+pub(crate) struct BulkMetadata {
+    pub(crate) identity: FileIdentity,
+    pub(crate) entry_type: EntryType,
+    pub(crate) link_count: u64,
+    pub(crate) apparent_bytes: u64,
+    pub(crate) allocated_bytes: u64,
+}
+
+/// Worker-pool sizing chosen by the platform for its filesystem and descriptor limits.
+pub(crate) struct IndexedScanLimits {
+    pub(crate) workers: usize,
+    /// Directories that may wait with an open descriptor for a worker.
+    pub(crate) queued_directories: usize,
+}
 
 struct ScanEventSender<'a> {
     sender: &'a SyncSender<ScanEvent>,
@@ -276,7 +303,7 @@ struct ScanContext<'a> {
     queue: &'a IndexedWorkQueue,
 }
 
-pub(super) fn scan_indexed(
+pub(crate) fn scan_indexed(
     anchor: &RootAnchor,
     sender: SyncSender<ScanEvent>,
     returned_batches: Receiver<EntryBatch>,
@@ -347,14 +374,9 @@ pub(super) fn scan_indexed(
         pending_finishes: Mutex::new(Vec::with_capacity(DIRECTORY_FINISH_BATCH_SIZE)),
         sender: &event_sender,
     };
-    // Directory reads can block in the filesystem, so bounded worker headroom keeps other
-    // independent subtrees moving while a worker waits for a bulk read.
-    let worker_count = thread::available_parallelism()
-        .map(usize::from)
-        .unwrap_or(1)
-        .saturating_add(INDEXED_SCAN_WORKER_HEADROOM)
-        .min(INDEXED_SCAN_WORKER_LIMIT);
-    let queue = IndexedWorkQueue::new(worker_count.saturating_mul(INDEXED_TASKS_PER_WORKER).max(1));
+    let limits = indexed_scan_limits();
+    let worker_count = limits.workers.max(1);
+    let queue = IndexedWorkQueue::new(limits.queued_directories.max(1));
     let context = ScanContext {
         sender: &event_sender,
         returned_batches: &returned_batches,
@@ -526,7 +548,7 @@ fn scan_indexed_directory(
     token: DirectoryToken,
     context: &ScanContext<'_>,
 ) -> io::Result<ScanDirectoryResult> {
-    super::with_indexed_directory_buffer(|buffer| {
+    with_indexed_directory_buffer(|buffer| {
         scan_indexed_directory_with_buffer(anchor, token, context, buffer)
     })
 }
@@ -535,7 +557,7 @@ fn scan_indexed_directory_with_buffer(
     anchor: &RootAnchor,
     token: DirectoryToken,
     context: &ScanContext<'_>,
-    buffer: &mut super::attributes::AlignedBuffer<{ super::BULK_RECORD_BUFFER_BYTES }>,
+    buffer: &mut DirectoryBuffer,
 ) -> io::Result<ScanDirectoryResult> {
     if context.cancelled.load(Ordering::Relaxed) {
         send_cancelled_once(context);

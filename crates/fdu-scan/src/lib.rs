@@ -15,6 +15,7 @@ pub use fdu_core::{DirectoryToken, EntryBatch, FileIdentity, ScanEvent};
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 compile_error!("fdu supports Linux and macOS");
 
+mod indexed;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
@@ -178,23 +179,7 @@ pub fn start_indexed_scan_with_metrics(
     cancelled: Arc<AtomicBool>,
     metrics: ScanQueueMetrics,
 ) -> JoinHandle<()> {
-    thread::spawn(move || {
-        #[cfg(target_os = "macos")]
-        macos::scan_indexed(&root, sender, returned_batches, cancelled, metrics);
-        #[cfg(target_os = "linux")]
-        {
-            let _ = root;
-            let _ = returned_batches;
-            let _ = cancelled;
-            let _ = metrics.send(
-                &sender,
-                ScanEvent::Failed {
-                    message: "indexed scanning is unavailable in this Linux build".to_owned(),
-                },
-            );
-            let _ = metrics.send(&sender, ScanEvent::Finished);
-        }
-    })
+    thread::spawn(move || indexed::scan_indexed(&root, sender, returned_batches, cancelled, metrics))
 }
 
 #[cfg(test)]

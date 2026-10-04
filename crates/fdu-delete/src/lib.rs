@@ -243,30 +243,33 @@ pub fn execute(
     cancelled: Arc<AtomicBool>,
     sender: SyncSender<DeleteEvent>,
 ) {
-    #[cfg(target_os = "macos")]
-    execute_macos(root, plan, cancelled, sender);
-    #[cfg(target_os = "linux")]
-    {
-        let _ = root;
-        let _ = plan;
-        let _ = cancelled;
-        let _ = sender.send(DeleteEvent::Finished);
-    }
+    posix::run(root, plan, cancelled, sender);
 }
 
-#[cfg(target_os = "macos")]
-mod macos {
+mod posix {
     use super::*;
     use std::ffi::CString;
     use std::fs::File;
     use std::mem;
     use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 
+    /// Identifies the mount a directory lives on, so a directory that became a
+    /// mount point since scanning is never entered.
+    #[cfg(target_os = "macos")]
     #[derive(Clone, Debug, Eq, PartialEq)]
     struct MountIdentity {
         device: u64,
         fsid: [i32; 2],
         mount_point: Vec<u8>,
+    }
+
+    /// The kernel mount ID tells bind mounts of one filesystem apart; the device
+    /// separates filesystem boundaries that share a mount, such as btrfs subvolumes.
+    #[cfg(target_os = "linux")]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct MountIdentity {
+        device: u64,
+        mount_id: u64,
     }
 
     pub(super) fn run(
@@ -579,6 +582,7 @@ mod macos {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn mount_identity(fd: RawFd) -> io::Result<MountIdentity> {
         let mut metadata = mem::MaybeUninit::<libc::stat>::uninit();
         retry_interrupted(|| {
@@ -612,6 +616,39 @@ mod macos {
         })
     }
 
+    #[cfg(target_os = "linux")]
+    fn mount_identity(fd: RawFd) -> io::Result<MountIdentity> {
+        let mut metadata = mem::MaybeUninit::<libc::statx>::zeroed();
+        retry_interrupted(|| {
+            let result = unsafe {
+                libc::statx(
+                    fd,
+                    c"".as_ptr(),
+                    libc::AT_EMPTY_PATH,
+                    libc::STATX_BASIC_STATS | libc::STATX_MNT_ID,
+                    metadata.as_mut_ptr(),
+                )
+            };
+            if result < 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        })?;
+        // SAFETY: a successful statx call fills the structure.
+        let metadata = unsafe { metadata.assume_init_ref() };
+        if metadata.stx_mask & libc::STATX_MNT_ID == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "kernel did not report the directory mount ID",
+            ));
+        }
+        Ok(MountIdentity {
+            device: libc::makedev(metadata.stx_dev_major, metadata.stx_dev_minor),
+            mount_id: metadata.stx_mnt_id,
+        })
+    }
+
     fn flush(sender: &SyncSender<DeleteEvent>, outcomes: &mut Vec<DeleteOutcome>) -> bool {
         if outcomes.is_empty() {
             return true;
@@ -635,19 +672,7 @@ mod macos {
         });
         let _ = sender.send(DeleteEvent::Finished);
     }
-
-    pub(super) fn execute_macos(
-        root: OwnedFd,
-        plan: DeletionPlan,
-        cancelled: Arc<AtomicBool>,
-        sender: SyncSender<DeleteEvent>,
-    ) {
-        run(root, plan, cancelled, sender)
-    }
 }
-
-#[cfg(target_os = "macos")]
-use macos::execute_macos;
 
 #[cfg(test)]
 mod tests {
@@ -754,9 +779,8 @@ mod tests {
         assert_eq!(rejection.rejected[0].node, Some(blocked));
     }
 
-    #[cfg(target_os = "macos")]
-    mod macos_filesystem {
-        use crate::macos::run_with;
+    mod filesystem {
+        use crate::posix::run_with;
         use crate::{create_plan, DeleteEvent, DeleteOutcome, DeletionPlan, OutcomeKind};
         use fdu_core::{EntryType, FileIdentity, NodeId, NodeState, Tree};
         use std::fs::{self, OpenOptions};

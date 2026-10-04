@@ -15,6 +15,8 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, TryLockError};
 
+pub(crate) mod platform;
+
 // A small reusable buffer bounds retained memory while batching wide directories.
 const DIRECTORY_BUFFER_BYTES: usize = 64 * 1024;
 // A record needs a 19-byte header and at least one NUL byte for its name.

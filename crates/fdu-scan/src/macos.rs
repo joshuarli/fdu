@@ -1,7 +1,6 @@
-use crate::{RootAnchor, ScanQueueMetrics, ScanReport, TopLevelDirectory};
-use fdu_core::{
-    EntryBatch, EntryType, ExclusionReason, FileIdentity, NodeState, ScanEvent,
-};
+use crate::indexed::{BulkMetadata, IndexedScanLimits};
+use crate::{ScanReport, TopLevelDirectory};
+use fdu_core::{EntryType, ExclusionReason, FileIdentity};
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, OsString};
 use std::fs::{File, OpenOptions};
@@ -13,12 +12,9 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::ptr::NonNull;
 use std::collections::HashSet;
-use std::sync::atomic::AtomicBool;
-use std::sync::mpsc::{Receiver, SyncSender};
-use std::sync::Arc;
+use std::thread;
 
 mod attributes;
-mod indexed;
 
 const DIRECTORY_OPEN_FLAGS: libc::c_int =
     libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
@@ -27,6 +23,25 @@ const UNKNOWN_ENTRY: libc::c_uchar = libc::DT_UNKNOWN;
 const FILE_TYPE_MASK: libc::mode_t = libc::S_IFMT;
 const DIRECTORY_TYPE: libc::mode_t = libc::S_IFDIR;
 const BULK_RECORD_BUFFER_BYTES: usize = 64 * 1024;
+const INDEXED_SCAN_WORKER_LIMIT: usize = 128;
+const INDEXED_SCAN_WORKER_HEADROOM: usize = 118;
+const INDEXED_TASKS_PER_WORKER: usize = 8;
+
+pub(super) type DirectoryBuffer = attributes::AlignedBuffer<BULK_RECORD_BUFFER_BYTES>;
+
+// Directory reads can block in the filesystem, so bounded worker headroom keeps other
+// independent subtrees moving while a worker waits for a bulk read.
+pub(super) fn indexed_scan_limits() -> IndexedScanLimits {
+    let workers = thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .saturating_add(INDEXED_SCAN_WORKER_HEADROOM)
+        .min(INDEXED_SCAN_WORKER_LIMIT);
+    IndexedScanLimits {
+        workers,
+        queued_directories: workers.saturating_mul(INDEXED_TASKS_PER_WORKER),
+    }
+}
 
 // Each scanning thread handles one directory at a time, so it can reuse its aligned bulk buffer.
 thread_local! {
@@ -34,8 +49,8 @@ thread_local! {
         RefCell::new(Box::new(attributes::AlignedBuffer::new()));
 }
 
-fn with_indexed_directory_buffer<T>(
-    use_buffer: impl FnOnce(&mut attributes::AlignedBuffer<BULK_RECORD_BUFFER_BYTES>) -> T,
+pub(super) fn with_indexed_directory_buffer<T>(
+    use_buffer: impl FnOnce(&mut DirectoryBuffer) -> T,
 ) -> T {
     INDEXED_DIRECTORY_BUFFER.with(|buffer| use_buffer(buffer.borrow_mut().as_mut()))
 }
@@ -58,7 +73,7 @@ struct DirectoryPath {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct MountIdentity {
+pub(super) struct MountIdentity {
     device: libc::dev_t,
     filesystem_id: [i32; 2],
     mount_point: Vec<u8>,
@@ -170,9 +185,9 @@ impl Drop for DirectoryStream {
     }
 }
 
-struct IndexedDirectoryStream<'buffer> {
+pub(super) struct IndexedDirectoryStream<'buffer> {
     directory: Option<File>,
-    buffer: &'buffer mut attributes::AlignedBuffer<BULK_RECORD_BUFFER_BYTES>,
+    buffer: &'buffer mut DirectoryBuffer,
     offset: usize,
     remaining: usize,
     exhausted: bool,
@@ -181,10 +196,7 @@ struct IndexedDirectoryStream<'buffer> {
 }
 
 impl<'buffer> IndexedDirectoryStream<'buffer> {
-    fn from_file(
-        directory: File,
-        buffer: &'buffer mut attributes::AlignedBuffer<BULK_RECORD_BUFFER_BYTES>,
-    ) -> Self {
+    pub(super) fn from_file(directory: File, buffer: &'buffer mut DirectoryBuffer) -> Self {
         Self {
             directory: Some(directory),
             buffer,
@@ -196,7 +208,7 @@ impl<'buffer> IndexedDirectoryStream<'buffer> {
         }
     }
 
-    fn fd(&self) -> RawFd {
+    pub(super) fn fd(&self) -> RawFd {
         self.fallback
             .as_ref()
             .map_or_else(
@@ -210,7 +222,7 @@ impl<'buffer> IndexedDirectoryStream<'buffer> {
             )
     }
 
-    fn next_entry_name(&mut self) -> io::Result<Option<(&CStr, Option<attributes::BulkMetadata>)>> {
+    pub(super) fn next_entry_name(&mut self) -> io::Result<Option<(&CStr, Option<BulkMetadata>)>> {
         loop {
             if let Some(fallback) = &mut self.fallback {
                 return fallback
@@ -397,17 +409,7 @@ pub(super) fn scan(path: &Path, apparent: bool) -> io::Result<ScanReport> {
     Ok(report)
 }
 
-pub(super) fn scan_indexed(
-    anchor: &RootAnchor,
-    sender: SyncSender<ScanEvent>,
-    returned_batches: Receiver<EntryBatch>,
-    cancelled: Arc<AtomicBool>,
-    metrics: ScanQueueMetrics,
-) {
-    indexed::scan_indexed(anchor, sender, returned_batches, cancelled, metrics);
-}
-
-fn file_identity(stat: &libc::stat) -> io::Result<FileIdentity> {
+pub(super) fn file_identity(stat: &libc::stat) -> io::Result<FileIdentity> {
     Ok(FileIdentity {
         device: u64::try_from(stat.st_dev).map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidData, "device number is outside supported range")
@@ -418,11 +420,11 @@ fn file_identity(stat: &libc::stat) -> io::Result<FileIdentity> {
     })
 }
 
-fn identity_for_fd(fd: RawFd) -> io::Result<FileIdentity> {
+pub(super) fn identity_for_fd(fd: RawFd) -> io::Result<FileIdentity> {
     identity_and_link_count_for_fd(fd).map(|(identity, _)| identity)
 }
 
-fn identity_and_link_count_for_fd(fd: RawFd) -> io::Result<(FileIdentity, u64)> {
+pub(super) fn identity_and_link_count_for_fd(fd: RawFd) -> io::Result<(FileIdentity, u64)> {
     let mut metadata = mem::MaybeUninit::<libc::stat>::uninit();
     retry_interrupted(|| {
         if unsafe { libc::fstat(fd, metadata.as_mut_ptr()) } < 0 {
@@ -438,7 +440,7 @@ fn identity_and_link_count_for_fd(fd: RawFd) -> io::Result<(FileIdentity, u64)> 
     Ok((identity, link_count))
 }
 
-fn entry_type_for_mode(mode: libc::mode_t) -> EntryType {
+pub(super) fn entry_type_for_mode(mode: libc::mode_t) -> EntryType {
     match mode & FILE_TYPE_MASK {
         DIRECTORY_TYPE => EntryType::Directory,
         libc::S_IFREG => EntryType::RegularFile,
@@ -612,7 +614,7 @@ fn open_directory_path(
     })
 }
 
-fn open_child_directory(parent_fd: RawFd, name: &CStr) -> io::Result<File> {
+pub(super) fn open_child_directory(parent_fd: RawFd, name: &CStr) -> io::Result<File> {
     retry_interrupted(|| {
         let child_fd = unsafe { libc::openat(parent_fd, name.as_ptr(), DIRECTORY_OPEN_FLAGS) };
         if child_fd < 0 {
@@ -648,7 +650,7 @@ fn same_mount(left: &MountIdentity, right: &MountIdentity) -> bool {
     left == right
 }
 
-fn mount_identity(fd: RawFd) -> io::Result<MountIdentity> {
+pub(super) fn mount_identity(fd: RawFd) -> io::Result<MountIdentity> {
     let device = identity_for_fd(fd)?.device;
     let mut filesystem = mem::MaybeUninit::<libc::statfs>::zeroed();
     retry_interrupted(|| {
@@ -676,7 +678,7 @@ fn mount_identity(fd: RawFd) -> io::Result<MountIdentity> {
     })
 }
 
-fn same_mount_on_fd(
+pub(super) fn same_mount_on_fd(
     fd: RawFd,
     root_mount: &MountIdentity,
     device: u64,
@@ -707,7 +709,7 @@ fn fsid_words(filesystem_id: libc::fsid_t) -> [i32; 2] {
     unsafe { mem::transmute(filesystem_id) }
 }
 
-fn with_stat_at<T>(
+pub(super) fn with_stat_at<T>(
     parent_fd: RawFd,
     name: &CStr,
     inspect: impl FnOnce(&libc::stat) -> io::Result<T>,
@@ -731,7 +733,7 @@ fn with_stat_at<T>(
     inspect(unsafe { stat.assume_init_ref() })
 }
 
-fn file_size(stat: &libc::stat, apparent: bool) -> io::Result<u64> {
+pub(super) fn file_size(stat: &libc::stat, apparent: bool) -> io::Result<u64> {
     if apparent {
         u64::try_from(stat.st_size).map_err(|_| {
             io::Error::new(

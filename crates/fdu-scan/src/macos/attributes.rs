@@ -1,3 +1,4 @@
+use crate::indexed::BulkMetadata;
 use fdu_core::{EntryType, FileIdentity};
 use std::ffi::CStr;
 use std::io;
@@ -18,18 +19,18 @@ const FILE_ATTRIBUTES: libc::attrgroup_t =
     libc::ATTR_FILE_LINKCOUNT | libc::ATTR_FILE_ALLOCSIZE | libc::ATTR_FILE_DATALENGTH;
 
 #[repr(align(8))]
-pub(super) struct AlignedBuffer<const BYTES: usize>([u8; BYTES]);
+pub(crate) struct AlignedBuffer<const BYTES: usize>([u8; BYTES]);
 
 impl<const BYTES: usize> AlignedBuffer<BYTES> {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self([0; BYTES])
     }
 
-    pub(super) fn as_bytes(&self) -> &[u8] {
+    pub(crate) fn as_bytes(&self) -> &[u8] {
         &self.0
     }
 
-    pub(super) fn as_mut_bytes(&mut self) -> &mut [u8] {
+    pub(crate) fn as_mut_bytes(&mut self) -> &mut [u8] {
         &mut self.0
     }
 }
@@ -38,15 +39,6 @@ impl<const BYTES: usize> AlignedBuffer<BYTES> {
 pub(super) struct BulkEntry<'a> {
     pub(super) name: &'a CStr,
     pub(super) metadata: Option<BulkMetadata>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct BulkMetadata {
-    pub(super) identity: FileIdentity,
-    pub(super) entry_type: EntryType,
-    pub(super) link_count: u64,
-    pub(super) apparent_bytes: u64,
-    pub(super) allocated_bytes: u64,
 }
 
 pub(super) fn requested_attributes() -> libc::attrlist {

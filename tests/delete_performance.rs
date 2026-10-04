@@ -2,8 +2,8 @@
 //! destructive work happens on a private copy-on-write clone of the fixture, so
 //! the shared fixture is untouched. The test is ignored by default because it is
 //! slow; run it with `--ignored --nocapture` (and `--release` for meaningful
-//! numbers) to see the timing and the app's own deletion profile. macOS only.
-#![cfg(all(target_os = "macos", feature = "interactive"))]
+//! numbers) to see the timing and the app's own deletion profile.
+#![cfg(feature = "interactive")]
 
 mod support;
 
