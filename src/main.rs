@@ -7,11 +7,7 @@ use fdu_core::ExclusionReason;
 use fdu_scan::{scan, ScanOptions, TopLevelDirectory};
 use std::env;
 use std::error::Error;
-#[cfg(target_os = "linux")]
-use std::ffi::CStr;
 use std::io::{self, IsTerminal, Write};
-#[cfg(target_os = "linux")]
-use std::mem::MaybeUninit;
 use std::path::PathBuf;
 use std::process;
 
@@ -201,21 +197,14 @@ fn automatic_mode_uses_tui(terminal_available: bool) -> bool {
 
 #[cfg(target_os = "linux")]
 fn require_linux_6() -> io::Result<()> {
-    let mut system = MaybeUninit::<libc::utsname>::zeroed();
-    if unsafe { libc::uname(system.as_mut_ptr()) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-
-    let system = unsafe { system.assume_init() };
-    let release = unsafe { CStr::from_ptr(system.release.as_ptr()) };
-    let major_bytes = release
+    let system = rustix::system::uname();
+    let release = system.release();
+    let major = release
         .to_bytes()
         .split(|byte| *byte == b'.')
         .next()
-        .unwrap_or_default();
-    let major = std::str::from_utf8(major_bytes)
-        .ok()
-        .and_then(|value| value.parse::<u32>().ok())
+        .and_then(|major| std::str::from_utf8(major).ok())
+        .and_then(|major| major.parse::<u32>().ok())
         .ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,

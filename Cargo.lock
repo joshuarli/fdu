@@ -242,7 +242,7 @@ dependencies = [
  "fdu-scan",
  "fdu-tui",
  "laputa-ptytest",
- "libc",
+ "rustix",
  "rustybench",
 ]
 
@@ -262,9 +262,12 @@ dependencies = [
 name = "fdu-scan"
 version = "0.1.0"
 dependencies = [
+ "crossbeam-deque",
  "fdu-core",
+ "foldhash",
  "libc",
  "rayon",
+ "rustix",
 ]
 
 [[package]]

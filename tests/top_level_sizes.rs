@@ -1,8 +1,9 @@
 use fdu_scan::{scan, ScanOptions, ScanReport};
-use std::ffi::{CString, OsStr, OsString};
+use rustix::fs::{Mode, OFlags};
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{self, Write};
-use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -225,42 +226,28 @@ fn handles_wide_and_deep_trees_without_path_or_stack_recursion() -> io::Result<(
 }
 
 fn create_deep_chain(root: &Path, levels: usize) -> io::Result<PathBuf> {
-    let directory_name = CString::new("d").unwrap();
-    let leaf_name = CString::new("leaf").unwrap();
     let mut expected_path = root.to_path_buf();
-    let mut parent = File::open(root)?;
+    let mut parent: OwnedFd = rustix::fs::open(root, OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC, Mode::empty())?;
 
+    // Descend by descriptor so the chain can be deeper than a path may be long.
     for _ in 0..levels {
-        if unsafe { libc::mkdirat(parent.as_raw_fd(), directory_name.as_ptr(), 0o700) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let child_fd = unsafe {
-            libc::openat(
-                parent.as_raw_fd(),
-                directory_name.as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            )
-        };
-        if child_fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        parent = unsafe { File::from_raw_fd(child_fd) };
+        rustix::fs::mkdirat(&parent, "d", Mode::RWXU)?;
+        parent = rustix::fs::openat(
+            &parent,
+            "d",
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
         expected_path.push("d");
     }
 
-    let leaf_fd = unsafe {
-        libc::openat(
-            parent.as_raw_fd(),
-            leaf_name.as_ptr(),
-            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC,
-            0o600,
-        )
-    };
-    if leaf_fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let mut leaf = unsafe { File::from_raw_fd(leaf_fd) };
-    leaf.write_all(b"deep")?;
+    let leaf = rustix::fs::openat(
+        &parent,
+        "leaf",
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC,
+        Mode::RUSR | Mode::WUSR,
+    )?;
+    File::from(leaf).write_all(b"deep")?;
     expected_path.push("leaf");
     Ok(expected_path)
 }
@@ -285,7 +272,7 @@ fn reports_scan_errors_and_partial_permission_failures() -> io::Result<()> {
     fs::set_permissions(&blocked, fs::Permissions::from_mode(0o700))?;
     let report = result?;
     assert_eq!(report.mount_boundaries, 0);
-    if unsafe { libc::geteuid() } == 0 {
+    if rustix::process::geteuid().is_root() {
         assert_eq!(report.skipped_entries, 0);
         assert_eq!(
             reported_size(&report, "top"),

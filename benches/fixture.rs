@@ -7,7 +7,7 @@
 //!
 //! Compare runs with the rustybench `baseline` and `diff` commands.
 
-use fdu_core::{DirectoryToken, EntryType, NodeState, ScanEvent, Tree};
+use fdu_core::{EntryType, NodeState, ScanEvent, Tree};
 use fdu_delete::{create_plan, DeleteEvent};
 use fdu_scan::{open_root, scan, start_indexed_scan, EntryBatch, ScanOptions};
 use rustybench::{black_box, counter::ItemsCount, Bencher};
@@ -50,7 +50,7 @@ fn run_indexed_scan(root: &Path, mut on_event: impl FnMut(&mut ScanEvent)) {
     let (batch_sender, batch_receiver) = mpsc::sync_channel(BATCH_POOL);
     for _ in 0..BATCH_POOL {
         batch_sender
-            .send(EntryBatch::with_capacity(DirectoryToken(0), BATCH_CAPACITY, BATCH_CAPACITY * 24))
+            .send(EntryBatch::with_capacity(BATCH_CAPACITY, BATCH_CAPACITY * 24))
             .unwrap();
     }
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -59,8 +59,7 @@ fn run_indexed_scan(root: &Path, mut on_event: impl FnMut(&mut ScanEvent)) {
         let finished = matches!(event, ScanEvent::Finished);
         on_event(&mut event);
         if let ScanEvent::Entries(mut batch) = event {
-            batch.entries.clear();
-            batch.names.clear();
+            batch.clear();
             let _ = batch_sender.try_send(batch);
         }
         if finished {
@@ -78,9 +77,14 @@ fn index_fixture(root: &Path) -> Tree {
     let mut nodes = vec![Some(tree.root())];
     run_indexed_scan(root, |event| match event {
         ScanEvent::Entries(batch) => {
-            let parent = nodes[batch.directory.0 as usize].expect("batches follow their directory entry");
-            let (mut apparent, mut allocated) = (0u64, 0u64);
+            let mut run: Option<(fdu_core::NodeId, u64, u64)> = None;
             for entry in &batch.entries {
+                let parent = nodes[entry.parent.0 as usize].expect("entries follow their directory's entry");
+                if run.is_some_and(|(node, ..)| node != parent) {
+                    let (node, apparent, allocated) = run.take().unwrap();
+                    assert!(tree.add_to_ancestors(node, apparent, allocated));
+                }
+                let (_, apparent, allocated) = run.get_or_insert((parent, 0, 0));
                 let name = &batch.names[entry.name.start as usize..entry.name.end as usize];
                 let id = tree
                     .append(
@@ -102,11 +106,13 @@ fn index_fixture(root: &Path) -> Tree {
                     nodes[index] = Some(id);
                 }
                 if entry.entry_type != EntryType::Directory && entry.state == NodeState::Complete {
-                    apparent += entry.apparent_bytes;
-                    allocated += entry.allocated_bytes;
+                    *apparent += entry.apparent_bytes;
+                    *allocated += entry.allocated_bytes;
                 }
             }
-            assert!(tree.add_to_ancestors(parent, apparent, allocated));
+            if let Some((node, apparent, allocated)) = run {
+                assert!(tree.add_to_ancestors(node, apparent, allocated));
+            }
         }
         ScanEvent::DirectoriesFinished(directories) => {
             for (directory, complete) in directories.iter() {

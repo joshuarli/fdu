@@ -1,65 +1,56 @@
+use crate::fsutil::{self, retry};
 use crate::{ScanReport, TopLevelDirectory};
 use rayon::prelude::*;
+use rustix::fs::{self, AtFlags, FileType, Mode, OFlags, RawDir, ResolveFlags, Statx, StatxFlags};
+use rustix::io::Errno;
 use std::cell::RefCell;
 use std::ffi::{CStr, OsString};
-use std::fs::{File, OpenOptions};
 use std::io;
 use std::marker::PhantomData;
-use std::mem;
+use std::mem::{self, MaybeUninit};
 use std::ops::Deref;
-use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStringExt;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, TryLockError};
 
 pub(crate) mod platform;
 
 // A small reusable buffer bounds retained memory while batching wide directories.
 const DIRECTORY_BUFFER_BYTES: usize = 64 * 1024;
-// A record needs a 19-byte header and at least one NUL byte for its name.
-const MIN_DIRECTORY_RECORD_BYTES: usize = 20;
 // These limits retain at most 512 KiB of parsed records in each scanning thread's pool.
 const MAX_CACHED_DIRECTORY_ENTRY_CAPACITY: usize = 4096;
 const MAX_CACHED_DIRECTORY_ENTRY_VECTORS: usize = 8;
-// Only wide batches need metadata jobs beyond the parallel directory traversal.
-const PARALLEL_METADATA_ENTRY_ESTIMATE_THRESHOLD: usize = 128;
-// Avoid forcing remote metadata refreshes; remote results may reflect cached state.
-const STATX_DONT_SYNC: libc::c_int = 0x4000;
-const STATX_TYPE: libc::c_uint = 0x0001;
-const STATX_SIZE: libc::c_uint = 0x0200;
-const STATX_BLOCKS: libc::c_uint = 0x0400;
-const STATX_MNT_ID: libc::c_uint = 0x1000;
-const AT_EMPTY_PATH: libc::c_int = 0x1000;
-const RESOLVE_NO_XDEV: u64 = 0x01;
+// Only wide directories need metadata jobs beyond the parallel directory traversal: the first
+// files are sized in place, and later ones are gathered into batches that run in parallel.
+const SERIAL_FILE_LIMIT: usize = 128;
+const PARALLEL_FILE_BATCH: usize = 2048;
+// Growth hints for the names and entries of a directory that outgrows its inline storage.
+const NAME_RESERVE_HINT: usize = 512;
+const ENTRY_RESERVE_HINT: usize = 64;
 const EXT4_SUPER_MAGIC: u64 = 0xef53;
-const EXT4_HTREE_EOF_32BIT: i64 = 0x7fff_ffff;
-const EXT4_HTREE_EOF_64BIT: i64 = i64::MAX;
-const S_IFMT: u16 = 0o170000;
-const S_IFDIR: u16 = 0o040000;
+pub(crate) const EXT4_HTREE_EOF_32BIT: u64 = 0x7fff_ffff;
+pub(crate) const EXT4_HTREE_EOF_64BIT: u64 = i64::MAX as u64;
 // Switch to heap-backed descent before a deep tree can exhaust a Rayon worker stack.
 const MAX_RECURSIVE_DIRECTORY_DEPTH: usize = 64;
 
-static FILE_LIMIT_LOCK: Mutex<()> = Mutex::new(());
-
 thread_local! {
-    static DIRECTORY_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::new());
+    static DIRECTORY_BUFFER: RefCell<Vec<MaybeUninit<u8>>> = const { RefCell::new(Vec::new()) };
 }
 
 // A metadata batch can yield to another directory job on the same Rayon worker.
 // Move the buffer out of TLS so that nested enumeration leases independent storage.
 struct DirectoryBuffer {
-    bytes: Vec<u8>,
+    bytes: Vec<MaybeUninit<u8>>,
     _worker: PhantomData<Rc<()>>,
 }
 
 impl DirectoryBuffer {
-    fn with<T>(inspect: impl FnOnce(&mut [u8]) -> T) -> T {
+    fn with<T>(inspect: impl FnOnce(&mut [MaybeUninit<u8>]) -> T) -> T {
         let mut bytes = DIRECTORY_BUFFER.with(|buffer| mem::take(&mut *buffer.borrow_mut()));
         if bytes.is_empty() {
-            bytes.resize(DIRECTORY_BUFFER_BYTES, 0);
+            bytes.resize(DIRECTORY_BUFFER_BYTES, MaybeUninit::uninit());
         }
         let mut buffer = Self {
             bytes,
@@ -202,7 +193,7 @@ struct DirectoryEntries {
 }
 
 struct DirectoryFrame {
-    directory: File,
+    directory: OwnedFd,
     names: DirectoryNames,
     entries: PooledDirectoryEntries,
     next_entry: usize,
@@ -215,14 +206,14 @@ enum ScannedEntry {
     Item(u64),
     MountBoundary,
     Directory {
-        directory: File,
+        directory: OwnedFd,
         ext4_eof_cookie: bool,
     },
 }
 
 enum OpenedChildDirectory {
     MountBoundary,
-    Directory(File, bool),
+    Directory(OwnedFd, bool),
 }
 
 enum UnknownEntry {
@@ -312,64 +303,14 @@ enum EntryKind {
 
 const _: [(); 16] = [(); mem::size_of::<DirectoryEntry>()];
 
-// The Linux statx structure has a fixed UAPI layout independent of libc bindings.
-#[repr(C)]
-struct LinuxStatx {
-    mask: u32,
-    _block_size: u32,
-    _attributes: u64,
-    _link_count: u32,
-    _uid: u32,
-    _gid: u32,
-    mode: u16,
-    _pad1: u16,
-    _inode: u64,
-    size: u64,
-    blocks: u64,
-    _attributes_mask: u64,
-    _atime: StatxTimestamp,
-    _birth_time: StatxTimestamp,
-    _change_time: StatxTimestamp,
-    _modify_time: StatxTimestamp,
-    _rdev_major: u32,
-    _rdev_minor: u32,
-    _device_major: u32,
-    _device_minor: u32,
-    _mount_id: u64,
-    _dio_memory_alignment: u32,
-    _dio_offset_alignment: u32,
-    _spare: [u64; 12],
+
+/// Whether the kernel filled in the statx fields in `flags`.
+fn reports(stat: &Statx, flags: StatxFlags) -> bool {
+    StatxFlags::from_bits_retain(stat.stx_mask).contains(flags)
 }
 
-#[repr(C)]
-struct StatxTimestamp {
-    _seconds: i64,
-    _nanoseconds: u32,
-    _pad: i32,
-}
-
-#[repr(C)]
-// openat2 uses a fixed-width UAPI structure; unused fields stay zero.
-struct OpenHow {
-    flags: u64,
-    mode: u64,
-    resolve: u64,
-}
-
-// These offsets must match the fixed-width structures passed directly to Linux syscalls.
-const _: [(); 256] = [(); mem::size_of::<LinuxStatx>()];
-const _: [(); 28] = [(); mem::offset_of!(LinuxStatx, mode)];
-const _: [(); 40] = [(); mem::offset_of!(LinuxStatx, size)];
-const _: [(); 48] = [(); mem::offset_of!(LinuxStatx, blocks)];
-const _: [(); 136] = [(); mem::offset_of!(LinuxStatx, _device_major)];
-const _: [(); 24] = [(); mem::size_of::<OpenHow>()];
-const _: [(); 8] = [(); mem::offset_of!(OpenHow, mode)];
-const _: [(); 16] = [(); mem::offset_of!(OpenHow, resolve)];
-
-impl LinuxStatx {
-    fn is_directory(&self) -> bool {
-        self.mask & STATX_TYPE != 0 && self.mode & S_IFMT == S_IFDIR
-    }
+fn is_directory(stat: &Statx) -> bool {
+    reports(stat, StatxFlags::TYPE) && FileType::from_raw_mode(u32::from(stat.stx_mode)) == FileType::Directory
 }
 
 // Choose size accounting before descent so every metadata call requests a fixed field.
@@ -382,15 +323,13 @@ pub(super) fn scan(path: &Path, apparent: bool) -> io::Result<ScanReport> {
 }
 
 fn scan_mode<const APPARENT: bool>(path: &Path) -> io::Result<ScanReport> {
-    let root = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
-        .open(path)?;
-    let ext4_eof_cookie = is_ext4(root.as_raw_fd());
+    let root = fsutil::open_directory(path)?;
+    let root_fd = root.as_fd();
+    let ext4_eof_cookie = is_ext4(root_fd);
     let skipped_entries = AtomicUsize::new(0);
     let mount_boundaries = AtomicUsize::new(0);
     let DirectoryEntries { names, entries, .. } = read_directory::<APPARENT, true>(
-        root.as_raw_fd(),
+        root_fd,
         ext4_eof_cookie,
         &skipped_entries,
     )?;
@@ -401,7 +340,7 @@ fn scan_mode<const APPARENT: bool>(path: &Path) -> io::Result<ScanReport> {
         .copied()
         .filter_map(|entry| {
             match scan_top_level_entry::<APPARENT>(
-                &root,
+                root_fd,
                 name_bytes,
                 entry,
                 ext4_eof_cookie,
@@ -427,7 +366,7 @@ fn scan_mode<const APPARENT: bool>(path: &Path) -> io::Result<ScanReport> {
 }
 
 fn scan_top_level_entry<const APPARENT: bool>(
-    parent: &File,
+    parent: BorrowedFd<'_>,
     names: &[u8],
     entry: DirectoryEntry,
     ext4_eof_cookie: bool,
@@ -440,17 +379,17 @@ fn scan_top_level_entry<const APPARENT: bool>(
 
     if matches!(entry.kind, EntryKind::Unknown) {
         let is_directory = with_stat_at(
-            parent.as_raw_fd(),
+            parent,
             entry.as_c_str(names),
-            STATX_TYPE,
+            StatxFlags::TYPE,
             |stat| {
-                if stat.mask & STATX_TYPE == 0 {
+                if !reports(stat, StatxFlags::TYPE) {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "filesystem did not report an unknown entry type",
                     ));
                 }
-                Ok(stat.is_directory())
+                Ok(is_directory(stat))
             },
         )?;
         if !is_directory {
@@ -474,7 +413,7 @@ fn scan_top_level_entry<const APPARENT: bool>(
 }
 
 fn scan_directory_contents<const APPARENT: bool>(
-    directory: File,
+    directory: OwnedFd,
     ext4_eof_cookie: bool,
     depth: usize,
     skipped_entries: &AtomicUsize,
@@ -494,7 +433,7 @@ fn scan_directory_contents<const APPARENT: bool>(
         entries,
         disk_size,
     } = read_directory::<APPARENT, false>(
-        directory.as_raw_fd(),
+        directory.as_fd(),
         ext4_eof_cookie,
         skipped_entries,
     )?;
@@ -502,12 +441,13 @@ fn scan_directory_contents<const APPARENT: bool>(
         return Ok(disk_size);
     }
     let name_bytes = names.as_slice();
+    let directory_fd = directory.as_fd();
     let child_size = entries
         .par_iter()
         .copied()
         .map(|entry| {
             match scan_entry_size::<APPARENT>(
-                &directory,
+                directory_fd,
                 name_bytes,
                 entry,
                 ext4_eof_cookie,
@@ -543,7 +483,7 @@ fn scan_directory_contents<const APPARENT: bool>(
 
 impl DirectoryFrame {
     fn new<const APPARENT: bool>(
-        directory: File,
+        directory: OwnedFd,
         ext4_eof_cookie: bool,
         skipped_entries: &AtomicUsize,
     ) -> io::Result<Self> {
@@ -552,7 +492,7 @@ impl DirectoryFrame {
             entries,
             disk_size,
         } = read_directory::<APPARENT, false>(
-            directory.as_raw_fd(),
+            directory.as_fd(),
             ext4_eof_cookie,
             skipped_entries,
         )?;
@@ -588,7 +528,7 @@ impl DirectoryFrame {
 }
 
 fn scan_directory_iterative<const APPARENT: bool>(
-    directory: File,
+    directory: OwnedFd,
     ext4_eof_cookie: bool,
     skipped_entries: &AtomicUsize,
     mount_boundaries: &AtomicUsize,
@@ -612,7 +552,7 @@ fn scan_directory_iterative<const APPARENT: bool>(
             let scanned = {
                 let frame = stack.last().expect("root directory frame remains present");
                 scan_entry_iterative::<APPARENT>(
-                    &frame.directory,
+                    frame.directory.as_fd(),
                     frame.names.as_slice(),
                     entry,
                     frame.ext4_eof_cookie,
@@ -665,7 +605,7 @@ fn scan_directory_iterative<const APPARENT: bool>(
 }
 
 fn scan_entry_size<const APPARENT: bool>(
-    parent: &File,
+    parent: BorrowedFd<'_>,
     names: &[u8],
     entry: DirectoryEntry,
     ext4_eof_cookie: bool,
@@ -683,24 +623,24 @@ fn scan_entry_size<const APPARENT: bool>(
             mount_boundaries,
         ),
         EntryKind::Other => with_stat_at(
-            parent.as_raw_fd(),
+            parent,
             entry.as_c_str(names),
             entry_size_mask::<APPARENT>(),
             |stat| file_size::<APPARENT>(stat),
         ),
         EntryKind::Unknown => {
             let scanned = with_stat_at(
-                parent.as_raw_fd(),
+                parent,
                 entry.as_c_str(names),
-                STATX_TYPE | entry_size_mask::<APPARENT>(),
+                StatxFlags::TYPE | entry_size_mask::<APPARENT>(),
                 |stat| {
-                    if stat.mask & STATX_TYPE == 0 {
+                    if !reports(stat, StatxFlags::TYPE) {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidData,
                             "filesystem did not report an unknown entry type",
                         ));
                     }
-                    if stat.is_directory() {
+                    if is_directory(stat) {
                         Ok(UnknownEntry::Directory)
                     } else {
                         file_size::<APPARENT>(stat).map(UnknownEntry::Item)
@@ -723,7 +663,7 @@ fn scan_entry_size<const APPARENT: bool>(
 }
 
 fn scan_entry_iterative<const APPARENT: bool>(
-    parent: &File,
+    parent: BorrowedFd<'_>,
     names: &[u8],
     entry: DirectoryEntry,
     ext4_eof_cookie: bool,
@@ -735,24 +675,24 @@ fn scan_entry_iterative<const APPARENT: bool>(
             ext4_eof_cookie,
         ),
         EntryKind::Other => with_stat_at(
-            parent.as_raw_fd(),
+            parent,
             entry.as_c_str(names),
             entry_size_mask::<APPARENT>(),
             |stat| file_size::<APPARENT>(stat).map(ScannedEntry::Item),
         ),
         EntryKind::Unknown => {
             let scanned = with_stat_at(
-                parent.as_raw_fd(),
+                parent,
                 entry.as_c_str(names),
-                STATX_TYPE | entry_size_mask::<APPARENT>(),
+                StatxFlags::TYPE | entry_size_mask::<APPARENT>(),
                 |stat| {
-                    if stat.mask & STATX_TYPE == 0 {
+                    if !reports(stat, StatxFlags::TYPE) {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidData,
                             "filesystem did not report an unknown entry type",
                         ));
                     }
-                    if stat.is_directory() {
+                    if is_directory(stat) {
                         Ok(UnknownEntry::Directory)
                     } else {
                         file_size::<APPARENT>(stat).map(UnknownEntry::Item)
@@ -771,16 +711,16 @@ fn scan_entry_iterative<const APPARENT: bool>(
     }
 }
 
-fn entry_size_mask<const APPARENT: bool>() -> libc::c_uint {
+fn entry_size_mask<const APPARENT: bool>() -> StatxFlags {
     if APPARENT {
-        STATX_SIZE
+        StatxFlags::SIZE
     } else {
-        STATX_BLOCKS
+        StatxFlags::BLOCKS
     }
 }
 
 fn scan_child_directory<const APPARENT: bool>(
-    parent: &File,
+    parent: BorrowedFd<'_>,
     name: &CStr,
     ext4_eof_cookie: bool,
     child_depth: usize,
@@ -788,7 +728,7 @@ fn scan_child_directory<const APPARENT: bool>(
     mount_boundaries: &AtomicUsize,
 ) -> io::Result<u64> {
     let (child, child_ext4_eof_cookie) = match open_child_directory(
-        parent.as_raw_fd(),
+        parent,
         name,
         ext4_eof_cookie,
     )? {
@@ -810,11 +750,11 @@ fn scan_child_directory<const APPARENT: bool>(
 }
 
 fn open_child_entry(
-    parent: &File,
+    parent: BorrowedFd<'_>,
     name: &CStr,
     ext4_eof_cookie: bool,
 ) -> io::Result<ScannedEntry> {
-    match open_child_directory(parent.as_raw_fd(), name, ext4_eof_cookie)? {
+    match open_child_directory(parent, name, ext4_eof_cookie)? {
         OpenedChildDirectory::MountBoundary => Ok(ScannedEntry::MountBoundary),
         OpenedChildDirectory::Directory(directory, ext4_eof_cookie) => {
             Ok(ScannedEntry::Directory {
@@ -825,28 +765,26 @@ fn open_child_entry(
     }
 }
 
+/// Opens a child directory without leaving the parent's mount: `RESOLVE_NO_XDEV` where the
+/// kernel supports it, otherwise a plain open followed by a mount ID comparison.
 fn open_child_directory(
-    parent_fd: libc::c_int,
+    parent_fd: BorrowedFd<'_>,
     name: &CStr,
     ext4_eof_cookie: bool,
 ) -> io::Result<OpenedChildDirectory> {
-    match open_with_nofile_retry(|| openat2_directory(parent_fd, name)) {
+    match fsutil::with_descriptor_retry(|| retry(|| openat2_directory(parent_fd, name))) {
         Ok(child) => Ok(OpenedChildDirectory::Directory(child, ext4_eof_cookie)),
-        Err(error)
-            if error.raw_os_error() == Some(libc::EXDEV) =>
-        {
+        Err(error) if error.raw_os_error() == Some(Errno::XDEV.raw_os_error()) => {
             Ok(OpenedChildDirectory::MountBoundary)
         }
         Err(error)
             if matches!(
                 error.raw_os_error(),
-                Some(libc::ENOSYS) | Some(libc::EPERM)
+                Some(code) if code == Errno::NOSYS.raw_os_error() || code == Errno::PERM.raw_os_error()
             ) =>
         {
-            let child = open_with_nofile_retry(|| openat_directory(parent_fd, name))?;
-            let parent_mount_id = mount_id_for_fd(parent_fd)?;
-            let child_mount_id = mount_id_for_fd(child.as_raw_fd())?;
-            if parent_mount_id == child_mount_id {
+            let child = fsutil::open_directory_at(parent_fd, name)?;
+            if mount_id_for_fd(parent_fd)? == mount_id_for_fd(child.as_fd())? {
                 Ok(OpenedChildDirectory::Directory(child, ext4_eof_cookie))
             } else {
                 Ok(OpenedChildDirectory::MountBoundary)
@@ -856,434 +794,69 @@ fn open_child_directory(
     }
 }
 
-fn open_with_nofile_retry(mut open: impl FnMut() -> io::Result<File>) -> io::Result<File> {
-    loop {
-        match retry_interrupted(&mut open) {
-            Err(error) if error.raw_os_error() == Some(libc::EMFILE) => {
-                raise_soft_nofile_limit()?;
-            }
-            result => return result,
-        }
-    }
-}
-
-fn raise_soft_nofile_limit() -> io::Result<()> {
-    let _guard = match FILE_LIMIT_LOCK.try_lock() {
-        Ok(guard) => guard,
-        Err(TryLockError::WouldBlock) => {
-            drop(
-                FILE_LIMIT_LOCK
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner),
-            );
-            return Ok(());
-        }
-        Err(TryLockError::Poisoned(error)) => error.into_inner(),
-    };
-
-    let mut limit = retry_interrupted(|| {
-        let mut limit = mem::MaybeUninit::<libc::rlimit>::uninit();
-        if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, limit.as_mut_ptr()) } != 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(unsafe { limit.assume_init() })
-        }
-    })?;
-    if limit.rlim_cur >= limit.rlim_max {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            "process reached its hard file descriptor limit",
-        ));
-    }
-
-    let increment = limit.rlim_cur.max(256);
-    let next_soft = limit.rlim_cur.saturating_add(increment).min(limit.rlim_max);
-    if next_soft <= limit.rlim_cur {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            "process file descriptor limit cannot be increased",
-        ));
-    }
-    limit.rlim_cur = next_soft;
-    retry_interrupted(|| {
-        if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) } != 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
-    })
-}
-
-fn openat2_directory(parent_fd: libc::c_int, name: &CStr) -> io::Result<File> {
-    let how = OpenHow {
-        flags: (libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) as u64,
-        mode: 0,
-        resolve: RESOLVE_NO_XDEV,
-    };
-    let child_fd = openat2_call(parent_fd, name, &how)?;
-    Ok(unsafe { File::from_raw_fd(child_fd) })
-}
-
-fn openat_directory(parent_fd: libc::c_int, name: &CStr) -> io::Result<File> {
-    let child_fd = unsafe {
-        libc::openat(
-            parent_fd,
-            name.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-    };
-    if child_fd < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(unsafe { File::from_raw_fd(child_fd) })
-    }
+fn openat2_directory(parent_fd: BorrowedFd<'_>, name: &CStr) -> rustix::io::Result<OwnedFd> {
+    fs::openat2(
+        parent_fd,
+        name,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+        ResolveFlags::NO_XDEV,
+    )
 }
 
 #[inline(always)]
-fn file_size<const APPARENT: bool>(stat: &LinuxStatx) -> io::Result<u64> {
+fn file_size<const APPARENT: bool>(stat: &Statx) -> io::Result<u64> {
     let size_mask = entry_size_mask::<APPARENT>();
-    if stat.mask & size_mask != size_mask {
+    if !reports(stat, size_mask) {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "filesystem did not report the requested file size",
         ));
     }
-    let size = if APPARENT {
-        stat.size
+    if APPARENT {
+        Ok(stat.stx_size)
     } else {
-        stat.blocks.checked_mul(512).ok_or_else(|| {
+        stat.stx_blocks.checked_mul(512).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 "file total exceeds the supported byte-count range",
             )
-        })?
-    };
-    Ok(size)
+        })
+    }
 }
 
 fn with_stat_at<T>(
-    parent_fd: libc::c_int,
+    parent_fd: BorrowedFd<'_>,
     name: &CStr,
-    mask: libc::c_uint,
-    inspect: impl FnOnce(&LinuxStatx) -> io::Result<T>,
+    mask: StatxFlags,
+    inspect: impl FnOnce(&Statx) -> io::Result<T>,
 ) -> io::Result<T> {
-    with_statx(
-        parent_fd,
-        name.as_ptr(),
-        libc::AT_SYMLINK_NOFOLLOW | STATX_DONT_SYNC,
-        mask,
-        inspect,
-    )
+    // Avoid forcing remote metadata refreshes; remote results may reflect cached state.
+    let flags = AtFlags::SYMLINK_NOFOLLOW | AtFlags::STATX_DONT_SYNC;
+    let stat = retry(|| fs::statx(parent_fd, name, flags, mask))?;
+    inspect(&stat)
 }
 
-fn mount_id_for_fd(fd: libc::c_int) -> io::Result<u64> {
-    with_statx(
-        fd,
-        b"\0".as_ptr().cast(),
-        AT_EMPTY_PATH,
-        STATX_MNT_ID,
-        |stat| {
-            if stat.mask & STATX_MNT_ID == 0 {
-                Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "kernel did not report the directory mount ID",
-                ))
-            } else {
-                Ok(stat._mount_id)
-            }
-        },
-    )
-}
-
-fn is_ext4(fd: libc::c_int) -> bool {
-    let filesystem = retry_interrupted(|| {
-        let mut filesystem = mem::MaybeUninit::<libc::statfs>::uninit();
-        if unsafe { libc::fstatfs(fd, filesystem.as_mut_ptr()) } < 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(unsafe { filesystem.assume_init() })
-        }
-    });
-    match filesystem {
-        Ok(filesystem) => filesystem.f_type as u64 == EXT4_SUPER_MAGIC,
-        Err(_) => false,
-    }
-}
-
-// Inspect the result in place so each 256-byte statx record is not copied on return.
-fn with_statx<T>(
-    directory_fd: libc::c_int,
-    path: *const libc::c_char,
-    flags: libc::c_int,
-    mask: libc::c_uint,
-    inspect: impl FnOnce(&LinuxStatx) -> io::Result<T>,
-) -> io::Result<T> {
-    let mut stat = mem::MaybeUninit::<LinuxStatx>::uninit();
-    retry_interrupted(|| statx_call(directory_fd, path, flags, mask, stat.as_mut_ptr()))?;
-    // A successful Linux statx call writes the entire fixed-width result structure.
-    inspect(unsafe { stat.assume_init_ref() })
-}
-
-// Avoid the variadic libc syscall wrapper on the high-volume x86-64 statx path.
-#[cfg(target_arch = "x86_64")]
-fn statx_call(
-    directory_fd: libc::c_int,
-    path: *const libc::c_char,
-    flags: libc::c_int,
-    mask: libc::c_uint,
-    result: *mut LinuxStatx,
-) -> io::Result<()> {
-    // SAFETY: The syscall ABI assigns statx's five arguments to these registers, and `result`
-    // points to the live, 256-byte output buffer owned by `with_statx`.
-    let result_code = unsafe {
-        let mut result_code = libc::SYS_statx as libc::c_long;
-        std::arch::asm!(
-            "syscall",
-            inlateout("rax") result_code,
-            in("rdi") directory_fd as libc::c_long,
-            in("rsi") path,
-            in("rdx") flags as libc::c_long,
-            in("r10") mask as libc::c_long,
-            in("r8") result,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-        result_code
-    };
-    if result_code < 0 {
-        Err(io::Error::from_raw_os_error((-result_code) as i32))
+fn mount_id_for_fd(fd: BorrowedFd<'_>) -> io::Result<u64> {
+    let stat = retry(|| fs::statx(fd, c"", AtFlags::EMPTY_PATH, StatxFlags::MNT_ID))?;
+    if reports(&stat, StatxFlags::MNT_ID) {
+        Ok(stat.stx_mnt_id)
     } else {
-        Ok(())
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "kernel did not report the directory mount ID",
+        ))
     }
 }
 
-#[cfg(not(target_arch = "x86_64"))]
-fn statx_call(
-    directory_fd: libc::c_int,
-    path: *const libc::c_char,
-    flags: libc::c_int,
-    mask: libc::c_uint,
-    result: *mut LinuxStatx,
-) -> io::Result<()> {
-    // SAFETY: The arguments match the target's statx syscall signature. The result pointer targets
-    // a live output buffer.
-    let result = unsafe {
-        libc::syscall(
-            libc::SYS_statx,
-            directory_fd,
-            path,
-            flags,
-            mask,
-            result,
-        )
-    };
-    if result < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
+pub(super) fn is_ext4(fd: BorrowedFd<'_>) -> bool {
+    retry(|| fs::fstatfs(fd)).is_ok_and(|filesystem| filesystem.f_type as u64 == EXT4_SUPER_MAGIC)
 }
 
-#[cfg(target_arch = "x86_64")]
-#[inline(always)]
-unsafe fn raw_syscall3(
-    number: libc::c_long,
-    first: libc::c_long,
-    second: libc::c_long,
-    third: libc::c_long,
-) -> libc::c_long {
-    let mut result = number;
-    // SAFETY: The caller follows the syscall ABI. Any pointed-to memory stays valid for the call.
-    unsafe {
-        std::arch::asm!(
-            "syscall",
-            inlateout("rax") result,
-            in("rdi") first,
-            in("rsi") second,
-            in("rdx") third,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    result
-}
-
-#[cfg(target_arch = "x86_64")]
-#[inline(always)]
-unsafe fn raw_syscall4(
-    number: libc::c_long,
-    first: libc::c_long,
-    second: libc::c_long,
-    third: libc::c_long,
-    fourth: libc::c_long,
-) -> libc::c_long {
-    let mut result = number;
-    // SAFETY: The caller follows the syscall ABI. Any pointed-to memory stays valid for the call.
-    unsafe {
-        std::arch::asm!(
-            "syscall",
-            inlateout("rax") result,
-            in("rdi") first,
-            in("rsi") second,
-            in("rdx") third,
-            in("r10") fourth,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    result
-}
-
-fn getdents64_call(fd: libc::c_int, buffer: &mut [u8]) -> io::Result<usize> {
-    #[cfg(target_arch = "x86_64")]
-    {
-        let result = unsafe {
-            raw_syscall3(
-                libc::SYS_getdents64 as libc::c_long,
-                fd as libc::c_long,
-                buffer.as_mut_ptr() as libc::c_long,
-                buffer.len() as libc::c_long,
-            )
-        };
-        if result < 0 {
-            Err(io::Error::from_raw_os_error((-result) as i32))
-        } else {
-            Ok(result as usize)
-        }
-    }
-
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        let result = unsafe {
-            libc::syscall(
-                libc::SYS_getdents64,
-                fd,
-                buffer.as_mut_ptr(),
-                buffer.len(),
-            )
-        };
-        if result < 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(result as usize)
-        }
-    }
-}
-
-fn openat2_call(parent_fd: libc::c_int, name: &CStr, how: &OpenHow) -> io::Result<libc::c_int> {
-    #[cfg(target_arch = "x86_64")]
-    {
-        let result = unsafe {
-            raw_syscall4(
-                libc::SYS_openat2 as libc::c_long,
-                parent_fd as libc::c_long,
-                name.as_ptr() as libc::c_long,
-                how as *const OpenHow as libc::c_long,
-                mem::size_of::<OpenHow>() as libc::c_long,
-            )
-        };
-        if result < 0 {
-            Err(io::Error::from_raw_os_error((-result) as i32))
-        } else {
-            Ok(result as libc::c_int)
-        }
-    }
-
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        let result = unsafe {
-            libc::syscall(
-                libc::SYS_openat2,
-                parent_fd,
-                name.as_ptr(),
-                how as *const OpenHow,
-                mem::size_of::<OpenHow>(),
-            )
-        };
-        if result < 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(result as libc::c_int)
-        }
-    }
-}
-
-// Interrupted syscalls have not completed their operation, so retry before reporting an error.
-fn retry_interrupted<T>(mut operation: impl FnMut() -> io::Result<T>) -> io::Result<T> {
-    loop {
-        match operation() {
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            result => return result,
-        }
-    }
-}
-
-// A directory record includes its 19-byte header, one NUL-terminated name, and padding.
-// Validate only the name before that terminator; padding can contain arbitrary bytes.
-#[inline]
-fn directory_record_name(record: &[u8]) -> io::Result<&CStr> {
-    let invalid_name = || {
-        io::Error::new(io::ErrorKind::InvalidData, "invalid directory entry name")
-    };
-    if record.len() < MIN_DIRECTORY_RECORD_BYTES {
-        return Err(invalid_name());
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    let offset = 19;
-    #[cfg(target_arch = "x86_64")]
-    let offset = {
-        use std::arch::x86_64::{
-            _mm_cmpeq_epi8, _mm_loadu_si128, _mm_movemask_epi8, _mm_or_si128, _mm_set1_epi8,
-            _mm_setzero_si128,
-        };
-        // Including three header bytes lets 32-byte records use one bounded vector load.
-        let mut chunk_offset = 16;
-        let mut header_bytes = 3;
-        while record.len() - chunk_offset >= 16 {
-            // SAFETY: x86-64 guarantees SSE2, and this unaligned load stays in the record.
-            let special_bytes = unsafe {
-                let bytes = _mm_loadu_si128(record.as_ptr().add(chunk_offset).cast());
-                let terminators = _mm_cmpeq_epi8(bytes, _mm_setzero_si128());
-                let separators = _mm_cmpeq_epi8(bytes, _mm_set1_epi8(b'/' as i8));
-                (_mm_movemask_epi8(_mm_or_si128(terminators, separators)) as u32)
-                    >> header_bytes
-            };
-            if special_bytes != 0 {
-                let end = chunk_offset + header_bytes + special_bytes.trailing_zeros() as usize;
-                if end == 19 || record[end] != 0 {
-                    return Err(invalid_name());
-                }
-                // SAFETY: the first special byte is a NUL, and every load stayed in the record.
-                return Ok(unsafe { CStr::from_bytes_with_nul_unchecked(&record[19..=end]) });
-            }
-            chunk_offset += 16;
-            header_bytes = 0;
-        }
-        chunk_offset + header_bytes
-    };
-
-    for (index, byte) in record[offset..].iter().enumerate() {
-        match byte {
-            b'/' => return Err(invalid_name()),
-            0 => {
-                let end = offset + index;
-                if end == 19 {
-                    return Err(invalid_name());
-                }
-                // SAFETY: this loop stops at the first NUL within the record.
-                return Ok(unsafe { CStr::from_bytes_with_nul_unchecked(&record[19..=end]) });
-            }
-            _ => {}
-        }
-    }
-    Err(io::Error::new(io::ErrorKind::InvalidData, "unterminated directory entry"))
-}
-
+/// Lists a directory, sizing files in place. With `DIRECTORIES_ONLY` it keeps only entries that
+/// may be directories.
 fn read_directory<const APPARENT: bool, const DIRECTORIES_ONLY: bool>(
-    fd: libc::c_int,
+    fd: BorrowedFd<'_>,
     ext4_eof_cookie: bool,
     skipped_entries: &AtomicUsize,
 ) -> io::Result<DirectoryEntries> {
@@ -1293,225 +866,153 @@ fn read_directory<const APPARENT: bool, const DIRECTORIES_ONLY: bool>(
             entries: PooledDirectoryEntries::take(),
             disk_size: 0,
         };
-        let mut parallel_file_entries = false;
-        let mut file_entries = Vec::new();
-        let mut first_batch = true;
+        let DirectoryEntries { names, entries, disk_size } = &mut collected;
+        let mut files = FileBatch::default();
+        let mut sized_in_place = 0usize;
+        let mut directory = RawDir::new(fd, buffer);
 
-        loop {
-            let bytes_read = match getdents64_call(fd, buffer) {
-                Ok(bytes_read) => bytes_read,
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(error) => return Err(error),
+        while let Some(record) = directory.next() {
+            let record = match record {
+                Ok(record) => record,
+                Err(Errno::INTR) => continue,
+                Err(error) => return Err(error.into()),
             };
-            if bytes_read == 0 {
-                break;
-            }
+            // Ext4 HTree reserves these cookies for the last entry of an exhausted directory.
+            let last_entry = ext4_eof_cookie
+                && matches!(record.next_entry_cookie(), EXT4_HTREE_EOF_32BIT | EXT4_HTREE_EOF_64BIT);
+            let name = record.file_name();
+            let name_bytes = name.to_bytes();
+            let kind = match record.file_type() {
+                FileType::Directory => EntryKind::Directory,
+                FileType::Unknown => EntryKind::Unknown,
+                _ => EntryKind::Other,
+            };
 
-            if bytes_read > buffer.len() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "getdents64 returned more data than the supplied buffer",
-                ));
+            if name_bytes != b"." && name_bytes != b".." {
+                if !DIRECTORIES_ONLY && matches!(kind, EntryKind::Other) {
+                    if sized_in_place < SERIAL_FILE_LIMIT {
+                        // Narrow directories size files without retaining their names.
+                        sized_in_place += 1;
+                        match with_stat_at(fd, name, entry_size_mask::<APPARENT>(), |stat| {
+                            file_size::<APPARENT>(stat)
+                        }) {
+                            Ok(size) => add_to_total(disk_size, size)?,
+                            Err(_) => {
+                                skipped_entries.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    } else {
+                        files.push(name_bytes);
+                        if files.entries.len() >= PARALLEL_FILE_BATCH {
+                            add_to_total(disk_size, files.size::<APPARENT>(fd, skipped_entries)?)?;
+                        }
+                    }
+                } else if !DIRECTORIES_ONLY || !matches!(kind, EntryKind::Other) {
+                    let length = u16::try_from(name_bytes.len()).map_err(|_| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "directory entry name exceeds the supported length",
+                        )
+                    })?;
+                    let start = names.append_name(name_bytes, NAME_RESERVE_HINT);
+                    entries.push(
+                        DirectoryEntry {
+                            name_offset: start,
+                            name_length: length,
+                            kind,
+                        },
+                        ENTRY_RESERVE_HINT,
+                    );
+                }
             }
-            let mut estimated_entries = bytes_read / MIN_DIRECTORY_RECORD_BYTES;
-            if first_batch {
-                // The first batch includes the two dot entries, which are not retained.
-                estimated_entries = estimated_entries.saturating_sub(2);
-                parallel_file_entries = !DIRECTORIES_ONLY
-                    && estimated_entries >= PARALLEL_METADATA_ENTRY_ESTIMATE_THRESHOLD;
-                first_batch = false;
-            }
-            let final_offset = if parallel_file_entries {
-                parse_directory_batch::<APPARENT, DIRECTORIES_ONLY, true>(
-                    fd, &buffer[..bytes_read], &mut collected, &mut file_entries,
-                    estimated_entries, skipped_entries,
-                )?
-            } else {
-                parse_directory_batch::<APPARENT, DIRECTORIES_ONLY, false>(
-                    fd, &buffer[..bytes_read], &mut collected, &mut file_entries,
-                    estimated_entries, skipped_entries,
-                )?
-            };
-            // Ext4 HTree reserves these d_off values for an exhausted directory.
-            if ext4_eof_cookie
-                && matches!(final_offset, EXT4_HTREE_EOF_32BIT | EXT4_HTREE_EOF_64BIT)
-            {
+            if last_entry {
                 break;
             }
         }
-
+        if !files.entries.is_empty() {
+            add_to_total(disk_size, files.size::<APPARENT>(fd, skipped_entries)?)?;
+        }
         Ok(collected)
     })
 }
 
-// Each record is bounded before its name is inspected. Borrowed file names finish
-// their metadata work before this enumeration batch is reused.
-fn parse_directory_batch<
-    const APPARENT: bool,
-    const DIRECTORIES_ONLY: bool,
-    const PARALLEL_METADATA: bool,
->(
-    fd: libc::c_int,
-    buffer: &[u8],
-    collected: &mut DirectoryEntries,
-    file_entries: &mut Vec<DirectoryEntry>,
-    estimated_entries: usize,
-    skipped_entries: &AtomicUsize,
-) -> io::Result<i64> {
-    debug_assert!(file_entries.is_empty());
-    let bytes_read = buffer.len();
-    let DirectoryEntries { names, entries, disk_size } = collected;
-    let mut offset = 0;
-    let mut final_offset = 0;
-    while offset < bytes_read {
-        let remaining = &buffer[offset..];
-        if remaining.len() < 19 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid getdents64 record header",
-            ));
-        }
-
-        let record_length = u16::from_ne_bytes([remaining[16], remaining[17]]) as usize;
-        if record_length < 20 || record_length > remaining.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid getdents64 record length",
-            ));
-        }
-        let record = &remaining[..record_length];
-        final_offset = i64::from_ne_bytes(
-            record[8..16]
-                .try_into()
-                .expect("fixed-width directory offset"),
-        );
-
-        let kind = match record[18] {
-            libc::DT_DIR => EntryKind::Directory,
-            libc::DT_UNKNOWN => EntryKind::Unknown,
-            _ => EntryKind::Other,
-        };
-        let name = directory_record_name(record)?;
-        let name_bytes = name.to_bytes();
-        let name_length = name_bytes.len();
-
-        if name_bytes != b"." && name_bytes != b".." {
-            if !DIRECTORIES_ONLY && matches!(kind, EntryKind::Other) {
-                if PARALLEL_METADATA {
-                    if file_entries.is_empty() {
-                        file_entries.reserve(estimated_entries);
-                    }
-                    // File records borrow only this batch; the u16 record length bounds names.
-                    file_entries.push(DirectoryEntry {
-                        name_offset: offset + 19,
-                        name_length: name_length as u16,
-                        kind,
-                    });
-                    offset += record_length;
-                    continue;
-                }
-                // Narrow directories size files without retaining their names or records.
-                match with_stat_at(
-                    fd,
-                    name,
-                    entry_size_mask::<APPARENT>(),
-                    |stat| file_size::<APPARENT>(stat),
-                ) {
-                    Ok(size) => {
-                        *disk_size = disk_size.checked_add(size).ok_or_else(|| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                "directory total exceeds the supported byte-count range",
-                            )
-                        })?;
-                    }
-                    Err(_) => {
-                        skipped_entries.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-            } else if !DIRECTORIES_ONLY || !matches!(kind, EntryKind::Other) {
-                let length = u16::try_from(name_bytes.len()).map_err(|_| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "directory entry name exceeds the supported length",
-                    )
-                })?;
-                let start = names.append_name(name_bytes, bytes_read / 2);
-                entries.push(
-                    DirectoryEntry {
-                        name_offset: start,
-                        name_length: length,
-                        kind,
-                    },
-                    estimated_entries.min(MAX_CACHED_DIRECTORY_ENTRY_CAPACITY),
-                );
-            }
-        }
-        offset += record_length;
-    }
-    if PARALLEL_METADATA && !file_entries.is_empty() {
-        let batch_size = file_batch_size::<APPARENT>(
-            fd,
-            buffer,
-            &file_entries,
-            skipped_entries,
-        )?;
-        *disk_size = disk_size.checked_add(batch_size).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "directory total exceeds the supported byte-count range",
-            )
-        })?;
-        file_entries.clear();
-    }
-    Ok(final_offset)
+fn add_to_total(total: &mut u64, size: u64) -> io::Result<()> {
+    *total = total.checked_add(size).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "directory total exceeds the supported byte-count range",
+        )
+    })?;
+    Ok(())
 }
 
-fn file_batch_size<const APPARENT: bool>(
-    fd: libc::c_int,
-    names: &[u8],
-    entries: &[DirectoryEntry],
-    skipped_entries: &AtomicUsize,
-) -> io::Result<u64> {
-    entries
-        .par_iter()
-        .map(|entry| {
-            match with_stat_at(
-                fd,
-                entry.as_c_str(names),
-                entry_size_mask::<APPARENT>(),
-                |stat| file_size::<APPARENT>(stat),
-            ) {
-                Ok(size) => Ok(size),
-                Err(_) => {
-                    skipped_entries.fetch_add(1, Ordering::Relaxed);
-                    Ok(0)
+/// Names of files in a wide directory, gathered so their sizes can be read in parallel.
+#[derive(Default)]
+struct FileBatch {
+    names: Vec<u8>,
+    entries: Vec<DirectoryEntry>,
+}
+
+impl FileBatch {
+    fn push(&mut self, name: &[u8]) {
+        self.entries.push(DirectoryEntry {
+            name_offset: self.names.len(),
+            name_length: name.len() as u16,
+            kind: EntryKind::Other,
+        });
+        self.names.extend_from_slice(name);
+        self.names.push(0);
+    }
+
+    /// Sizes and forgets the gathered files.
+    fn size<const APPARENT: bool>(
+        &mut self,
+        fd: BorrowedFd<'_>,
+        skipped_entries: &AtomicUsize,
+    ) -> io::Result<u64> {
+        let total = self
+            .entries
+            .par_iter()
+            .map(|entry| {
+                match with_stat_at(fd, entry.as_c_str(&self.names), entry_size_mask::<APPARENT>(), |stat| {
+                    file_size::<APPARENT>(stat)
+                }) {
+                    Ok(size) => Ok(size),
+                    Err(_) => {
+                        skipped_entries.fetch_add(1, Ordering::Relaxed);
+                        Ok(0)
+                    }
                 }
-            }
-        })
-        .try_reduce(
-            || 0u64,
-            |left, right| {
-                left.checked_add(right).ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "directory total exceeds the supported byte-count range",
-                    )
-                })
-            },
-        )
+            })
+            .try_reduce(
+                || 0u64,
+                |left, right| {
+                    left.checked_add(right).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "directory total exceeds the supported byte-count range",
+                        )
+                    })
+                },
+            );
+        self.entries.clear();
+        self.names.clear();
+        total
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        retry_interrupted, scan_entry_size, DirectoryEntry, DirectoryNames, EntryKind,
-        DIRECTORY_ENTRY_POOL, MAX_CACHED_DIRECTORY_ENTRY_CAPACITY,
+        scan_entry_size, DirectoryEntry, DirectoryNames, EntryKind, DIRECTORY_ENTRY_POOL,
+        MAX_CACHED_DIRECTORY_ENTRY_CAPACITY,
     };
-    use std::cell::Cell;
+    use crate::fsutil;
     use std::fs::{self, File};
     use std::io::{self, Write};
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    use std::mem::MaybeUninit;
+    use std::os::fd::AsFd;
+    use std::os::unix::fs::MetadataExt;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1544,91 +1045,6 @@ mod tests {
 
     fn allocated_size(path: &std::path::Path) -> io::Result<u64> {
         Ok(fs::symlink_metadata(path)?.blocks() * 512)
-    }
-
-    #[test]
-    fn retries_interrupted_syscalls() {
-        let attempts = Cell::new(0);
-        let result = retry_interrupted(|| {
-            attempts.set(attempts.get() + 1);
-            if attempts.get() == 1 {
-                Err(io::Error::from(io::ErrorKind::Interrupted))
-            } else {
-                Ok(17)
-            }
-        });
-
-        assert_eq!(result.unwrap(), 17);
-        assert_eq!(attempts.get(), 2);
-    }
-
-    #[test]
-    fn directory_record_names_respect_terminators_record_bounds_and_raw_bytes() {
-        for length in 1..=255 {
-            let record_length = (19 + length + 1 + 7) & !7;
-            let mut record = vec![b'/'; record_length];
-            let name = (0..length)
-                .map(|index| if index % 3 == 0 { 0xff } else { b'x' })
-                .collect::<Vec<_>>();
-            record[19..19 + length].copy_from_slice(&name);
-            record[19 + length] = 0;
-            assert_eq!(super::directory_record_name(&record).unwrap().to_bytes(), name);
-
-            record[19 + length] = b'x';
-            assert!(super::directory_record_name(&record).is_err());
-            record[19 + length] = 0;
-            for slash_offset in 0..length {
-                record[19 + slash_offset] = b'/';
-                assert!(super::directory_record_name(&record).is_err());
-                record[19 + slash_offset] = name[slash_offset];
-            }
-        }
-        assert!(super::directory_record_name(&[0; 24]).is_err());
-    }
-
-    #[test]
-    fn root_directory_batches_retain_only_child_candidates_and_reject_truncated_records() {
-        let mut buffer = Vec::new();
-        let mut record_boundaries = vec![0];
-        for (name, kind) in [
-            (b".".as_slice(), libc::DT_DIR),
-            (b"..".as_slice(), libc::DT_DIR),
-            (b"kept".as_slice(), libc::DT_DIR),
-            (b"ignored".as_slice(), libc::DT_REG),
-            (b"unknown".as_slice(), libc::DT_UNKNOWN),
-        ] {
-            let length = (19 + name.len() + 1 + 7) & !7;
-            let start = buffer.len();
-            buffer.resize(start + length, 0);
-            buffer[start + 8..start + 16].copy_from_slice(&super::EXT4_HTREE_EOF_64BIT.to_ne_bytes());
-            buffer[start + 16..start + 18].copy_from_slice(&(length as u16).to_ne_bytes());
-            buffer[start + 18] = kind;
-            buffer[start + 19..start + 19 + name.len()].copy_from_slice(name);
-            record_boundaries.push(buffer.len());
-        }
-        let skipped_entries = AtomicUsize::new(0);
-        for length in 0..=buffer.len() {
-            let mut collected = super::DirectoryEntries {
-                names: DirectoryNames::new(),
-                entries: super::PooledDirectoryEntries::take(),
-                disk_size: 0,
-            };
-            let mut files = Vec::new();
-            let result = super::parse_directory_batch::<true, true, false>(
-                -1, &buffer[..length], &mut collected, &mut files, 5, &skipped_entries,
-            );
-            assert_eq!(result.is_ok(), record_boundaries.contains(&length));
-            assert_eq!(collected.disk_size, 0);
-            assert!(files.is_empty());
-            if length == buffer.len() {
-                assert_eq!(result.unwrap(), super::EXT4_HTREE_EOF_64BIT);
-                let names = collected.entries.iter()
-                    .map(|entry| entry.as_c_str(collected.names.as_slice()).to_bytes())
-                    .collect::<Vec<_>>();
-                assert_eq!(names, [b"kept".as_slice(), b"unknown".as_slice()]);
-            }
-        }
-        assert_eq!(skipped_entries.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -1685,16 +1101,13 @@ mod tests {
         nested.write_all(b"abc")?;
         let mut file = File::create(temporary.0.join("file"))?;
         file.write_all(b"xy")?;
-        let root = fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
-            .open(&temporary.0)?;
+        let root = fsutil::open_directory(&temporary.0)?;
         let names = b"file\0child\0";
         let skipped_entries = AtomicUsize::new(0);
         let mount_boundaries = AtomicUsize::new(0);
 
         let file_size = scan_entry_size::<true>(
-            &root,
+            root.as_fd(),
             names,
             DirectoryEntry {
                 name_offset: 0,
@@ -1709,7 +1122,7 @@ mod tests {
         assert_eq!(file_size, 2);
 
         let child_size = scan_entry_size::<true>(
-            &root,
+            root.as_fd(),
             names,
             DirectoryEntry {
                 name_offset: 5,
@@ -1730,17 +1143,17 @@ mod tests {
     #[test]
     fn directory_buffer_leases_preserve_outer_bytes_during_nested_enumeration() {
         super::DirectoryBuffer::with(|outer| {
-            outer[0] = 41;
+            outer[0] = MaybeUninit::new(41);
             let outer_pointer = outer.as_ptr();
             super::DirectoryBuffer::with(|nested| {
                 assert_ne!(nested.as_ptr(), outer_pointer);
-                nested[0] = 73;
-                assert_eq!(outer[0], 41);
+                nested[0] = MaybeUninit::new(73);
+                assert_eq!(unsafe { outer[0].assume_init() }, 41);
             });
-            assert_eq!(outer[0], 41);
+            assert_eq!(unsafe { outer[0].assume_init() }, 41);
         });
         super::DirectoryBuffer::with(|reused| {
-            assert_eq!(reused[0], 73);
+            assert_eq!(unsafe { reused[0].assume_init() }, 73);
             assert_eq!(reused.len(), super::DIRECTORY_BUFFER_BYTES);
         });
     }
@@ -1753,7 +1166,7 @@ mod tests {
         let directory = File::open(&temporary.0)?;
         let skipped_entries = AtomicUsize::new(0);
         let result = super::read_directory::<true, false>(
-            std::os::fd::AsRawFd::as_raw_fd(&directory),
+            directory.as_fd(),
             false,
             &skipped_entries,
         )?;
@@ -1768,7 +1181,7 @@ mod tests {
     fn sizes_wide_file_batches_without_retaining_file_records() -> io::Result<()> {
         let temporary = TemporaryDirectory::new()?;
         let mut expected_allocated = 0;
-        for index in 0..160 {
+        for index in 0..(super::SERIAL_FILE_LIMIT + 160) {
             let path = temporary.0.join(format!("file-{index:04}"));
             fs::write(&path, b"batch")?;
             expected_allocated += allocated_size(&path)?;
@@ -1776,7 +1189,7 @@ mod tests {
         let directory = File::open(&temporary.0)?;
         let skipped_entries = AtomicUsize::new(0);
         let result = super::read_directory::<false, false>(
-            std::os::fd::AsRawFd::as_raw_fd(&directory),
+            directory.as_fd(),
             false,
             &skipped_entries,
         )?;

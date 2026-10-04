@@ -2,7 +2,8 @@ use fdu_core::{
     DirectoryToken, EntryType, NodeId, NodeState, ScanEvent, Tree,
 };
 use fdu_scan::{open_root, scan, start_indexed_scan, EntryBatch, RootAnchor, ScanOptions};
-use std::ffi::{CString, OsString};
+use std::collections::HashSet;
+use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -45,15 +46,49 @@ struct IndexedResult {
     directory_finish_batch_sizes: Vec<usize>,
 }
 
+/// Applies a completion the way the browser does, and checks the order the scanner promises:
+/// everything inside a directory has been reported, and finished, before the directory finishes.
+fn finish_directory(
+    tree: &mut Tree,
+    tokens: &[Option<NodeId>],
+    finished: &mut HashSet<DirectoryToken>,
+    directory: DirectoryToken,
+    complete: bool,
+) -> io::Result<()> {
+    let out_of_order = |message: &str| io::Error::new(io::ErrorKind::InvalidData, message.to_owned());
+    let node = tokens
+        .get(directory.0 as usize)
+        .copied()
+        .flatten()
+        .ok_or_else(|| out_of_order("a directory finished before its entry was reported"))?;
+    if !finished.insert(directory) {
+        return Err(out_of_order("a directory finished twice"));
+    }
+    for child in tree.children(node) {
+        if tree.record(child).unwrap().entry_type == EntryType::Directory
+            && tree.record(child).unwrap().state == NodeState::Scanning
+        {
+            return Err(out_of_order("a directory finished before a directory inside it"));
+        }
+    }
+    if complete && tree.record(node).unwrap().state == NodeState::Scanning {
+        tree.set_state(node, NodeState::Complete);
+    } else if !complete {
+        tree.mark_incomplete_to_root(node);
+    }
+    Ok(())
+}
+
 fn scan_to_tree(root: RootAnchor, capacity: usize) -> io::Result<IndexedResult> {
     let mut tree = Tree::new(&root.name, root.identity, root.link_count)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "root index name too long"))?;
     let mut tokens = vec![Some(tree.root())];
+    let mut finished = HashSet::new();
     let (sender, receiver) = mpsc::sync_channel(capacity);
     let (batch_sender, batch_receiver) = mpsc::sync_channel(capacity);
     for _ in 0..capacity {
         batch_sender
-            .send(EntryBatch::with_capacity(DirectoryToken(0), BATCH_SIZE, BATCH_SIZE * 24))
+            .send(EntryBatch::with_capacity(BATCH_SIZE, BATCH_SIZE * 24))
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "batch pool closed"))?;
     }
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -72,14 +107,20 @@ fn scan_to_tree(root: RootAnchor, capacity: usize) -> io::Result<IndexedResult> 
             }
             ScanEvent::Entries(mut batch) => {
                 batches.push(batch.entries.len());
-                let parent = tokens
-                    .get(batch.directory.0 as usize)
-                    .copied()
-                    .flatten()
-                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "unknown directory token"))?;
-                let mut apparent = 0u64;
-                let mut allocated = 0u64;
+                // Entries of several directories share a batch; totals are added per run of
+                // entries with the same parent.
+                let mut run: Option<(NodeId, u64, u64)> = None;
                 for entry in &batch.entries {
+                    let parent = tokens
+                        .get(entry.parent.0 as usize)
+                        .copied()
+                        .flatten()
+                        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "unknown directory token"))?;
+                    if run.is_some_and(|(node, _, _)| node != parent) {
+                        let (node, apparent, allocated) = run.take().unwrap();
+                        assert!(tree.add_to_ancestors(node, apparent, allocated));
+                    }
+                    let (_, apparent, allocated) = run.get_or_insert((parent, 0, 0));
                     let name = &batch.names[entry.name.start as usize..entry.name.end as usize];
                     let id = tree
                         .append(
@@ -100,10 +141,10 @@ fn scan_to_tree(root: RootAnchor, capacity: usize) -> io::Result<IndexedResult> 
                         tokens[token.0 as usize] = Some(id);
                     }
                     if entry.entry_type != EntryType::Directory && entry.state == NodeState::Complete {
-                        apparent = apparent.checked_add(entry.apparent_bytes).ok_or_else(|| {
+                        *apparent = apparent.checked_add(entry.apparent_bytes).ok_or_else(|| {
                             io::Error::new(io::ErrorKind::InvalidData, "test apparent overflow")
                         })?;
-                        allocated = allocated.checked_add(entry.allocated_bytes).ok_or_else(|| {
+                        *allocated = allocated.checked_add(entry.allocated_bytes).ok_or_else(|| {
                             io::Error::new(io::ErrorKind::InvalidData, "test allocated overflow")
                         })?;
                     }
@@ -116,31 +157,20 @@ fn scan_to_tree(root: RootAnchor, capacity: usize) -> io::Result<IndexedResult> 
                         _ => {}
                     }
                 }
-                assert!(tree.add_to_ancestors(parent, apparent, allocated));
-                batch.entries.clear();
-                batch.names.clear();
+                if let Some((node, apparent, allocated)) = run {
+                    assert!(tree.add_to_ancestors(node, apparent, allocated));
+                }
+                batch.clear();
                 let _ = batch_sender.try_send(batch);
             }
             ScanEvent::DirectoryFinished { directory, complete } => {
                 directory_finish_batch_sizes.push(1);
-                if let Some(node) = tokens.get(directory.0 as usize).copied().flatten() {
-                    if complete && tree.record(node).unwrap().state == NodeState::Scanning {
-                        tree.set_state(node, NodeState::Complete);
-                    } else if !complete {
-                        tree.mark_incomplete_to_root(node);
-                    }
-                }
+                finish_directory(&mut tree, &tokens, &mut finished, directory, complete)?;
             }
             ScanEvent::DirectoriesFinished(directories) => {
                 directory_finish_batch_sizes.push(directories.len());
                 for (directory, complete) in directories {
-                    if let Some(node) = tokens.get(directory.0 as usize).copied().flatten() {
-                        if complete && tree.record(node).unwrap().state == NodeState::Scanning {
-                            tree.set_state(node, NodeState::Complete);
-                        } else if !complete {
-                            tree.mark_incomplete_to_root(node);
-                        }
-                    }
+                    finish_directory(&mut tree, &tokens, &mut finished, directory, complete)?;
                 }
             }
             ScanEvent::DirectoryExcluded { directory, reason } => {
@@ -216,11 +246,8 @@ fn indexed_policy_keeps_both_size_modes_and_entry_identity() -> io::Result<()> {
     fs::create_dir(&parallel)?;
     fs::write(&parallel_payload, b"parallel branch data")?;
 
-    let mut fifo_name = CString::new(outer.as_os_str().as_bytes()).unwrap().into_bytes();
-    fifo_name.push(b'/');
-    fifo_name.extend_from_slice(b"fifo");
-    let fifo = CString::new(fifo_name).unwrap();
-    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+    let status = std::process::Command::new("mkfifo").arg(outer.join("fifo")).status()?;
+    assert!(status.success());
 
     let root = open_root(&supplied)?;
     let result = scan_to_tree(root, 2)?;
@@ -371,7 +398,7 @@ fn indexed_worker_publishes_wide_directory_chunks_before_completion() -> io::Res
     let (sender, receiver) = mpsc::sync_channel(1);
     let (batch_sender, batch_receiver) = mpsc::sync_channel(1);
     batch_sender
-        .send(EntryBatch::with_capacity(DirectoryToken(0), BATCH_SIZE, BATCH_SIZE * 24))
+        .send(EntryBatch::with_capacity(BATCH_SIZE, BATCH_SIZE * 24))
         .unwrap();
     let cancelled = Arc::new(AtomicBool::new(false));
     let worker = start_indexed_scan(root, sender, batch_receiver, Arc::clone(&cancelled));
@@ -399,7 +426,7 @@ fn dropping_a_full_scan_queue_releases_a_blocked_worker() -> io::Result<()> {
     let (sender, receiver) = mpsc::sync_channel(1);
     let (batch_sender, batch_receiver) = mpsc::sync_channel(1);
     batch_sender
-        .send(EntryBatch::with_capacity(DirectoryToken(0), BATCH_SIZE, BATCH_SIZE * 24))
+        .send(EntryBatch::with_capacity(BATCH_SIZE, BATCH_SIZE * 24))
         .unwrap();
     let cancelled = Arc::new(AtomicBool::new(false));
     let worker = start_indexed_scan(root, sender, batch_receiver, Arc::clone(&cancelled));
@@ -416,32 +443,21 @@ struct Mount(PathBuf);
 
 #[cfg(target_os = "linux")]
 impl Mount {
-    fn new(source: &str, target: &Path, fstype: Option<&str>, flags: libc::c_ulong) -> io::Result<Self> {
-        let source = CString::new(source).unwrap();
-        let target_c = CString::new(target.as_os_str().as_bytes()).unwrap();
-        let fstype = fstype.map(|value| CString::new(value).unwrap());
-        let result = unsafe {
-            libc::mount(
-                source.as_ptr(),
-                target_c.as_ptr(),
-                fstype.as_ref().map_or(std::ptr::null(), |value| value.as_ptr()),
-                flags,
-                std::ptr::null(),
-            )
-        };
-        if result == 0 {
-            Ok(Self(target.to_owned()))
-        } else {
-            Err(io::Error::last_os_error())
-        }
+    fn tmpfs(target: &Path) -> io::Result<Self> {
+        rustix::mount::mount("tmpfs", target, "tmpfs", rustix::mount::MountFlags::empty(), None)?;
+        Ok(Self(target.to_owned()))
+    }
+
+    fn bind(source: &Path, target: &Path) -> io::Result<Self> {
+        rustix::mount::mount_bind(source, target)?;
+        Ok(Self(target.to_owned()))
     }
 }
 
 #[cfg(target_os = "linux")]
 impl Drop for Mount {
     fn drop(&mut self) {
-        let target = CString::new(self.0.as_os_str().as_bytes()).unwrap();
-        unsafe { libc::umount2(target.as_ptr(), libc::MNT_DETACH) };
+        let _ = rustix::mount::unmount(&self.0, rustix::mount::UnmountFlags::DETACH);
     }
 }
 
@@ -456,14 +472,14 @@ fn mounts_and_bind_mounts_below_the_root_are_boundaries_without_children() -> io
         fs::create_dir(directory)?;
     }
     fs::write(plain.join("payload"), b"counted once")?;
-    let _tmpfs = match Mount::new("tmpfs", &tmpfs, Some("tmpfs"), 0) {
+    let _tmpfs = match Mount::tmpfs(&tmpfs) {
         Ok(mount) => mount,
         Err(error) => {
             eprintln!("skipping mount boundary test: cannot mount ({error})");
             return Ok(());
         }
     };
-    let _bound = Mount::new(plain.to_str().unwrap(), &bound, None, libc::MS_BIND)?;
+    let _bound = Mount::bind(&plain, &bound)?;
     fs::write(tmpfs.join("hidden"), b"on another filesystem")?;
 
     let result = scan_to_tree(open_root(&temp.0)?, 4)?;
@@ -489,4 +505,81 @@ fn mounts_and_bind_mounts_below_the_root_are_boundaries_without_children() -> io
     let summary = scan(&ScanOptions { path: temp.0.clone(), apparent: true })?;
     assert_eq!(summary.mount_boundaries, 2);
     Ok(())
+}
+
+/// A tree with deep chains, wide fan-outs of tiny directories, and wide directories of files,
+/// so scans split into many tasks of very different sizes. Returns the entry count.
+fn build_mixed_tree(root: &Path) -> io::Result<usize> {
+    let mut entries = 0;
+    let mut create_dir = |path: &Path| -> io::Result<()> {
+        fs::create_dir(path)?;
+        entries += 1;
+        Ok(())
+    };
+    let mut files = 0;
+    let mut write = |path: &Path| -> io::Result<()> {
+        fs::write(path, b"x")?;
+        files += 1;
+        Ok(())
+    };
+    for top in 0..12 {
+        let top_dir = root.join(format!("top-{top:02}"));
+        create_dir(&top_dir)?;
+        // A deep chain.
+        let mut chain = top_dir.join("chain");
+        create_dir(&chain)?;
+        for level in 0..7 {
+            chain = chain.join(format!("level-{level}"));
+            create_dir(&chain)?;
+            write(&chain.join("file"))?;
+        }
+        // A fan-out of small directories.
+        let fan = top_dir.join("fan");
+        create_dir(&fan)?;
+        for branch in 0..30 {
+            let branch_dir = fan.join(format!("branch-{branch:02}"));
+            create_dir(&branch_dir)?;
+            for leaf in 0..2 {
+                write(&branch_dir.join(format!("leaf-{leaf}")))?;
+            }
+        }
+        // A wide directory.
+        let wide = top_dir.join("wide");
+        create_dir(&wide)?;
+        for file in 0..150 {
+            write(&wide.join(format!("file-{file:03}")))?;
+        }
+    }
+    Ok(entries + files)
+}
+
+#[test]
+fn concurrent_scans_all_complete_with_every_entry() -> io::Result<()> {
+    let temp = TempDir::new()?;
+    let expected = build_mixed_tree(&temp.0)?;
+    // Raise FDU_STRESS_SCANS for a soak; every scan runs its own worker pool, so even the default
+    // oversubscribes the machine.
+    let scans_per_thread = std::env::var("FDU_STRESS_SCANS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(12);
+    std::thread::scope(|scope| {
+        let threads = (0..6)
+            .map(|_| {
+                scope.spawn(|| -> io::Result<()> {
+                    for _ in 0..scans_per_thread {
+                        let result = scan_to_tree(open_root(&temp.0)?, 4)?;
+                        assert!(result.errors.is_empty(), "scanner errors: {:?}", result.errors);
+                        assert_eq!(result.tree.len(), expected + 1, "entries plus the root");
+                        assert_eq!(result.tree.record(result.tree.root()).unwrap().state, NodeState::Complete);
+                    }
+                    Ok(())
+                })
+            })
+            .collect::<Vec<_>>();
+        for thread in threads {
+            thread.join().expect("stress thread does not panic")?;
+        }
+        Ok(())
+    })
 }

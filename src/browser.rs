@@ -10,7 +10,7 @@ use fdu_tui::{
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -27,7 +27,9 @@ const SCAN_DRAIN_BUDGET: Duration = Duration::from_millis(4);
 const SCAN_DRAIN_CLOCK_INTERVAL: usize = 32;
 const MAX_DELETE_EVENTS_PER_TICK: usize = 32;
 const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(20);
-const SCAN_INPUT_POLL_INTERVAL: Duration = Duration::from_millis(1);
+/// While scanning, an idle tick waits this long for the next scan event rather than for input,
+/// so the scanner is never left blocked on a full channel while the interface sleeps.
+const SCAN_EVENT_WAIT: Duration = Duration::from_millis(1);
 const SCAN_REDRAW_INTERVAL: Duration = Duration::from_millis(100);
 
 enum AppPhase {
@@ -59,11 +61,7 @@ impl ScanRun {
         let (sender, receiver) = mpsc::sync_channel(SCAN_EVENT_CHANNEL_CAPACITY);
         let (batch_sender, batch_receiver) = mpsc::sync_channel(SCAN_BATCH_POOL_CAPACITY);
         for _ in 0..SCAN_BATCH_POOL_CAPACITY {
-            let batch = fdu_core::EntryBatch::with_capacity(
-                DirectoryToken(0),
-                SCAN_BATCH_CAPACITY,
-                SCAN_BATCH_CAPACITY * 24,
-            );
+            let batch = fdu_core::EntryBatch::with_capacity(SCAN_BATCH_CAPACITY, SCAN_BATCH_CAPACITY * 24);
             if batch_sender.send(batch).is_err() {
                 break;
             }
@@ -86,7 +84,7 @@ impl ScanRun {
     }
 
     fn return_batch(&self, mut batch: fdu_core::EntryBatch) {
-        batch.clear_for_directory(DirectoryToken(0));
+        batch.clear();
         if let Some(sender) = &self.returned_batches {
             let _ = sender.try_send(batch);
         }
@@ -297,6 +295,18 @@ struct BrowserProfile {
     pending_input: Option<Instant>,
     input_render_micros: Vec<u64>,
     queue_metrics: ScanQueueMetrics,
+    /// Main-thread time by activity, to show what paces the interface during a scan.
+    busy: BusyTime,
+}
+
+#[derive(Default)]
+struct BusyTime {
+    entry_batches: Duration,
+    entry_batch_count: u64,
+    other_events: Duration,
+    draws: Duration,
+    draw_count: u64,
+    waiting_for_input: Duration,
 }
 
 impl BrowserProfile {
@@ -312,7 +322,13 @@ impl BrowserProfile {
             pending_input: None,
             input_render_micros: Vec::new(),
             queue_metrics,
+            busy: BusyTime::default(),
         }
+    }
+
+    /// Starts timing an activity when profiling is on.
+    fn timer(&self) -> Option<Instant> {
+        self.enabled.then(Instant::now)
     }
 
     fn reset_scan_queue(&mut self, queue_metrics: ScanQueueMetrics) {
@@ -358,7 +374,7 @@ impl BrowserProfile {
         let entries = model.indexed_entries;
         let arena_bytes = model.tree.retained_arena_bytes();
         eprintln!(
-            "fdu-profile elapsed_ms={} initial_scan_settled_ms={} first_render_ms={} first_usable_listing_ms={} entries={} tree_arena_bytes={} tree_arena_bytes_per_entry={:.2} scan_event_queue_high_water={} input_render_samples={} input_render_p50_us={} input_render_max_us={} delete_worker_ms={} delete_apply_ms={}",
+            "fdu-profile elapsed_ms={} initial_scan_settled_ms={} first_render_ms={} first_usable_listing_ms={} entries={} tree_arena_bytes={} tree_arena_bytes_per_entry={:.2} scan_event_queue_high_water={} input_render_samples={} input_render_p50_us={} input_render_max_us={} delete_worker_ms={} delete_apply_ms={} busy_entry_batches_ms={} entry_batches={} busy_other_events_ms={} busy_draw_ms={} draws={} waiting_for_input_ms={}",
             self.started.elapsed().as_millis(),
             duration_ms(self.initial_scan_settled),
             duration_ms(self.first_render),
@@ -372,6 +388,12 @@ impl BrowserProfile {
             maximum.unwrap_or(0),
             duration_ms(self.delete_worker),
             duration_ms(self.delete_apply),
+            self.busy.entry_batches.as_millis(),
+            self.busy.entry_batch_count,
+            self.busy.other_events.as_millis(),
+            self.busy.draws.as_millis(),
+            self.busy.draw_count,
+            self.busy.waiting_for_input.as_millis(),
         );
     }
 }
@@ -530,86 +552,124 @@ impl BrowserModel {
     }
 
     fn apply_entry_batch(&mut self, mut batch: fdu_core::EntryBatch) -> fdu_core::EntryBatch {
-        let Some(parent) = self.node_for_token(batch.directory) else {
-            self.message = Some("Scanner sent an entry batch for an unknown directory.".to_owned());
-            self.mark_incomplete_chain(self.tree.root());
-            return batch;
-        };
-        let mut new_ids = Vec::with_capacity(batch.entries.len());
-        let mut apparent_batch = 0u64;
-        let mut allocated_batch = 0u64;
-        let mut totals_fit = true;
-        for entry in &batch.entries {
-            let Some(name) = batch.names.get(entry.name.start as usize..entry.name.end as usize) else {
-                self.message = Some("Scanner sent an invalid filename range.".to_owned());
-                self.mark_incomplete_chain(parent);
-                continue;
-            };
-            let Some(tree) = Arc::get_mut(&mut self.tree) else {
+        // Entries of several directories share a batch, each run of one directory's entries
+        // being contiguous. Totals are added once per run, after the entries are appended.
+        struct Run {
+            parent: NodeId,
+            apparent: u64,
+            allocated: u64,
+            fits: bool,
+            problem: bool,
+        }
+        let mut runs: Vec<Run> = Vec::new();
+        let mut run_token = None;
+        let mut new_ids = Vec::new();
+        let mut incomplete_entries = 0usize;
+        let mut excluded_entries = 0usize;
+        let mut unknown_directory = false;
+        let mut invalid_range = false;
+        let mut exhausted = false;
+        let current_directory = self.current_directory;
+        match Arc::get_mut(&mut self.tree) {
+            None => {
                 self.message = Some("Index became shared while scanning was active.".to_owned());
-                totals_fit = false;
-                break;
-            };
-            let id = match tree.append(
-                parent,
-                name,
-                entry.entry_type,
-                entry.identity,
-                entry.link_count,
-                entry.apparent_bytes,
-                entry.allocated_bytes,
-                entry.state,
-            ) {
-                Some(id) => id,
-                None => {
-                    self.message = Some("Index exhausted the supported number of entries.".to_owned());
-                    self.mark_incomplete_chain(parent);
-                    break;
-                }
-            };
-            new_ids.push(id);
-            if let Some(token) = entry.directory_token {
-                let index = token.0 as usize;
-                if self.token_nodes.len() <= index {
-                    self.token_nodes.resize(index + 1, None);
-                }
-                self.token_nodes[index] = Some(id);
+                // Nothing was appended, so nothing is added to any total.
             }
-            match entry.state {
-                NodeState::Incomplete => {
-                    self.bump_incomplete(1);
-                    self.mark_incomplete_chain(parent);
-                }
-                NodeState::Excluded(reason) => {
-                    self.bump_exclusion(reason, 1);
-                    self.mark_incomplete_chain(parent);
-                }
-                _ => {}
-            }
-            if entry.entry_type != EntryType::Directory && entry.state == NodeState::Complete {
-                match (
-                    apparent_batch.checked_add(entry.apparent_bytes),
-                    allocated_batch.checked_add(entry.allocated_bytes),
-                ) {
-                    (Some(apparent), Some(allocated)) => {
-                        apparent_batch = apparent;
-                        allocated_batch = allocated;
+            Some(tree) => {
+                for entry in &batch.entries {
+                    if run_token != Some(entry.parent) {
+                        let parent = self.token_nodes.get(entry.parent.0 as usize).copied().flatten();
+                        let Some(parent) = parent else {
+                            unknown_directory = true;
+                            run_token = None;
+                            continue;
+                        };
+                        run_token = Some(entry.parent);
+                        runs.push(Run { parent, apparent: 0, allocated: 0, fits: true, problem: false });
                     }
-                    _ => totals_fit = false,
+                    let run = runs.last_mut().expect("a run exists for the current directory");
+                    let Some(name) = batch.names.get(entry.name.start as usize..entry.name.end as usize) else {
+                        invalid_range = true;
+                        run.problem = true;
+                        continue;
+                    };
+                    let Some(id) = tree.append(
+                        run.parent,
+                        name,
+                        entry.entry_type,
+                        entry.identity,
+                        entry.link_count,
+                        entry.apparent_bytes,
+                        entry.allocated_bytes,
+                        entry.state,
+                    ) else {
+                        exhausted = true;
+                        run.problem = true;
+                        break;
+                    };
+                    if run.parent == current_directory {
+                        new_ids.push(id);
+                    }
+                    if let Some(token) = entry.directory_token {
+                        let index = token.0 as usize;
+                        if self.token_nodes.len() <= index {
+                            self.token_nodes.resize(index + 1, None);
+                        }
+                        self.token_nodes[index] = Some(id);
+                    }
+                    match entry.state {
+                        NodeState::Incomplete => {
+                            incomplete_entries += 1;
+                            run.problem = true;
+                        }
+                        NodeState::Excluded(_) => {
+                            excluded_entries += 1;
+                            run.problem = true;
+                        }
+                        _ => {}
+                    }
+                    if entry.entry_type != EntryType::Directory && entry.state == NodeState::Complete {
+                        match (
+                            run.apparent.checked_add(entry.apparent_bytes),
+                            run.allocated.checked_add(entry.allocated_bytes),
+                        ) {
+                            (Some(apparent), Some(allocated)) => {
+                                run.apparent = apparent;
+                                run.allocated = allocated;
+                            }
+                            _ => run.fits = false,
+                        }
+                    }
                 }
             }
         }
-        self.indexed_entries = self.tree.len().saturating_sub(1);
-        if totals_fit {
-            if !self.add_batch_totals(parent, apparent_batch, allocated_batch) {
-                self.message = Some("A directory total exceeded the supported byte range.".to_owned());
-                self.mark_incomplete_chain(parent);
-            }
-        } else {
-            self.message = Some("A directory total exceeded the supported byte range.".to_owned());
-            self.mark_incomplete_chain(parent);
+        if unknown_directory {
+            self.message = Some("Scanner sent entries for an unknown directory.".to_owned());
+            self.mark_incomplete_chain(self.tree.root());
         }
-        if parent == self.current_directory {
+        if invalid_range {
+            self.message = Some("Scanner sent an invalid filename range.".to_owned());
+        }
+        if exhausted {
+            self.message = Some("Index exhausted the supported number of entries.".to_owned());
+        }
+        self.bump_incomplete(incomplete_entries);
+        self.exclusions = self.exclusions.saturating_add(excluded_entries);
+        self.indexed_entries = self.tree.len().saturating_sub(1);
+        for run in &runs {
+            if run.problem {
+                self.mark_incomplete_chain(run.parent);
+            }
+            // Directories add nothing to their ancestors' totals, so a run of them skips the walk.
+            let added = !run.fits
+                || (run.apparent == 0 && run.allocated == 0)
+                || self.add_batch_totals(run.parent, run.apparent, run.allocated);
+            if !run.fits || !added {
+                self.message = Some("A directory total exceeded the supported byte range.".to_owned());
+                self.mark_incomplete_chain(run.parent);
+            }
+        }
+        if !new_ids.is_empty() {
             self.listing.extend(new_ids.iter().copied());
             for id in new_ids {
                 if self.filter_matches(id) {
@@ -623,31 +683,14 @@ impl BrowserModel {
                 self.refresh_cursor_index();
             }
         }
-        batch.entries.clear();
-        batch.names.clear();
+        batch.clear();
         batch
     }
 
+    /// Adds a batch's bytes to every ancestor; false when a total would overflow, in which case
+    /// the tree has already marked those ancestors incomplete.
     fn add_batch_totals(&mut self, parent: NodeId, apparent: u64, allocated: u64) -> bool {
-        let mut current = Some(parent);
-        while let Some(node) = current {
-            let Some(record) = self.tree.record(node) else {
-                return false;
-            };
-            if record.apparent_bytes.checked_add(apparent).is_none()
-                || record.allocated_bytes.checked_add(allocated).is_none()
-            {
-                return false;
-            }
-            current = record.parent();
-        }
-        let Some(tree) = Arc::get_mut(&mut self.tree) else {
-            return false;
-        };
-        if !tree.add_to_ancestors(parent, apparent, allocated) {
-            return false;
-        }
-        true
+        Arc::get_mut(&mut self.tree).is_some_and(|tree| tree.add_to_ancestors(parent, apparent, allocated))
     }
 
     fn handle_intent(&mut self, intent: Intent, phase: Phase) -> (Action, bool) {
@@ -1610,23 +1653,22 @@ pub fn run(path: std::path::PathBuf, read_only: bool, apparent: bool) -> Result<
     let mut last_draw = Instant::now() - SCAN_REDRAW_INTERVAL;
     let mut draw_pending = true;
     let mut first_live_listing_directory = None;
-    // Set when a tick left scan events unread, so the next one does not wait for input.
-    let mut scan_backlog = false;
     loop {
         let text_input = matches!(&model.dialog, DialogState::Filter(_));
         // The scanner feeds events through a small bounded channel, so a long
         // idle wait here would cap how fast scanning can run. Deletion reports
         // progress without blocking, so it can wait the usual interval.
         let input_poll_interval = if matches!(&phase, AppPhase::Scanning(_)) {
-            if scan_backlog {
-                Duration::ZERO
-            } else {
-                SCAN_INPUT_POLL_INTERVAL
-            }
+            // Input is only checked here; the wait for scan events is below.
+            Duration::ZERO
         } else {
             INPUT_POLL_INTERVAL
         };
+        let waiting = profile.timer();
         let intent = fdu_tui::poll_intent(input_poll_interval, text_input)?;
+        if let Some(started) = waiting {
+            profile.busy.waiting_for_input += started.elapsed();
+        }
         let mut input_changed = false;
         let mut action = Action::None;
         if let Some(intent) = intent {
@@ -1668,7 +1710,6 @@ pub fn run(path: std::path::PathBuf, read_only: bool, apparent: bool) -> Result<
         let mut model_changed = false;
         let mut scan_finished = false;
         if let AppPhase::Scanning(worker) = &mut phase {
-            scan_backlog = false;
             if let Some(receiver) = worker.receiver.as_ref() {
                 let drain_started = Instant::now();
                 let mut applied = 0usize;
@@ -1676,11 +1717,19 @@ pub fn run(path: std::path::PathBuf, read_only: bool, apparent: bool) -> Result<
                     if applied % SCAN_DRAIN_CLOCK_INTERVAL == SCAN_DRAIN_CLOCK_INTERVAL - 1
                         && drain_started.elapsed() >= SCAN_DRAIN_BUDGET
                     {
-                        scan_backlog = true;
                         break;
                     }
+                    // Only an idle tick waits; one that already has work goes straight on to draw.
+                    let received = if applied == 0 {
+                        receiver.recv_timeout(SCAN_EVENT_WAIT).map_err(|error| match error {
+                            RecvTimeoutError::Timeout => TryRecvError::Empty,
+                            RecvTimeoutError::Disconnected => TryRecvError::Disconnected,
+                        })
+                    } else {
+                        receiver.try_recv()
+                    };
                     applied += 1;
-                    match receiver.try_recv() {
+                    match received {
                         Ok(event) => {
                             worker.queue_metrics.event_received();
                             if matches!(&event, ScanEvent::Finished) {
@@ -1689,11 +1738,22 @@ pub fn run(path: std::path::PathBuf, read_only: bool, apparent: bool) -> Result<
                             }
                             match event {
                                 ScanEvent::Entries(batch) => {
+                                    let applying = profile.timer();
                                     let batch = model.apply_entry_batch(batch);
                                     worker.return_batch(batch);
                                     model_changed = true;
+                                    if let Some(started) = applying {
+                                        profile.busy.entry_batches += started.elapsed();
+                                        profile.busy.entry_batch_count += 1;
+                                    }
                                 }
-                                other => model_changed |= model.apply_scan_event(other),
+                                other => {
+                                    let applying = profile.timer();
+                                    model_changed |= model.apply_scan_event(other);
+                                    if let Some(started) = applying {
+                                        profile.busy.other_events += started.elapsed();
+                                    }
+                                }
                             }
                         }
                         Err(TryRecvError::Empty) => break,
@@ -1784,8 +1844,13 @@ pub fn run(path: std::path::PathBuf, read_only: bool, apparent: bool) -> Result<
             AppPhase::Ready => draw_pending,
         };
         if draw_now {
+            let drawing = profile.timer();
             let view = model.view(&phase);
             terminal.draw(&view)?;
+            if let Some(started) = drawing {
+                profile.busy.draws += started.elapsed();
+                profile.busy.draw_count += 1;
+            }
             profile.note_render(&model, phase.view_phase());
             if !model.visible.is_empty() {
                 first_live_listing_directory = Some(model.current_directory);

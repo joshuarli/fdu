@@ -1,4 +1,4 @@
-use fdu_core::{DirectoryToken, EntryBatch, EntryType, NodeState, ScanEvent, Tree};
+use fdu_core::{EntryBatch, EntryType, NodeState, ScanEvent, Tree};
 use fdu_scan::{open_root, start_indexed_scan_with_metrics, ScanQueueMetrics};
 use std::io;
 use std::path::PathBuf;
@@ -28,11 +28,7 @@ fn main() -> io::Result<()> {
     let (batch_sender, batch_receiver) = mpsc::sync_channel(CHANNEL_CAPACITY);
     for _ in 0..CHANNEL_CAPACITY {
         batch_sender
-            .send(EntryBatch::with_capacity(
-                DirectoryToken(0),
-                BATCH_CAPACITY,
-                BATCH_CAPACITY * 24,
-            ))
+            .send(EntryBatch::with_capacity(BATCH_CAPACITY, BATCH_CAPACITY * 24))
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "batch pool closed"))?;
     }
     let metrics = ScanQueueMetrics::new(CHANNEL_CAPACITY, true);
@@ -60,15 +56,25 @@ fn main() -> io::Result<()> {
             }
             ScanEvent::Entries(mut batch) => {
                 first_batch.get_or_insert_with(|| started.elapsed());
-                let parent = token_nodes
-                    .get(batch.directory.0 as usize)
-                    .copied()
-                    .flatten()
-                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "unknown directory token"))?;
-                let mut apparent_batch = 0u64;
-                let mut allocated_batch = 0u64;
-                let mut totals_fit = true;
+                // Totals are added once per run of entries with the same parent.
+                let mut run: Option<(fdu_core::NodeId, u64, u64, bool)> = None;
+                let finish_run = |tree: &mut Tree, scan_errors: &mut usize, run: (fdu_core::NodeId, u64, u64, bool)| {
+                    let (parent, apparent, allocated, fits) = run;
+                    if !fits || !tree.add_to_ancestors(parent, apparent, allocated) {
+                        tree.mark_incomplete_to_root(parent);
+                        *scan_errors = scan_errors.saturating_add(1);
+                    }
+                };
                 for entry in &batch.entries {
+                    let parent = token_nodes
+                        .get(entry.parent.0 as usize)
+                        .copied()
+                        .flatten()
+                        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "unknown directory token"))?;
+                    if run.is_some_and(|(node, ..)| node != parent) {
+                        finish_run(&mut tree, &mut scan_errors, run.take().unwrap());
+                    }
+                    let (_, apparent_batch, allocated_batch, totals_fit) = run.get_or_insert((parent, 0, 0, true));
                     let name = batch
                         .names
                         .get(entry.name.start as usize..entry.name.end as usize)
@@ -98,25 +104,20 @@ fn main() -> io::Result<()> {
                             allocated_batch.checked_add(entry.allocated_bytes),
                         ) {
                             (Some(apparent), Some(allocated)) => {
-                                apparent_batch = apparent;
-                                allocated_batch = allocated;
+                                *apparent_batch = apparent;
+                                *allocated_batch = allocated;
                             }
-                            _ => {
-                                totals_fit = false;
-                                tree.mark_incomplete_to_root(parent);
-                                scan_errors = scan_errors.saturating_add(1);
-                            }
+                            _ => *totals_fit = false,
                         }
                     } else if entry.state == NodeState::Incomplete {
                         tree.mark_incomplete_to_root(parent);
                         scan_errors = scan_errors.saturating_add(1);
                     }
                 }
-                if totals_fit && !tree.add_to_ancestors(parent, apparent_batch, allocated_batch) {
-                    tree.mark_incomplete_to_root(parent);
-                    scan_errors = scan_errors.saturating_add(1);
+                if let Some(run) = run {
+                    finish_run(&mut tree, &mut scan_errors, run);
                 }
-                batch.clear_for_directory(DirectoryToken(0));
+                batch.clear();
                 let _ = batch_sender.try_send(batch);
             }
             ScanEvent::DirectoryFinished { directory, complete } => {

@@ -49,6 +49,8 @@ pub enum NodeState {
 
 #[derive(Clone, Debug)]
 pub struct ScanEntry {
+    /// The directory this entry was found in.
+    pub parent: DirectoryToken,
     pub name: Range<u32>,
     pub directory_token: Option<DirectoryToken>,
     pub entry_type: EntryType,
@@ -59,24 +61,24 @@ pub struct ScanEntry {
     pub state: NodeState,
 }
 
+/// Entries found by the scanner, in discovery order. Entries of different directories may share
+/// a batch; each carries its parent, and a directory's own entry always precedes the entries
+/// found inside it.
 #[derive(Debug)]
 pub struct EntryBatch {
-    pub directory: DirectoryToken,
     pub entries: Vec<ScanEntry>,
     pub names: Vec<u8>,
 }
 
 impl EntryBatch {
-    pub fn with_capacity(directory: DirectoryToken, entry_capacity: usize, name_capacity: usize) -> Self {
+    pub fn with_capacity(entry_capacity: usize, name_capacity: usize) -> Self {
         Self {
-            directory,
             entries: Vec::with_capacity(entry_capacity),
             names: Vec::with_capacity(name_capacity),
         }
     }
 
-    pub fn clear_for_directory(&mut self, directory: DirectoryToken) {
-        self.directory = directory;
+    pub fn clear(&mut self) {
         self.entries.clear();
         self.names.clear();
     }
@@ -263,10 +265,11 @@ impl Tree {
         true
     }
 
+    /// Adds bytes to `id` and every ancestor, or to none of them: when any total would overflow,
+    /// the lineage is marked incomplete instead and false is returned.
     pub fn add_to_ancestors(&mut self, id: NodeId, apparent: u64, allocated: u64) -> bool {
-        let mut current = Some(id);
-        let mut lineage = Vec::new();
         let mut fits = true;
+        let mut current = Some(id);
         while let Some(node) = current {
             let Some(record) = self.nodes.get(node.index()) else {
                 return false;
@@ -275,24 +278,22 @@ impl Tree {
                 || record.allocated_bytes.checked_add(allocated).is_none()
             {
                 fits = false;
+                break;
             }
-            lineage.push(node);
             current = record.parent;
         }
-        if !fits {
-            for ancestor in lineage {
-                if let Some(record) = self.nodes.get_mut(ancestor.index()) {
-                    record.state = NodeState::Incomplete;
-                }
-            }
-            return false;
-        }
-        for node in lineage {
+        let mut current = Some(id);
+        while let Some(node) = current {
             let record = &mut self.nodes[node.index()];
-            record.apparent_bytes += apparent;
-            record.allocated_bytes += allocated;
+            if fits {
+                record.apparent_bytes += apparent;
+                record.allocated_bytes += allocated;
+            } else {
+                record.state = NodeState::Incomplete;
+            }
+            current = record.parent;
         }
-        true
+        fits
     }
 
     pub fn mark_incomplete_to_root(&mut self, id: NodeId) {

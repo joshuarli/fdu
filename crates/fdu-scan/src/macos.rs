@@ -1,27 +1,19 @@
-use crate::indexed::{BulkMetadata, IndexedScanLimits};
+use crate::fsutil::{self, retry};
+use crate::indexed::{BulkMetadata, DirectoryFacts, EntryHint, IndexedScanLimits};
 use crate::{ScanReport, TopLevelDirectory};
 use fdu_core::{EntryType, ExclusionReason, FileIdentity};
+use rustix::fs::{self, Dir, DirEntry, FileType};
 use std::cell::RefCell;
-use std::ffi::{CStr, CString, OsString};
-use std::fs::{File, OpenOptions};
-use std::io;
-use std::mem;
-use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
-use std::os::unix::ffi::OsStringExt;
-use std::os::unix::fs::OpenOptionsExt;
-use std::path::Path;
-use std::ptr::NonNull;
 use std::collections::HashSet;
+use std::ffi::{CStr, CString, OsString};
+use std::io;
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
+use std::os::unix::ffi::OsStringExt;
+use std::path::Path;
 use std::thread;
 
 mod attributes;
 
-const DIRECTORY_OPEN_FLAGS: libc::c_int =
-    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
-const DIRECTORY_ENTRY: libc::c_uchar = libc::DT_DIR;
-const UNKNOWN_ENTRY: libc::c_uchar = libc::DT_UNKNOWN;
-const FILE_TYPE_MASK: libc::mode_t = libc::S_IFMT;
-const DIRECTORY_TYPE: libc::mode_t = libc::S_IFDIR;
 const BULK_RECORD_BUFFER_BYTES: usize = 64 * 1024;
 const INDEXED_SCAN_WORKER_LIMIT: usize = 128;
 const INDEXED_SCAN_WORKER_HEADROOM: usize = 118;
@@ -39,13 +31,14 @@ pub(super) fn indexed_scan_limits() -> IndexedScanLimits {
         .min(INDEXED_SCAN_WORKER_LIMIT);
     IndexedScanLimits {
         workers,
+        base_workers: workers,
         queued_directories: workers.saturating_mul(INDEXED_TASKS_PER_WORKER),
     }
 }
 
 // Each scanning thread handles one directory at a time, so it can reuse its aligned bulk buffer.
 thread_local! {
-    static INDEXED_DIRECTORY_BUFFER: RefCell<Box<attributes::AlignedBuffer<BULK_RECORD_BUFFER_BYTES>>> =
+    static INDEXED_DIRECTORY_BUFFER: RefCell<Box<DirectoryBuffer>> =
         RefCell::new(Box::new(attributes::AlignedBuffer::new()));
 }
 
@@ -53,6 +46,15 @@ pub(super) fn with_indexed_directory_buffer<T>(
     use_buffer: impl FnOnce(&mut DirectoryBuffer) -> T,
 ) -> T {
     INDEXED_DIRECTORY_BUFFER.with(|buffer| use_buffer(buffer.borrow_mut().as_mut()))
+}
+
+/// Facts about the scan root's filesystem that apply to every directory below it. macOS has none
+/// that the scanner uses.
+#[derive(Clone, Copy)]
+pub(super) struct ScanHints;
+
+pub(super) fn scan_hints(_root: BorrowedFd<'_>) -> ScanHints {
+    ScanHints
 }
 
 struct DirectoryEntry {
@@ -67,6 +69,14 @@ enum EntryKind {
     Unknown,
 }
 
+fn entry_kind(file_type: FileType) -> EntryKind {
+    match file_type {
+        FileType::Directory => EntryKind::Directory,
+        FileType::Unknown => EntryKind::Unknown,
+        _ => EntryKind::Other,
+    }
+}
+
 struct DirectoryPath {
     parent: Option<usize>,
     name: Option<CString>,
@@ -74,131 +84,85 @@ struct DirectoryPath {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct MountIdentity {
-    device: libc::dev_t,
+    device: u64,
     filesystem_id: [i32; 2],
     mount_point: Vec<u8>,
 }
 
 enum OpenedDirectory {
-    InsideRoot(File),
+    InsideRoot(OwnedFd),
     MountBoundary,
 }
 
-struct DirectoryStream {
-    stream: NonNull<libc::DIR>,
-    fd: RawFd,
+/// Lists a directory, without `.` and `..`.
+fn read_entries(directory: &OwnedFd) -> io::Result<Vec<DirectoryEntry>> {
+    let mut entries = Vec::new();
+    for entry in Dir::read_from(directory)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name.to_bytes() != b"." && name.to_bytes() != b".." {
+            entries.push(DirectoryEntry { name: name.to_owned(), kind: entry_kind(entry.file_type()) });
+        }
+    }
+    Ok(entries)
 }
 
-impl DirectoryStream {
-    fn from_file(directory: File) -> io::Result<Self> {
-        let fd = directory.into_raw_fd();
-        let stream = unsafe { libc::fdopendir(fd) };
-        match NonNull::new(stream) {
-            Some(stream) => Ok(Self { stream, fd }),
-            None => {
-                let error = io::Error::last_os_error();
-                drop(unsafe { File::from_raw_fd(fd) });
-                Err(error)
-            }
+/// One directory entry. Bulk enumeration carries its metadata; the fallback carries a name and a
+/// type.
+pub(super) enum StreamEntry<'a> {
+    Bulk { name: &'a CStr, metadata: Option<BulkMetadata> },
+    Listed(DirEntry),
+}
+
+impl StreamEntry<'_> {
+    pub(super) fn name(&self) -> &CStr {
+        match self {
+            Self::Bulk { name, .. } => name,
+            Self::Listed(entry) => entry.file_name(),
         }
     }
 
-    fn fd(&self) -> RawFd {
-        self.fd
-    }
-
-    fn read_all(mut self) -> io::Result<(Self, Vec<DirectoryEntry>)> {
-        let mut entries = Vec::new();
-        while let Some(entry) = self.next_entry()? {
-            if entry.name.as_bytes() != b"." && entry.name.as_bytes() != b".." {
-                entries.push(entry);
+    pub(super) fn hint(&self) -> EntryHint {
+        match self {
+            Self::Bulk { metadata: Some(metadata), .. } if metadata.entry_type == EntryType::Directory => {
+                EntryHint::Directory
             }
-        }
-        Ok((self, entries))
-    }
-
-    fn next_entry(&mut self) -> io::Result<Option<DirectoryEntry>> {
-        let Some((name, kind)) = self.next_entry_name()? else {
-            return Ok(None);
-        };
-        Ok(Some(DirectoryEntry {
-            name: name.to_owned(),
-            kind: match kind {
-                DIRECTORY_ENTRY => EntryKind::Directory,
-                UNKNOWN_ENTRY => EntryKind::Unknown,
-                _ => EntryKind::Other,
+            Self::Bulk { metadata: Some(_), .. } => EntryHint::NotDirectory,
+            Self::Bulk { metadata: None, .. } => EntryHint::Unknown,
+            Self::Listed(entry) => match entry.file_type() {
+                FileType::Directory => EntryHint::Directory,
+                FileType::Unknown => EntryHint::Unknown,
+                _ => EntryHint::NotDirectory,
             },
-        }))
-    }
-
-    fn next_entry_name(&mut self) -> io::Result<Option<(&CStr, libc::c_uchar)>> {
-        loop {
-            unsafe { *libc::__error() = 0 };
-            let entry = unsafe { libc::readdir(self.stream.as_ptr()) };
-            if entry.is_null() {
-                let error = unsafe { *libc::__error() };
-                if error == libc::EINTR {
-                    continue;
-                }
-                return if readdir_null_result(error)? {
-                    Ok(None)
-                } else {
-                    unreachable!("a null readdir result cannot describe an entry")
-                };
-            }
-
-            let entry = unsafe { &*entry };
-            let name_length = usize::from(entry.d_namlen);
-            if name_length >= entry.d_name.len() || entry.d_name[name_length] != 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "invalid macOS directory entry name",
-                ));
-            }
-            let name_bytes = unsafe {
-                std::slice::from_raw_parts(entry.d_name.as_ptr().cast::<u8>(), name_length)
-            };
-            if name_bytes.contains(&0) {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "macOS directory entry name contains a NUL byte",
-                ));
-            }
-            let name = unsafe { CStr::from_ptr(entry.d_name.as_ptr()) };
-            if name.to_bytes().len() != name_length {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "invalid macOS directory entry name length",
-                ));
-            } else {
-                return Ok(Some((name, entry.d_type)));
-            }
         }
     }
-}
 
-impl Drop for DirectoryStream {
-    fn drop(&mut self) {
-        unsafe {
-            libc::closedir(self.stream.as_ptr());
+    pub(super) fn bulk(&self) -> Option<BulkMetadata> {
+        match self {
+            Self::Bulk { metadata, .. } => *metadata,
+            Self::Listed(_) => None,
         }
     }
 }
 
 pub(super) struct IndexedDirectoryStream<'buffer> {
-    directory: Option<File>,
+    directory: BorrowedFd<'buffer>,
     buffer: &'buffer mut DirectoryBuffer,
     offset: usize,
     remaining: usize,
     exhausted: bool,
     returned_any: bool,
-    fallback: Option<DirectoryStream>,
+    fallback: Option<Dir>,
 }
 
 impl<'buffer> IndexedDirectoryStream<'buffer> {
-    pub(super) fn from_file(directory: File, buffer: &'buffer mut DirectoryBuffer) -> Self {
+    pub(super) fn new(
+        directory: BorrowedFd<'buffer>,
+        buffer: &'buffer mut DirectoryBuffer,
+        _hints: ScanHints,
+    ) -> Self {
         Self {
-            directory: Some(directory),
+            directory,
             buffer,
             offset: 0,
             remaining: 0,
@@ -208,34 +172,23 @@ impl<'buffer> IndexedDirectoryStream<'buffer> {
         }
     }
 
-    pub(super) fn fd(&self) -> RawFd {
-        self.fallback
-            .as_ref()
-            .map_or_else(
-                || {
-                    self.directory
-                        .as_ref()
-                        .expect("bulk directory remains open before fallback")
-                        .as_raw_fd()
-                },
-                DirectoryStream::fd,
-            )
-    }
-
-    pub(super) fn next_entry_name(&mut self) -> io::Result<Option<(&CStr, Option<BulkMetadata>)>> {
+    pub(super) fn next_entry(&mut self) -> io::Result<Option<StreamEntry<'_>>> {
         loop {
             if let Some(fallback) = &mut self.fallback {
-                return fallback
-                    .next_entry_name()
-                    .map(|entry| entry.map(|(name, _)| (name, None)));
+                return match fallback.read() {
+                    Some(Ok(entry)) => Ok(Some(StreamEntry::Listed(entry))),
+                    Some(Err(error)) => Err(error.into()),
+                    None => Ok(None),
+                };
             }
             if self.exhausted {
                 return Ok(None);
             }
-            if self.remaining == 0 {
-                if !self.refill()? {
-                    return Ok(None);
-                }
+            if self.remaining == 0 && !self.refill()? {
+                return Ok(None);
+            }
+            if self.fallback.is_some() {
+                continue;
             }
 
             let start = self.offset;
@@ -253,21 +206,18 @@ impl<'buffer> IndexedDirectoryStream<'buffer> {
             self.remaining -= 1;
             self.returned_any = true;
             let entry = attributes::parse_record(&self.buffer.as_bytes()[start..end])?;
-            return Ok(Some((entry.name, entry.metadata)));
+            return Ok(Some(StreamEntry::Bulk { name: entry.name, metadata: entry.metadata }));
         }
     }
 
     fn refill(&mut self) -> io::Result<bool> {
         loop {
             let mut requested = attributes::requested_attributes();
-            // SAFETY: the descriptor remains open, the attrlist is initialized, and the aligned
-            // buffer is writable for its full size.
+            // SAFETY: the descriptor stays open for the lifetime of the stream, the attrlist is
+            // initialized, and the aligned buffer is writable for its full size.
             let count = unsafe {
                 libc::getattrlistbulk(
-                    self.directory
-                        .as_ref()
-                        .expect("bulk directory remains open before fallback")
-                        .as_raw_fd(),
+                    self.directory.as_raw_fd(),
                     (&mut requested as *mut libc::attrlist).cast(),
                     self.buffer.as_mut_bytes().as_mut_ptr().cast(),
                     self.buffer.as_bytes().len(),
@@ -295,11 +245,8 @@ impl<'buffer> IndexedDirectoryStream<'buffer> {
                 Some(libc::EACCES | libc::EPERM | libc::ENOTSUP | libc::EOPNOTSUPP | libc::ENOSYS)
             ) || error.kind() == io::ErrorKind::Unsupported;
             if !self.returned_any && fallback_error {
-                let directory = self
-                    .directory
-                    .take()
-                    .expect("bulk directory remains open before fallback");
-                self.fallback = Some(DirectoryStream::from_file(directory)?);
+                // Nothing was returned, so the plain listing starts from the beginning.
+                self.fallback = Some(Dir::read_from(self.directory)?);
                 return Ok(true);
             }
             return Err(error);
@@ -308,14 +255,12 @@ impl<'buffer> IndexedDirectoryStream<'buffer> {
 }
 
 pub(super) fn scan(path: &Path, apparent: bool) -> io::Result<ScanReport> {
-    let root = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
-        .open(path)?;
-    let (root, entries) = DirectoryStream::from_file(root)?.read_all()?;
-    let root_mount = mount_identity(root.fd())?;
+    let root = fsutil::open_directory(path)?;
+    let entries = read_entries(&root)?;
+    let root_fd = root.as_fd();
+    let root_mount = mount_identity(root_fd)?;
     let mut seen_directories = HashSet::new();
-    seen_directories.insert(identity_for_fd(root.fd())?);
+    seen_directories.insert(fsutil::identity_of(root_fd)?);
     let mut report = ScanReport {
         directories: Vec::new(),
         skipped_entries: 0,
@@ -327,10 +272,8 @@ pub(super) fn scan(path: &Path, apparent: bool) -> io::Result<ScanReport> {
         let is_directory = match entry.kind {
             EntryKind::Directory => true,
             EntryKind::Other => false,
-            EntryKind::Unknown => match with_stat_at(root.fd(), &entry.name, |stat| {
-                Ok(is_directory(stat.st_mode))
-            }) {
-                Ok(is_directory) => is_directory,
+            EntryKind::Unknown => match fsutil::stat_at(root_fd, &entry.name) {
+                Ok(stat) => fsutil::entry_type(&stat) == EntryType::Directory,
                 Err(_) => {
                     mark_skipped(&mut report.skipped_entries);
                     continue;
@@ -341,7 +284,7 @@ pub(super) fn scan(path: &Path, apparent: bool) -> io::Result<ScanReport> {
             continue;
         }
 
-        let directory = match open_child_directory(root.fd(), &entry.name) {
+        let directory = match fsutil::open_directory_at(root_fd, entry.name.as_c_str()) {
             Ok(directory) => directory,
             Err(_) => {
                 mark_skipped(&mut report.skipped_entries);
@@ -364,7 +307,7 @@ pub(super) fn scan(path: &Path, apparent: bool) -> io::Result<ScanReport> {
                 continue;
             }
         };
-        let identity = match identity_for_fd(directory.as_raw_fd()) {
+        let identity = match fsutil::identity_of(directory.as_fd()) {
             Ok(identity) => identity,
             Err(_) => {
                 mark_skipped(&mut report.skipped_entries);
@@ -409,48 +352,8 @@ pub(super) fn scan(path: &Path, apparent: bool) -> io::Result<ScanReport> {
     Ok(report)
 }
 
-pub(super) fn file_identity(stat: &libc::stat) -> io::Result<FileIdentity> {
-    Ok(FileIdentity {
-        device: u64::try_from(stat.st_dev).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidData, "device number is outside supported range")
-        })?,
-        inode: u64::try_from(stat.st_ino).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidData, "inode number is outside supported range")
-        })?,
-    })
-}
-
-pub(super) fn identity_for_fd(fd: RawFd) -> io::Result<FileIdentity> {
-    identity_and_link_count_for_fd(fd).map(|(identity, _)| identity)
-}
-
-pub(super) fn identity_and_link_count_for_fd(fd: RawFd) -> io::Result<(FileIdentity, u64)> {
-    let mut metadata = mem::MaybeUninit::<libc::stat>::uninit();
-    retry_interrupted(|| {
-        if unsafe { libc::fstat(fd, metadata.as_mut_ptr()) } < 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
-    })?;
-    let metadata = unsafe { metadata.assume_init_ref() };
-    let identity = file_identity(metadata)?;
-    let link_count = u64::try_from(metadata.st_nlink)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "negative link count"))?;
-    Ok((identity, link_count))
-}
-
-pub(super) fn entry_type_for_mode(mode: libc::mode_t) -> EntryType {
-    match mode & FILE_TYPE_MASK {
-        DIRECTORY_TYPE => EntryType::Directory,
-        libc::S_IFREG => EntryType::RegularFile,
-        libc::S_IFLNK => EntryType::Symlink,
-        _ => EntryType::Other,
-    }
-}
-
 fn scan_subtree(
-    root: File,
+    root: OwnedFd,
     root_mount: &MountIdentity,
     apparent: bool,
     seen_directories: &mut HashSet<FileIdentity>,
@@ -467,14 +370,9 @@ fn scan_subtree(
 
     while let Some(path_index) = pending.pop() {
         let directory = if path_index == 0 {
-            match root.try_clone() {
-                Ok(directory) => OpenedDirectory::InsideRoot(directory),
-                Err(error) => {
-                    return Err(error);
-                }
-            }
+            OpenedDirectory::InsideRoot(root.try_clone()?)
         } else {
-            match open_directory_path(root.as_raw_fd(), root_mount, &paths, path_index) {
+            match open_directory_path(root.as_fd(), root_mount, &paths, path_index) {
                 Ok(directory) => directory,
                 Err(_) => {
                     mark_skipped(skipped_entries);
@@ -490,7 +388,7 @@ fn scan_subtree(
             }
         };
         if path_index != 0 {
-            let identity = match identity_for_fd(directory.as_raw_fd()) {
+            let identity = match fsutil::identity_of(directory.as_fd()) {
                 Ok(identity) => identity,
                 Err(_) => {
                     mark_skipped(skipped_entries);
@@ -503,16 +401,8 @@ fn scan_subtree(
             }
         }
 
-        let stream = match DirectoryStream::from_file(directory) {
-            Ok(stream) => stream,
-            Err(error) if path_index == 0 => return Err(error),
-            Err(_) => {
-                mark_skipped(skipped_entries);
-                continue;
-            }
-        };
-        let (stream, entries) = match stream.read_all() {
-            Ok(contents) => contents,
+        let entries = match read_entries(&directory) {
+            Ok(entries) => entries,
             Err(error) if path_index == 0 => return Err(error),
             Err(_) => {
                 mark_skipped(skipped_entries);
@@ -524,21 +414,22 @@ fn scan_subtree(
             let child_directory = match entry.kind {
                 EntryKind::Directory => true,
                 EntryKind::Other => {
-                    match with_stat_at(stream.fd(), &entry.name, |stat| {
-                        file_size(stat, apparent)
-                    }) {
+                    match fsutil::stat_at(directory.as_fd(), &entry.name)
+                        .and_then(|stat| fsutil::file_size(&stat, apparent))
+                    {
                         Ok(size) => add_size(&mut disk_size, size, skipped_entries),
                         Err(_) => mark_skipped(skipped_entries),
                     }
                     continue;
                 }
                 EntryKind::Unknown => {
-                    match with_stat_at(stream.fd(), &entry.name, |stat| {
-                        unknown_entry(stat, apparent)
-                    }) {
-                        Ok(UnknownEntry::Directory) => true,
-                        Ok(UnknownEntry::File(size)) => {
-                            add_size(&mut disk_size, size, skipped_entries);
+                    match fsutil::stat_at(directory.as_fd(), &entry.name) {
+                        Ok(stat) if fsutil::entry_type(&stat) == EntryType::Directory => true,
+                        Ok(stat) => {
+                            match fsutil::file_size(&stat, apparent) {
+                                Ok(size) => add_size(&mut disk_size, size, skipped_entries),
+                                Err(_) => mark_skipped(skipped_entries),
+                            }
                             continue;
                         }
                         Err(_) => {
@@ -563,21 +454,8 @@ fn scan_subtree(
     Ok(disk_size)
 }
 
-enum UnknownEntry {
-    Directory,
-    File(u64),
-}
-
-fn unknown_entry(stat: &libc::stat, apparent: bool) -> io::Result<UnknownEntry> {
-    if is_directory(stat.st_mode) {
-        Ok(UnknownEntry::Directory)
-    } else {
-        file_size(stat, apparent).map(UnknownEntry::File)
-    }
-}
-
 fn open_directory_path(
-    root_fd: RawFd,
+    root: BorrowedFd<'_>,
     root_mount: &MountIdentity,
     paths: &[DirectoryPath],
     path_index: usize,
@@ -593,14 +471,14 @@ fn open_directory_path(
         current_index = path.parent;
     }
 
-    let mut current = None;
+    let mut current: Option<OwnedFd> = None;
     for component in components.into_iter().rev() {
-        let parent_fd = current.as_ref().map_or(root_fd, AsRawFd::as_raw_fd);
+        let parent = current.as_ref().map_or(root, |directory| directory.as_fd());
         let name = paths[component]
             .name
             .as_ref()
             .expect("non-root directory path has a name");
-        let directory = open_child_directory(parent_fd, name)?;
+        let directory = fsutil::open_directory_at(parent, name.as_c_str())?;
         match keep_directory_on_root_mount(directory, root_mount)? {
             OpenedDirectory::InsideRoot(directory) => current = Some(directory),
             OpenedDirectory::MountBoundary => return Ok(OpenedDirectory::MountBoundary),
@@ -614,31 +492,12 @@ fn open_directory_path(
     })
 }
 
-pub(super) fn open_child_directory(parent_fd: RawFd, name: &CStr) -> io::Result<File> {
-    retry_interrupted(|| {
-        let child_fd = unsafe { libc::openat(parent_fd, name.as_ptr(), DIRECTORY_OPEN_FLAGS) };
-        if child_fd < 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(unsafe { File::from_raw_fd(child_fd) })
-        }
-    })
-}
-
 fn keep_directory_on_root_mount(
-    directory: File,
+    directory: OwnedFd,
     root_mount: &MountIdentity,
 ) -> io::Result<OpenedDirectory> {
-    let device = identity_for_fd(directory.as_raw_fd())?.device;
-    keep_directory_on_root_mount_with_device(directory, root_mount, device)
-}
-
-fn keep_directory_on_root_mount_with_device(
-    directory: File,
-    root_mount: &MountIdentity,
-    device: u64,
-) -> io::Result<OpenedDirectory> {
-    if same_mount_on_fd(directory.as_raw_fd(), root_mount, device)? {
+    let device = fsutil::identity_of(directory.as_fd())?.device;
+    if same_mount_on_fd(directory.as_fd(), root_mount, device)? {
         Ok(OpenedDirectory::InsideRoot(directory))
     } else {
         Ok(OpenedDirectory::MountBoundary)
@@ -650,18 +509,9 @@ fn same_mount(left: &MountIdentity, right: &MountIdentity) -> bool {
     left == right
 }
 
-pub(super) fn mount_identity(fd: RawFd) -> io::Result<MountIdentity> {
-    let device = identity_for_fd(fd)?.device;
-    let mut filesystem = mem::MaybeUninit::<libc::statfs>::zeroed();
-    retry_interrupted(|| {
-        if unsafe { libc::fstatfs(fd, filesystem.as_mut_ptr()) } < 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
-    })?;
-    let filesystem = unsafe { filesystem.assume_init_ref() };
-    let filesystem_id = fsid_words(filesystem.f_fsid);
+pub(super) fn mount_identity(fd: BorrowedFd<'_>) -> io::Result<MountIdentity> {
+    let device = fsutil::identity_of(fd)?.device;
+    let filesystem = retry(|| fs::fstatfs(fd))?;
     let mount_point = filesystem
         .f_mntonname
         .iter()
@@ -670,92 +520,46 @@ pub(super) fn mount_identity(fd: RawFd) -> io::Result<MountIdentity> {
         .collect();
 
     Ok(MountIdentity {
-        device: libc::dev_t::try_from(device).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidData, "device number is outside supported range")
-        })?,
-        filesystem_id,
+        device,
+        filesystem_id: fsid_words(&filesystem),
         mount_point,
     })
 }
 
-pub(super) fn same_mount_on_fd(
-    fd: RawFd,
+fn same_mount_on_fd(
+    fd: BorrowedFd<'_>,
     root_mount: &MountIdentity,
     device: u64,
 ) -> io::Result<bool> {
-    let mut filesystem = mem::MaybeUninit::<libc::statfs>::zeroed();
-    retry_interrupted(|| {
-        if unsafe { libc::fstatfs(fd, filesystem.as_mut_ptr()) } < 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
-    })?;
-    let filesystem = unsafe { filesystem.assume_init_ref() };
+    let filesystem = retry(|| fs::fstatfs(fd))?;
     let mount_point = filesystem
         .f_mntonname
         .iter()
         .take_while(|byte| **byte != 0)
         .map(|byte| *byte as u8);
-    Ok(device == u64::try_from(root_mount.device).unwrap_or(u64::MAX)
-        && fsid_words(filesystem.f_fsid) == root_mount.filesystem_id
+    Ok(device == root_mount.device
+        && fsid_words(&filesystem) == root_mount.filesystem_id
         && mount_point.eq(root_mount.mount_point.iter().copied()))
 }
 
-const _: [(); 8] = [(); mem::size_of::<libc::fsid_t>()];
+/// Identity, link count, and mount membership of an opened directory.
+pub(super) fn describe_directory(
+    fd: BorrowedFd<'_>,
+    root_mount: &MountIdentity,
+) -> io::Result<DirectoryFacts> {
+    let (identity, link_count) = fsutil::identity_and_link_count(fd)?;
+    Ok(DirectoryFacts {
+        identity,
+        link_count,
+        same_mount: same_mount_on_fd(fd, root_mount, identity.device)?,
+    })
+}
 
-fn fsid_words(filesystem_id: libc::fsid_t) -> [i32; 2] {
+fn fsid_words(filesystem: &rustix::fs::StatFs) -> [i32; 2] {
     // Apple's fsid_t is exactly two i32 words; libc keeps those fields private.
-    unsafe { mem::transmute(filesystem_id) }
-}
-
-pub(super) fn with_stat_at<T>(
-    parent_fd: RawFd,
-    name: &CStr,
-    inspect: impl FnOnce(&libc::stat) -> io::Result<T>,
-) -> io::Result<T> {
-    let mut stat = mem::MaybeUninit::<libc::stat>::uninit();
-    retry_interrupted(|| {
-        let result = unsafe {
-            libc::fstatat(
-                parent_fd,
-                name.as_ptr(),
-                stat.as_mut_ptr(),
-                libc::AT_SYMLINK_NOFOLLOW,
-            )
-        };
-        if result < 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
-    })?;
-    inspect(unsafe { stat.assume_init_ref() })
-}
-
-pub(super) fn file_size(stat: &libc::stat, apparent: bool) -> io::Result<u64> {
-    if apparent {
-        u64::try_from(stat.st_size).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "file size is outside the supported byte-count range",
-            )
-        })
-    } else {
-        u64::try_from(stat.st_blocks)
-            .ok()
-            .and_then(|blocks| blocks.checked_mul(512))
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "allocated file size is outside the supported byte-count range",
-                )
-            })
-    }
-}
-
-fn is_directory(mode: libc::mode_t) -> bool {
-    mode & FILE_TYPE_MASK == DIRECTORY_TYPE
+    const _: () = assert!(std::mem::size_of::<[i32; 2]>() == 8);
+    // SAFETY: fsid_t is two i32 words, so reading eight bytes from it stays in bounds.
+    unsafe { std::mem::transmute_copy::<_, [i32; 2]>(&filesystem.f_fsid) }
 }
 
 fn add_size(total: &mut u64, size: u64, skipped_entries: &mut usize) {
@@ -777,84 +581,9 @@ fn mark_unsupported_alias(unsupported_aliases: &mut usize) {
     *unsupported_aliases = unsupported_aliases.saturating_add(1);
 }
 
-fn readdir_null_result(errno: libc::c_int) -> io::Result<bool> {
-    if errno == 0 {
-        Ok(true)
-    } else {
-        Err(io::Error::from_raw_os_error(errno))
-    }
-}
-
-fn retry_interrupted<T>(mut operation: impl FnMut() -> io::Result<T>) -> io::Result<T> {
-    loop {
-        match operation() {
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            result => return result,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{readdir_null_result, same_mount, MountIdentity, UnknownEntry};
-    use std::io;
-
-    #[test]
-    fn directory_enumeration_errors_are_distinct_from_end_of_directory() {
-        assert!(readdir_null_result(0).unwrap());
-        assert_eq!(
-            readdir_null_result(libc::EIO).unwrap_err().raw_os_error(),
-            Some(libc::EIO)
-        );
-        assert_eq!(
-            readdir_null_result(libc::EINTR).unwrap_err().kind(),
-            io::ErrorKind::Interrupted
-        );
-    }
-
-    #[test]
-    fn allocated_file_size_conversion_rejects_negative_and_overflowing_values() {
-        let negative_size = libc::stat {
-            st_size: -1,
-            st_blocks: 0,
-            ..unsafe { std::mem::zeroed() }
-        };
-        assert!(super::file_size(&negative_size, true).is_err());
-
-        let overflowing_blocks = libc::stat {
-            st_size: 0,
-            st_blocks: libc::blkcnt_t::MAX,
-            ..unsafe { std::mem::zeroed() }
-        };
-        assert!(super::file_size(&overflowing_blocks, false).is_err());
-    }
-
-    #[test]
-    fn metadata_resolves_unknown_types_before_counting_or_descending() {
-        let directory = libc::stat {
-            st_mode: libc::S_IFDIR,
-            ..unsafe { std::mem::zeroed() }
-        };
-        assert!(matches!(
-            super::unknown_entry(&directory, false).unwrap(),
-            UnknownEntry::Directory
-        ));
-
-        let file = libc::stat {
-            st_mode: libc::S_IFREG,
-            st_size: 8,
-            st_blocks: 1,
-            ..unsafe { std::mem::zeroed() }
-        };
-        assert!(matches!(
-            super::unknown_entry(&file, true).unwrap(),
-            UnknownEntry::File(8)
-        ));
-        assert!(matches!(
-            super::unknown_entry(&file, false).unwrap(),
-            UnknownEntry::File(512)
-        ));
-    }
+    use super::{same_mount, MountIdentity};
 
     #[test]
     fn mount_identity_separates_filesystems_and_mount_points() {

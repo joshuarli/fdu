@@ -21,13 +21,16 @@ default = ["interactive"]
 interactive = ["dep:fdu-tui", "dep:fdu-delete"]
 
 [dependencies]
-libc = "0.2"
 fdu-core = { path = "crates/fdu-core" }
 fdu-scan = { path = "crates/fdu-scan" }
 fdu-delete = { path = "crates/fdu-delete", optional = true }
 fdu-tui = { path = "crates/fdu-tui", optional = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1.1", features = ["system", "linux_latest"] }
+
 [dev-dependencies]
+rustix = { version = "1.1", features = ["fs", "process", "linux_latest"] }
 laputa-ptytest = { path = "../ptytest" }
 rustybench = { path = "../rustybench" }
 

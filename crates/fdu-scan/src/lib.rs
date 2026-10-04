@@ -1,20 +1,17 @@
 use std::io;
-use std::fs::{File, OpenOptions};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::OpenOptionsExt;
-use std::os::unix::fs::MetadataExt;
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{Receiver, SyncSender};
-use std::thread::{self, JoinHandle};
 use std::sync::Arc;
+use std::thread::{self, JoinHandle};
 
 pub use fdu_core::{DirectoryToken, EntryBatch, FileIdentity, ScanEvent};
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 compile_error!("fdu supports Linux and macOS");
 
+mod fsutil;
 mod indexed;
 #[cfg(target_os = "linux")]
 mod linux;
@@ -44,22 +41,19 @@ pub struct ScanReport {
 
 #[derive(Clone)]
 pub struct RootAnchor {
-    file: Arc<File>,
+    fd: Arc<OwnedFd>,
     pub name: Vec<u8>,
     pub identity: FileIdentity,
     pub link_count: u64,
 }
 
 impl RootAnchor {
-    pub fn as_raw_fd(&self) -> std::os::fd::RawFd {
-        self.file.as_raw_fd()
+    pub fn as_fd(&self) -> BorrowedFd<'_> {
+        self.fd.as_fd()
     }
 
     pub fn try_clone_fd(&self) -> io::Result<OwnedFd> {
-        use std::os::fd::IntoRawFd;
-        let clone = self.file.try_clone()?;
-        let raw = clone.into_raw_fd();
-        Ok(unsafe { OwnedFd::from_raw_fd(raw) })
+        self.fd.try_clone()
     }
 }
 
@@ -132,18 +126,11 @@ impl ScanQueueMetrics {
 }
 
 pub fn open_root(path: &std::path::Path) -> io::Result<RootAnchor> {
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
-        .open(path)?;
-    let metadata = file.metadata()?;
-    let identity = FileIdentity {
-        device: metadata.dev(),
-        inode: metadata.ino(),
-    };
-    let link_count = metadata.nlink();
+    use std::os::unix::ffi::OsStrExt;
+    let fd = fsutil::open_directory(path)?;
+    let (identity, link_count) = fsutil::identity_and_link_count(fd.as_fd())?;
     Ok(RootAnchor {
-        file: Arc::new(file),
+        fd: Arc::new(fd),
         name: path.as_os_str().as_bytes().to_vec(),
         identity,
         link_count,
