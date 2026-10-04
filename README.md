@@ -165,8 +165,7 @@ after Esc are reported as not attempted.
 
 ## Performance
 
-Benchmarks use [rustybench](https://github.com/joshuarli/rustybench), checked out
-beside this repository as `../rustybench`:
+Benchmarks use [rustybench](https://github.com/joshuarli/rustybench).
 
 ```sh
 cargo bench --bench fixture                      # all benchmarks

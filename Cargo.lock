@@ -377,6 +377,8 @@ dependencies = [
 [[package]]
 name = "laputa-ptytest"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "698f5b57f33f00250e01ab2ffee3366b1134b0d52197c65371e6d4e48c6ddcad"
 dependencies = [
  "libc",
  "vt100",
@@ -747,7 +749,9 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rustybench"
-version = "0.1.0"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f6fd0e42c829faa1d8180db69abf65bdb39d4e18ddfbba6c05691cb57144b06"
 dependencies = [
  "lexopt",
  "miniserde",
@@ -757,7 +761,9 @@ dependencies = [
 
 [[package]]
 name = "rustybench-macros"
-version = "0.1.0"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "efe0e55814e3eaa34291ea0ceed238d64576e356ea57dcf95af157f5a5d7ac24"
 
 [[package]]
 name = "ryu"
