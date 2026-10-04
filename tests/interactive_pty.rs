@@ -293,6 +293,28 @@ fn long_wide_combining_and_control_names_stay_inside_their_panes() -> io::Result
 }
 
 #[test]
+fn unicode_filter_input_and_backspace_preserve_complete_characters() -> io::Result<()> {
+    let temp = TempDir::new()?;
+    let root = temp.0.join("root");
+    fs::create_dir(&root)?;
+    fs::write(root.join("日本-é.txt"), b"x")?;
+    fs::write(root.join("other.txt"), b"x")?;
+    let mut session = Session::start("unicode-filter", &root, &[], 100, 16);
+    session.wait_ready();
+    session.text("/");
+    session.text("日本é");
+    session.wait_for("/ 日本é");
+    session.key(Key::Backspace);
+    session.wait("unicode backspace", |screen| screen.shows("/ 日本") && !screen.shows("/ 日本é"));
+    session.key(Key::Enter);
+    let screen = session.wait_for("(1 shown, 2 total");
+    assert!(screen.shows("日本-é.txt"));
+    assert!(!screen.shows("other.txt"));
+    session.quit();
+    Ok(())
+}
+
+#[test]
 fn tiny_terminals_and_empty_directories_stay_usable() -> io::Result<()> {
     let (_temp, root) = TempDir::standard_tree()?;
     let mut session = Session::start("tiny", &root, &[], 100, 24);

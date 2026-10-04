@@ -1,18 +1,13 @@
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
-use crossterm::execute;
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+mod screen;
+mod terminal;
+
 use fdu_core::{EntryType, NodeId, NodeRecord, NodeState, Tree};
-use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use ratatui::{Frame, Terminal};
+use screen::{Rect, Screen, Style};
 use std::collections::HashSet;
-use std::io::{self, Stdout};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::OnceLock;
-use std::time::Duration;
+use std::io;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+pub use terminal::{poll_intent, terminal_size};
 
 /// Terminal dimensions in cells.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -49,10 +44,6 @@ pub fn fits_two_panes(split: Split, size: TerminalSize) -> bool {
         Split::Vertical => size.columns >= SPLIT_MIN_COLUMNS,
         Split::Horizontal => size.rows >= STACK_MIN_ROWS,
     }
-}
-
-pub fn terminal_size() -> io::Result<TerminalSize> {
-    crossterm::terminal::size().map(|(columns, rows)| TerminalSize { columns, rows })
 }
 
 pub enum Intent {
@@ -174,103 +165,26 @@ pub struct View<'a> {
 }
 
 pub struct TerminalSession {
-    terminal: Terminal<CrosstermBackend<Stdout>>,
-    active: bool,
+    terminal: terminal::Terminal,
+    screen: Screen,
 }
 
 impl TerminalSession {
     pub fn enter() -> io::Result<Self> {
-        install_panic_restore();
-        let mut stdout = io::stdout();
-        enable_raw_mode()?;
-        if let Err(error) = execute!(stdout, EnterAlternateScreen) {
-            let _ = disable_raw_mode();
-            return Err(error);
-        }
-        TERMINAL_ACTIVE.store(true, Ordering::SeqCst);
-        let backend = CrosstermBackend::new(stdout);
-        match Terminal::new(backend) {
-            Ok(terminal) => Ok(Self {
-                terminal,
-                active: true,
-            }),
-            Err(error) => {
-                restore_terminal();
-                Err(error)
-            }
-        }
+        Ok(Self { terminal: terminal::Terminal::enter()?, screen: Screen::new(0, 0) })
     }
 
     pub fn draw(&mut self, view: &View<'_>) -> io::Result<()> {
-        self.terminal.draw(|frame| render(frame, view)).map(|_| ())
+        let size = terminal_size()?;
+        let mut next = Screen::new(size.columns, size.rows);
+        render(&mut next, view);
+        self.terminal.write(&next.diff(&self.screen))?;
+        self.screen = next;
+        Ok(())
     }
 
     pub fn restore(&mut self) {
-        if self.active {
-            self.active = false;
-            restore_terminal();
-        }
-    }
-}
-
-impl Drop for TerminalSession {
-    fn drop(&mut self) {
-        self.restore();
-    }
-}
-
-pub fn poll_intent(timeout: Duration, text_input: bool) -> io::Result<Option<Intent>> {
-    if !event::poll(timeout)? {
-        return Ok(None);
-    }
-    match event::read()? {
-        Event::Key(key) => Ok(map_key(key, text_input)),
-        Event::Resize(columns, rows) => Ok(Some(Intent::Resize(TerminalSize { columns, rows }))),
-        _ => Ok(None),
-    }
-}
-
-fn map_key(key: KeyEvent, text_input: bool) -> Option<Intent> {
-    let control = key.modifiers.contains(KeyModifiers::CONTROL);
-    if text_input {
-        return match key.code {
-            KeyCode::Esc => Some(Intent::Cancel),
-            KeyCode::Enter => Some(Intent::SubmitFilter),
-            KeyCode::Backspace => Some(Intent::FilterBackspace),
-            KeyCode::Char(value) if !control && !key.modifiers.contains(KeyModifiers::ALT) => {
-                Some(Intent::FilterCharacter(value))
-            }
-            _ => None,
-        };
-    }
-    match key.code {
-        KeyCode::Char('c') if control => Some(Intent::Quit),
-        KeyCode::Up | KeyCode::Char('k') => Some(Intent::MoveUp),
-        KeyCode::Down | KeyCode::Char('j') => Some(Intent::MoveDown),
-        KeyCode::PageUp => Some(Intent::PageUp),
-        KeyCode::PageDown => Some(Intent::PageDown),
-        KeyCode::Home => Some(Intent::Home),
-        KeyCode::End => Some(Intent::End),
-        KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => Some(Intent::Enter),
-        KeyCode::Left | KeyCode::Backspace | KeyCode::Char('h') => Some(Intent::Parent),
-        KeyCode::Tab => Some(Intent::SwitchPane),
-        KeyCode::Char('d') => Some(Intent::ToggleMark),
-        KeyCode::Char('-') => Some(Intent::ToggleSplit),
-        KeyCode::Char('r') if control => Some(Intent::Delete),
-        KeyCode::Char('v') => Some(Intent::ToggleRange),
-        KeyCode::Char('*') => Some(Intent::MarkAll),
-        KeyCode::Char('c') => Some(Intent::ClearMarks),
-        KeyCode::Char('r') => Some(Intent::Refresh),
-        KeyCode::Char('a') => Some(Intent::ToggleSizeMode),
-        KeyCode::Char('s') => Some(Intent::ToggleSort),
-        KeyCode::Char('/') => Some(Intent::StartFilter),
-        KeyCode::Char('?') => Some(Intent::Help),
-        KeyCode::Esc => Some(Intent::Cancel),
-        KeyCode::Char('q') => Some(Intent::Quit),
-        KeyCode::Char(value) if !control && !key.modifiers.contains(KeyModifiers::ALT) => {
-            Some(Intent::FilterCharacter(value))
-        }
-        _ => None,
+        self.terminal.restore();
     }
 }
 
@@ -280,19 +194,16 @@ const SIZE_COLUMN_WIDTH: usize = 11;
 /// Wide enough that every modal line fits an 80-column terminal.
 const MODAL_WIDTH_PERCENT: u16 = 94;
 
-fn render(frame: &mut Frame<'_>, view: &View<'_>) {
+fn render(frame: &mut Screen, view: &View<'_>) {
     let area = frame.area();
     // Short terminals give up the title strip before the panes.
     let title_height = u16::from(area.height >= 8);
     let status_height = u16::from(area.height >= 3);
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(title_height),
-            Constraint::Min(0),
-            Constraint::Length(status_height),
-        ])
-        .split(area);
+    let chunks = [
+        Rect::new(0, 0, area.width, title_height),
+        Rect::new(0, title_height, area.width, area.height - title_height - status_height),
+        Rect::new(0, area.height - status_height, area.width, status_height),
+    ];
     if title_height > 0 {
         render_title(frame, chunks[0], view);
     }
@@ -303,7 +214,7 @@ fn render(frame: &mut Frame<'_>, view: &View<'_>) {
     render_modal(frame, view);
 }
 
-fn render_title(frame: &mut Frame<'_>, area: Rect, view: &View<'_>) {
+fn render_title(frame: &mut Screen, area: Rect, view: &View<'_>) {
     // Only state that differs from the defaults is shown.
     let mut text = " fdu".to_owned();
     if view.read_only {
@@ -316,22 +227,18 @@ fn render_title(frame: &mut Frame<'_>, area: Rect, view: &View<'_>) {
         text.push_str(&format!(" · filter {:?}", view.filter));
     }
     let text = pad_to(clip_end(&text, usize::from(area.width)), usize::from(area.width));
-    frame.render_widget(Paragraph::new(text).style(Style::default().add_modifier(Modifier::REVERSED)), area);
+    frame.text(area, &text, Style::Reversed);
 }
 
-fn render_panes(frame: &mut Frame<'_>, area: Rect, view: &View<'_>) {
+fn render_panes(frame: &mut Screen, area: Rect, view: &View<'_>) {
     let size = TerminalSize { columns: frame.area().width, rows: frame.area().height };
     if !view.side_visible {
         render_browser(frame, area, view);
     } else if fits_two_panes(view.split, size) {
-        let (direction, first, second) = match view.split {
-            Split::Vertical => (Direction::Horizontal, 55, 45),
-            Split::Horizontal => (Direction::Vertical, 60, 40),
+        let parts = match view.split {
+            Split::Vertical => area.split_columns(55),
+            Split::Horizontal => area.split_rows(60),
         };
-        let parts = Layout::default()
-            .direction(direction)
-            .constraints([Constraint::Percentage(first), Constraint::Percentage(second)])
-            .split(area);
         render_browser(frame, parts[0], view);
         render_marked(frame, parts[1], view);
     } else if view.focus == Pane::Marked {
@@ -341,18 +248,10 @@ fn render_panes(frame: &mut Frame<'_>, area: Rect, view: &View<'_>) {
     }
 }
 
-/// Both panes use the same plain frame. The focused one is drawn at normal
-/// weight and the other dimmed, which reads without relying on color.
-fn pane_block(title: String, focused: bool) -> Block<'static> {
-    let (title_style, border_style) = if focused {
-        (Style::default().add_modifier(Modifier::BOLD), Style::default())
-    } else {
-        (Style::default().add_modifier(Modifier::DIM), Style::default().add_modifier(Modifier::DIM))
-    };
-    Block::default()
-        .borders(Borders::ALL)
-        .border_style(border_style)
-        .title(Line::styled(title, title_style))
+/// Focus is shown by normal borders and a bold title; the other pane is dimmed.
+fn pane_border(frame: &mut Screen, area: Rect, title: &str, focused: bool) -> Rect {
+    frame.border(area, title, if focused { Style::Plain } else { Style::Dim },
+        if focused { Style::Bold } else { Style::Dim })
 }
 
 fn root_name(view: &View<'_>) -> String {
@@ -369,7 +268,7 @@ fn relative_path(view: &View<'_>, node: NodeId) -> String {
         .join("/")
 }
 
-fn render_browser(frame: &mut Frame<'_>, area: Rect, view: &View<'_>) {
+fn render_browser(frame: &mut Screen, area: Rect, view: &View<'_>) {
     let focused = view.focus == Pane::Browser;
     let current = view.tree.record(view.current_directory);
     let total = current.map_or(0, |record| size_of(record, view.size_mode));
@@ -385,13 +284,11 @@ fn render_browser(frame: &mut Frame<'_>, area: Rect, view: &View<'_>) {
     let inner_width = usize::from(area.width).saturating_sub(2);
     let budget = inner_width.saturating_sub(cell_width(&counts) + 1);
     let title = format!(" {}{counts}", clip_start(&location, budget));
-    let block = pane_block(title, focused);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let inner = pane_border(frame, area, &title, focused);
     render_rows(frame, inner, view, total);
 }
 
-fn render_rows(frame: &mut Frame<'_>, area: Rect, view: &View<'_>, directory_total: u64) {
+fn render_rows(frame: &mut Screen, area: Rect, view: &View<'_>, directory_total: u64) {
     let focused = view.focus == Pane::Browser;
     let parent_offset = usize::from(view.has_parent_row);
     let cursor_index = view.cursor_index;
@@ -422,8 +319,8 @@ fn render_rows(frame: &mut Frame<'_>, area: Rect, view: &View<'_>, directory_tot
         let selected_style = cursor_style(focused);
         if index < parent_offset {
             let text = pad_to("   ../".to_owned(), width);
-            let style = if is_selected { selected_style } else { Style::default().add_modifier(Modifier::DIM) };
-            frame.render_widget(Paragraph::new(text).style(style), row_area);
+            let style = if is_selected { selected_style } else { Style::Dim };
+            frame.text(row_area, &text, style);
             continue;
         }
         let Some(id) = view.rows.get(index - parent_offset).copied() else {
@@ -463,16 +360,16 @@ fn render_rows(frame: &mut Frame<'_>, area: Rect, view: &View<'_>, directory_tot
             selected_style
         } else {
             match record.state {
-                NodeState::Incomplete | NodeState::Stale => Style::default().fg(Color::Yellow),
-                NodeState::Excluded(_) => Style::default().fg(Color::Red),
-                _ => Style::default(),
+                NodeState::Incomplete | NodeState::Stale => Style::Yellow,
+                NodeState::Excluded(_) => Style::Red,
+                _ => Style::Plain,
             }
         };
-        frame.render_widget(Paragraph::new(text).style(style), row_area);
+        frame.text(row_area, &text, style);
     }
 }
 
-fn render_marked(frame: &mut Frame<'_>, area: Rect, view: &View<'_>) {
+fn render_marked(frame: &mut Screen, area: Rect, view: &View<'_>) {
     let focused = view.focus == Pane::Marked;
     let mut total = 0u64;
     for id in view.marked {
@@ -493,17 +390,11 @@ fn render_marked(frame: &mut Frame<'_>, area: Rect, view: &View<'_>) {
         format_size(root_total),
     );
     let inner_width = usize::from(area.width).saturating_sub(2);
-    let block = pane_block(clip_end(&title, inner_width), focused);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let inner = pane_border(frame, area, &clip_end(&title, inner_width), focused);
 
     let width = usize::from(inner.width);
     if view.marked.is_empty() {
-        let lines = vec![
-            Line::from("Nothing is marked."),
-            Line::from("d marks the selected entry."),
-        ];
-        frame.render_widget(Paragraph::new(lines), inner);
+        frame.lines(inner, &["Nothing is marked.", "d marks the selected entry."]);
         return;
     }
     let available_rows = usize::from(inner.height);
@@ -530,16 +421,16 @@ fn render_marked(frame: &mut Frame<'_>, area: Rect, view: &View<'_>) {
         let path = relative_path(view, id);
         let budget = width.saturating_sub(cell_width(&prefix) + cell_width(suffix));
         let text = pad_to(format!("{prefix}{}{suffix}", clip_start(&path, budget)), width);
-        let style = if is_selected { selected_style } else { Style::default() };
+        let style = if is_selected { selected_style } else { Style::Plain };
         let y = inner.y.saturating_add(screen_row as u16);
-        frame.render_widget(Paragraph::new(text).style(style), Rect::new(inner.x, y, inner.width, 1));
+        frame.text(Rect::new(inner.x, y, inner.width, 1), &text, style);
     }
 }
 
 /// The cursor row is reversed in the focused pane and only bold in the other,
 /// so the pane that takes keystrokes is the one with a strong highlight.
 fn cursor_style(focused: bool) -> Style {
-    Style::default().add_modifier(if focused { Modifier::REVERSED } else { Modifier::BOLD })
+    if focused { Style::Reversed } else { Style::Bold }
 }
 
 /// First row of a window that keeps the cursor visible.
@@ -627,7 +518,7 @@ fn key_hints(view: &View<'_>) -> String {
 /// scan is still adding to it, followed by a transient message and key hints.
 /// A pending confirmation or running deletion has no other place to appear, so
 /// it comes first and the count moves to the end.
-fn render_status(frame: &mut Frame<'_>, area: Rect, view: &View<'_>) {
+fn render_status(frame: &mut Screen, area: Rect, view: &View<'_>) {
     let count = format!(
         "{} entries{}",
         view.indexed_entries,
@@ -648,10 +539,10 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, view: &View<'_>) {
             None => format!(" {count} · {}", key_hints(view)),
         },
     };
-    frame.render_widget(Paragraph::new(clip_end(&text, usize::from(area.width))), area);
+    frame.text(area, &clip_end(&text, usize::from(area.width)), Style::Plain);
 }
 
-fn render_modal(frame: &mut Frame<'_>, view: &View<'_>) {
+fn render_modal(frame: &mut Screen, view: &View<'_>) {
     let (title, lines) = match &view.modal {
         Modal::None => return,
         Modal::Help { focus } => help_lines(*focus),
@@ -663,7 +554,7 @@ fn render_modal(frame: &mut Frame<'_>, view: &View<'_>) {
             ],
         ),
     };
-    draw_modal(frame, title, lines.into_iter().map(Line::from).collect());
+    draw_modal(frame, title, lines);
 }
 
 fn help_lines(focus: Pane) -> (String, Vec<String>) {
@@ -696,15 +587,14 @@ fn help_lines(focus: Pane) -> (String, Vec<String>) {
     ("Help".to_owned(), lines.iter().map(|line| (*line).to_owned()).collect())
 }
 
-fn draw_modal(frame: &mut Frame<'_>, title: String, lines: Vec<Line<'static>>) {
+fn draw_modal(frame: &mut Screen, title: String, lines: Vec<String>) {
     let available_height = frame.area().height;
     let desired_height = u16::try_from(lines.len()).unwrap_or(u16::MAX).saturating_add(2).max(7);
     let area = modal_area(frame.area(), MODAL_WIDTH_PERCENT, desired_height.min(available_height));
-    frame.render_widget(Clear, area);
-    frame.render_widget(
-        Paragraph::new(lines).block(Block::default().title(title).borders(Borders::ALL)),
-        area,
-    );
+    frame.clear(area);
+    let inner = frame.border(area, &title, Style::Plain, Style::Plain);
+    frame.lines(inner, &lines);
+
 }
 
 /// A rectangle centered in `area`, `width_percent` wide and `height` rows tall
@@ -721,12 +611,11 @@ fn modal_area(area: Rect, width_percent: u16, height: u16) -> Rect {
 }
 
 fn cell_width(text: &str) -> usize {
-    Span::raw(text).width()
+    UnicodeWidthStr::width(text)
 }
 
 fn char_width(character: char) -> usize {
-    let mut buffer = [0u8; 4];
-    cell_width(character.encode_utf8(&mut buffer))
+    UnicodeWidthChar::width(character).unwrap_or(0)
 }
 
 /// Shortens `text` to at most `max` terminal cells, ending with `…` when cut.
@@ -839,38 +728,14 @@ fn format_size(size: u64) -> String {
     format!("{value:.1} {}", UNITS[unit])
 }
 
-fn restore_terminal() {
-    if !TERMINAL_ACTIVE.swap(false, Ordering::SeqCst) {
-        return;
-    }
-    let mut stdout = io::stdout();
-    let _ = disable_raw_mode();
-    let _ = execute!(stdout, LeaveAlternateScreen);
-}
-
-static TERMINAL_ACTIVE: AtomicBool = AtomicBool::new(false);
-static PANIC_RESTORE_INSTALLED: OnceLock<()> = OnceLock::new();
-
-fn install_panic_restore() {
-    PANIC_RESTORE_INSTALLED.get_or_init(|| {
-        let previous = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |panic| {
-            restore_terminal();
-            previous(panic);
-        }));
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        clip_end, clip_start, escape_name, map_key, render, Intent, Modal, Operation, Pane, Phase,
+        clip_end, clip_start, escape_name, render, Modal, Operation, Pane, Phase,
         SizeMode, SortMode, Split, View,
     };
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use fdu_core::{EntryType, FileIdentity, NodeId, NodeState, Tree};
-    use ratatui::backend::TestBackend;
-    use ratatui::Terminal;
+    use super::screen::{Screen, Style};
     use std::collections::HashSet;
 
     #[test]
@@ -879,23 +744,6 @@ mod tests {
             escape_name(b"safe\n\x1b-\xff\xc3\xa9"),
             "safe\\u{a}\\u{1b}-\\xffé"
         );
-    }
-
-    #[test]
-    fn key_mapping_separates_browser_commands_from_filter_text() {
-        let key = |code, modifiers| KeyEvent::new(code, modifiers);
-        assert!(matches!(map_key(key(KeyCode::Char('j'), KeyModifiers::NONE), false), Some(Intent::MoveDown)));
-        assert!(matches!(map_key(key(KeyCode::Char('d'), KeyModifiers::NONE), false), Some(Intent::ToggleMark)));
-        assert!(matches!(map_key(key(KeyCode::Char(' '), KeyModifiers::NONE), false), Some(Intent::FilterCharacter(' '))));
-        assert!(matches!(map_key(key(KeyCode::Char('r'), KeyModifiers::CONTROL), false), Some(Intent::Delete)));
-        assert!(matches!(map_key(key(KeyCode::Char('r'), KeyModifiers::NONE), false), Some(Intent::Refresh)));
-        assert!(matches!(map_key(key(KeyCode::Char('s'), KeyModifiers::NONE), false), Some(Intent::ToggleSort)));
-        assert!(matches!(map_key(key(KeyCode::Tab, KeyModifiers::NONE), false), Some(Intent::SwitchPane)));
-        assert!(matches!(map_key(key(KeyCode::Char(']'), KeyModifiers::NONE), false), Some(Intent::FilterCharacter(']'))));
-        assert!(matches!(map_key(key(KeyCode::Char('x'), KeyModifiers::NONE), true), Some(Intent::FilterCharacter('x'))));
-        assert!(matches!(map_key(key(KeyCode::Esc, KeyModifiers::NONE), true), Some(Intent::Cancel)));
-        assert!(matches!(map_key(key(KeyCode::Char('q'), KeyModifiers::NONE), true), Some(Intent::FilterCharacter('q'))));
-        assert!(matches!(map_key(key(KeyCode::Char(']'), KeyModifiers::NONE), true), Some(Intent::FilterCharacter(']'))));
     }
 
     #[test]
@@ -935,13 +783,8 @@ mod tests {
     }
 
     fn draw(view: &View<'_>, columns: u16, rows: u16) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(columns, rows)).unwrap();
-        terminal.draw(|frame| render(frame, view)).unwrap();
-        let buffer = terminal.backend().buffer();
-        (0..rows)
-            .map(|y| (0..columns).map(|x| buffer[(x, y)].symbol()).collect::<String>())
-            .collect::<Vec<_>>()
-            .join("\n")
+        buffer(view, columns, rows).plain_text()
+
     }
 
     fn base_view<'a>(
@@ -982,7 +825,7 @@ mod tests {
     }
 
     #[test]
-    fn test_backend_draws_only_the_visible_window_of_a_wide_listing() {
+    fn renderer_draws_only_the_visible_window_of_a_wide_listing() {
         let mut tree = Tree::new(b"root", FileIdentity { device: 1, inode: 1 }, 1).unwrap();
         let root = tree.root();
         let mut rows = Vec::new();
@@ -1026,15 +869,14 @@ mod tests {
         assert!(output.contains("top.log"), "{output}");
     }
 
-    fn buffer(view: &View<'_>, columns: u16, rows: u16) -> ratatui::buffer::Buffer {
-        let mut terminal = Terminal::new(TestBackend::new(columns, rows)).unwrap();
-        terminal.draw(|frame| render(frame, view)).unwrap();
-        terminal.backend().buffer().clone()
+    fn buffer(view: &View<'_>, columns: u16, rows: u16) -> Screen {
+        let mut screen = Screen::new(columns, rows);
+        render(&mut screen, view);
+        screen
     }
 
     #[test]
     fn the_unfocused_pane_is_dimmed_and_the_focused_cursor_row_is_reversed() {
-        use ratatui::style::Modifier;
         let fixture = fixture();
         let rows = [fixture.directory, fixture.top];
         let marks = HashSet::from([fixture.top]);
@@ -1042,19 +884,19 @@ mod tests {
         let mut view = base_view(&fixture, &rows, &marks, &marked);
         view.side_visible = true;
         // Column 0 is the list's left border, the last column the marked pane's.
-        let list_border = |buffer: &ratatui::buffer::Buffer| buffer[(0, 2)].modifier;
-        let marked_border = |buffer: &ratatui::buffer::Buffer| buffer[(109, 2)].modifier;
+        let list_border = |buffer: &Screen| buffer[(0, 2)].style;
+        let marked_border = |buffer: &Screen| buffer[(109, 2)].style;
         let list_focused = buffer(&view, 110, 20);
-        assert!(!list_border(&list_focused).contains(Modifier::DIM));
-        assert!(marked_border(&list_focused).contains(Modifier::DIM));
-        assert!(list_focused[(5, 2)].modifier.contains(Modifier::REVERSED));
+        assert!(list_border(&list_focused) != Style::Dim);
+        assert!(marked_border(&list_focused) == Style::Dim);
+        assert!(list_focused[(5, 2)].style == Style::Reversed);
 
         view.focus = Pane::Marked;
         let marked_focused = buffer(&view, 110, 20);
-        assert!(list_border(&marked_focused).contains(Modifier::DIM));
-        assert!(!marked_border(&marked_focused).contains(Modifier::DIM));
-        assert!(!marked_focused[(5, 2)].modifier.contains(Modifier::REVERSED));
-        assert!(marked_focused[(70, 2)].modifier.contains(Modifier::REVERSED));
+        assert!(list_border(&marked_focused) == Style::Dim);
+        assert!(marked_border(&marked_focused) != Style::Dim);
+        assert!(marked_focused[(5, 2)].style != Style::Reversed);
+        assert!(marked_focused[(70, 2)].style == Style::Reversed);
     }
 
     #[test]
@@ -1184,7 +1026,7 @@ mod tests {
     }
 
     #[test]
-    fn test_backend_handles_tiny_empty_listing_and_confirmation_modal() {
+    fn renderer_handles_tiny_empty_listing_and_confirmation_modal() {
         let tree = Tree::new(b"root", FileIdentity { device: 1, inode: 1 }, 1).unwrap();
         let root = tree.root();
         let fixture = Fixture { tree, root, directory: root, nested: root, top: root };

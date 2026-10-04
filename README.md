@@ -127,7 +127,8 @@ amount of storage the filesystem releases.
   of scanning and the terminal. A plan may span directories but never contains
   overlapping roots.
 - `fdu-tui` maps input to intents and renders borrowed model state; it performs
-  no filesystem I/O.
+  no filesystem I/O. Terminal settings and input readiness use rustix; a local
+  cell renderer writes ANSI updates, with unicode-width for name alignment.
 - `src/browser.rs` coordinates scan, ready, and delete phases.
   `src/main.rs` parses options and preserves the summary CLI.
 
