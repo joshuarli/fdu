@@ -248,10 +248,14 @@ pub fn execute(
 
 mod posix {
     use super::*;
-    use std::ffi::CString;
-    use std::fs::File;
-    use std::mem;
-    use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+    use rustix::fs::{self, AtFlags, FileType, Mode, OFlags, Stat};
+    use rustix::io::Errno;
+    use std::os::fd::{AsFd, BorrowedFd};
+
+    const DIRECTORY_FLAGS: OFlags = OFlags::RDONLY
+        .union(OFlags::DIRECTORY)
+        .union(OFlags::NOFOLLOW)
+        .union(OFlags::CLOEXEC);
 
     /// Identifies the mount a directory lives on, so a directory that became a
     /// mount point since scanning is never entered.
@@ -288,12 +292,10 @@ mod posix {
         sender: SyncSender<DeleteEvent>,
         mut after_operation: impl FnMut(usize),
     ) {
-        let root_file = File::from(root);
-        let root_fd = root_file.as_raw_fd();
         let root_record = plan.tree.record(plan.tree.root()).expect("tree has root");
         let expected_root = root_record.identity;
-        let root_mount = match mount_identity(root_fd) {
-            Ok(identity) if identity_of_fd(root_fd).ok() == Some(expected_root) => identity,
+        let root_mount = match mount_identity(root.as_fd()) {
+            Ok(identity) if identity_of_fd(root.as_fd()).ok() == Some(expected_root) => identity,
             Ok(_) => {
                 send_failure(&sender, "scan root identity changed before deletion");
                 return;
@@ -332,8 +334,7 @@ mod posix {
                 continue;
             };
             let parent = record.parent().expect("deletion targets have parents");
-            let parent_fd = chain.open(root_fd, &root_mount, &plan.tree, parent);
-            let result = match parent_fd {
+            let result = match chain.open(root.as_fd(), &root_mount, &plan.tree, parent) {
                 Ok(parent_fd) => delete_one(parent_fd, &root_mount, &plan.tree, node),
                 Err(error) => Err((OutcomeKind::Failed, error.to_string())),
             };
@@ -365,49 +366,33 @@ mod posix {
             return;
         }
         let _ = sender.send(DeleteEvent::Finished);
-        drop(root_file);
     }
 
     fn delete_one(
-        parent_fd: RawFd,
+        parent_fd: BorrowedFd<'_>,
         root_mount: &MountIdentity,
         tree: &Tree,
         node: NodeId,
     ) -> Result<OutcomeKind, (OutcomeKind, String)> {
         let record = tree.record(node).expect("deletion target exists");
-        let name_bytes = tree.name(node).expect("indexed entry has name");
-        let name = CString::new(name_bytes).map_err(|error| (OutcomeKind::Failed, error.to_string()))?;
-        let current = match stat_at(parent_fd, &name) {
+        let name = tree.name(node).expect("indexed entry has name");
+        let failed = |error: Errno| (OutcomeKind::Failed, io::Error::from(error).to_string());
+        let current = match stat_at(parent_fd, name) {
             Ok(stat) => stat,
-            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => return Ok(OutcomeKind::AlreadyAbsent),
-            Err(error) => return Err((OutcomeKind::Failed, error.to_string())),
+            Err(Errno::NOENT) => return Ok(OutcomeKind::AlreadyAbsent),
+            Err(error) => return Err(failed(error)),
         };
         let current_identity = identity(&current).map_err(|error| (OutcomeKind::Failed, error.to_string()))?;
-        let current_type = entry_type(current.st_mode);
-        if current_identity != record.identity || current_type != record.entry_type {
+        if current_identity != record.identity || entry_type(&current) != record.entry_type {
             return Err((OutcomeKind::Changed, "entry was replaced since scanning".to_owned()));
         }
         let flags = if record.entry_type == EntryType::Directory {
-            let directory = retry_interrupted(|| {
-                let directory_fd = unsafe {
-                    libc::openat(
-                        parent_fd,
-                        name.as_ptr(),
-                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                    )
-                };
-                if directory_fd < 0 {
-                    Err(io::Error::last_os_error())
-                } else {
-                    Ok(unsafe { File::from_raw_fd(directory_fd) })
-                }
-            });
-            let directory = match directory {
+            let directory = match retry(|| fs::openat(parent_fd, name, DIRECTORY_FLAGS, Mode::empty())) {
                 Ok(directory) => directory,
                 Err(error) => {
-                    if let Ok(latest) = stat_at(parent_fd, &name) {
+                    if let Ok(latest) = stat_at(parent_fd, name) {
                         if identity(&latest).ok() != Some(record.identity)
-                            || entry_type(latest.st_mode) != record.entry_type
+                            || entry_type(&latest) != record.entry_type
                         {
                             return Err((OutcomeKind::Changed, "directory was replaced during validation".to_owned()));
                         }
@@ -415,47 +400,40 @@ mod posix {
                     return Err((OutcomeKind::Failed, error.to_string()));
                 }
             };
-            if identity_of_fd(directory.as_raw_fd()).ok() != Some(record.identity) {
+            if identity_of_fd(directory.as_fd()).ok() != Some(record.identity) {
                 return Err((OutcomeKind::Changed, "directory changed during validation".to_owned()));
             }
-            if mount_identity(directory.as_raw_fd()).ok().as_ref() != Some(root_mount) {
+            if mount_identity(directory.as_fd()).ok().as_ref() != Some(root_mount) {
                 return Err((OutcomeKind::Changed, "directory became a mount boundary".to_owned()));
             }
-            libc::AT_REMOVEDIR
+            AtFlags::REMOVEDIR
         } else {
-            0
+            AtFlags::empty()
         };
         // Opening a directory to validate it takes time, so re-check what is
         // there just before removal. A non-directory was checked an instant
         // ago with nothing in between, so a second look would only repeat it.
-        if flags == libc::AT_REMOVEDIR {
-            let latest = match stat_at(parent_fd, &name) {
+        if flags == AtFlags::REMOVEDIR {
+            let latest = match stat_at(parent_fd, name) {
                 Ok(stat) => stat,
-                Err(error) if error.raw_os_error() == Some(libc::ENOENT) => return Ok(OutcomeKind::AlreadyAbsent),
-                Err(error) => return Err((OutcomeKind::Failed, error.to_string())),
+                Err(Errno::NOENT) => return Ok(OutcomeKind::AlreadyAbsent),
+                Err(error) => return Err(failed(error)),
             };
             if identity(&latest).map_err(|error| (OutcomeKind::Failed, error.to_string()))? != record.identity
-                || entry_type(latest.st_mode) != record.entry_type
+                || entry_type(&latest) != record.entry_type
             {
                 return Err((OutcomeKind::Changed, "entry changed immediately before removal".to_owned()));
             }
         }
-        if unsafe { libc::unlinkat(parent_fd, name.as_ptr(), flags) } == 0 {
-            Ok(OutcomeKind::Deleted)
-        } else {
-            let error = io::Error::last_os_error();
-            if error.raw_os_error() == Some(libc::ENOENT) {
-                Ok(OutcomeKind::AlreadyAbsent)
-            } else if error.kind() == io::ErrorKind::Interrupted {
-                Err((
-                    OutcomeKind::Failed,
-                    "unlink was interrupted; removal outcome is uncertain, refresh required".to_owned(),
-                ))
-            } else if error.raw_os_error() == Some(libc::ENOTEMPTY) {
-                Err((OutcomeKind::Failed, "directory gained unindexed children".to_owned()))
-            } else {
-                Err((OutcomeKind::Failed, error.to_string()))
-            }
+        match fs::unlinkat(parent_fd, name, flags) {
+            Ok(()) => Ok(OutcomeKind::Deleted),
+            Err(Errno::NOENT) => Ok(OutcomeKind::AlreadyAbsent),
+            Err(Errno::INTR) => Err((
+                OutcomeKind::Failed,
+                "unlink was interrupted; removal outcome is uncertain, refresh required".to_owned(),
+            )),
+            Err(Errno::NOTEMPTY) => Err((OutcomeKind::Failed, "directory gained unindexed children".to_owned())),
+            Err(error) => Err(failed(error)),
         }
     }
 
@@ -468,19 +446,19 @@ mod posix {
     /// after it was opened is never followed.
     #[derive(Default)]
     struct AncestorChain {
-        directories: Vec<(NodeId, File)>,
+        directories: Vec<(NodeId, OwnedFd)>,
     }
 
     impl AncestorChain {
         /// Returns the descriptor of `parent`, opening only the directories not
         /// already in the chain.
-        fn open(
-            &mut self,
-            root_fd: RawFd,
+        fn open<'a>(
+            &'a mut self,
+            root: BorrowedFd<'a>,
             root_mount: &MountIdentity,
             tree: &Tree,
             parent: NodeId,
-        ) -> io::Result<RawFd> {
+        ) -> io::Result<BorrowedFd<'a>> {
             let mut path = Vec::new();
             let mut current = Some(parent);
             while let Some(node) = current {
@@ -502,107 +480,65 @@ mod posix {
                 .count();
             self.directories.truncate(shared);
             for node in &path[shared..] {
-                let directory_fd = self.directories.last().map_or(root_fd, |(_, file)| file.as_raw_fd());
+                let directory_fd = self.directories.last().map_or(root, |(_, fd)| fd.as_fd());
                 let child = open_validated_child(directory_fd, root_mount, tree, *node)?;
                 self.directories.push((*node, child));
             }
-            Ok(self.directories.last().map_or(root_fd, |(_, file)| file.as_raw_fd()))
+            Ok(self.directories.last().map_or(root, |(_, fd)| fd.as_fd()))
         }
     }
 
     fn open_validated_child(
-        directory_fd: RawFd,
+        directory_fd: BorrowedFd<'_>,
         root_mount: &MountIdentity,
         tree: &Tree,
         node: NodeId,
-    ) -> io::Result<File> {
-        let name = CString::new(tree.name(node).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "directory name missing"))?)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        let child = retry_interrupted(|| {
-            let fd = unsafe {
-                libc::openat(
-                    directory_fd,
-                    name.as_ptr(),
-                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                )
-            };
-            if fd < 0 {
-                Err(io::Error::last_os_error())
-            } else {
-                Ok(unsafe { File::from_raw_fd(fd) })
-            }
-        })?;
+    ) -> io::Result<OwnedFd> {
+        let name = tree
+            .name(node)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "directory name missing"))?;
+        let child = retry(|| fs::openat(directory_fd, name, DIRECTORY_FLAGS, Mode::empty()))?;
         let expected = tree.record(node).expect("path node exists");
-        if identity_of_fd(child.as_raw_fd())? != expected.identity {
+        if identity_of_fd(child.as_fd())? != expected.identity {
             return Err(io::Error::new(io::ErrorKind::Other, "ancestor directory was replaced"));
         }
-        if mount_identity(child.as_raw_fd())? != *root_mount {
+        if mount_identity(child.as_fd())? != *root_mount {
             return Err(io::Error::new(io::ErrorKind::Other, "ancestor became a mount boundary"));
         }
         Ok(child)
     }
 
-    fn stat_at(parent: RawFd, name: &CString) -> io::Result<libc::stat> {
-        let mut metadata = mem::MaybeUninit::<libc::stat>::uninit();
-        retry_interrupted(|| {
-            if unsafe { libc::fstatat(parent, name.as_ptr(), metadata.as_mut_ptr(), libc::AT_SYMLINK_NOFOLLOW) } < 0 {
-                Err(io::Error::last_os_error())
-            } else {
-                Ok(())
-            }
-        })?;
-        Ok(unsafe { metadata.assume_init() })
+    fn stat_at(parent: BorrowedFd<'_>, name: &[u8]) -> Result<Stat, Errno> {
+        retry_errno(|| fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW))
     }
 
-    fn identity(metadata: &libc::stat) -> io::Result<FileIdentity> {
+    fn identity(metadata: &Stat) -> io::Result<FileIdentity> {
         Ok(FileIdentity {
             device: u64::try_from(metadata.st_dev).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid device number"))?,
             inode: u64::try_from(metadata.st_ino).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid inode number"))?,
         })
     }
 
-    fn identity_of_fd(fd: RawFd) -> io::Result<FileIdentity> {
-        let mut metadata = mem::MaybeUninit::<libc::stat>::uninit();
-        retry_interrupted(|| {
-            if unsafe { libc::fstat(fd, metadata.as_mut_ptr()) } < 0 {
-                Err(io::Error::last_os_error())
-            } else {
-                Ok(())
-            }
-        })?;
-        identity(unsafe { metadata.assume_init_ref() })
+    fn identity_of_fd(fd: BorrowedFd<'_>) -> io::Result<FileIdentity> {
+        identity(&retry(|| fs::fstat(fd))?)
     }
 
-    fn entry_type(mode: libc::mode_t) -> EntryType {
-        match mode & libc::S_IFMT {
-            libc::S_IFDIR => EntryType::Directory,
-            libc::S_IFREG => EntryType::RegularFile,
-            libc::S_IFLNK => EntryType::Symlink,
+    fn entry_type(metadata: &Stat) -> EntryType {
+        match FileType::from_raw_mode(metadata.st_mode) {
+            FileType::Directory => EntryType::Directory,
+            FileType::RegularFile => EntryType::RegularFile,
+            FileType::Symlink => EntryType::Symlink,
             _ => EntryType::Other,
         }
     }
 
     #[cfg(target_os = "macos")]
-    fn mount_identity(fd: RawFd) -> io::Result<MountIdentity> {
-        let mut metadata = mem::MaybeUninit::<libc::stat>::uninit();
-        retry_interrupted(|| {
-            if unsafe { libc::fstat(fd, metadata.as_mut_ptr()) } < 0 {
-                Err(io::Error::last_os_error())
-            } else {
-                Ok(())
-            }
-        })?;
-        let mut filesystem = mem::MaybeUninit::<libc::statfs>::zeroed();
-        retry_interrupted(|| {
-            if unsafe { libc::fstatfs(fd, filesystem.as_mut_ptr()) } < 0 {
-                Err(io::Error::last_os_error())
-            } else {
-                Ok(())
-            }
-        })?;
-        let metadata = unsafe { metadata.assume_init_ref() };
-        let filesystem = unsafe { filesystem.assume_init_ref() };
-        let fsid = unsafe { mem::transmute::<libc::fsid_t, [i32; 2]>(filesystem.f_fsid) };
+    fn mount_identity(fd: BorrowedFd<'_>) -> io::Result<MountIdentity> {
+        let metadata = retry(|| fs::fstat(fd))?;
+        let filesystem = retry(|| fs::fstatfs(fd))?;
+        // Apple's fsid_t is exactly two i32 words.
+        const _: () = assert!(std::mem::size_of::<rustix::fs::StatFs>() >= 8);
+        let fsid = unsafe { std::mem::transmute_copy::<_, [i32; 2]>(&filesystem.f_fsid) };
         let mount_point = filesystem
             .f_mntonname
             .iter()
@@ -617,34 +553,18 @@ mod posix {
     }
 
     #[cfg(target_os = "linux")]
-    fn mount_identity(fd: RawFd) -> io::Result<MountIdentity> {
-        let mut metadata = mem::MaybeUninit::<libc::statx>::zeroed();
-        retry_interrupted(|| {
-            let result = unsafe {
-                libc::statx(
-                    fd,
-                    c"".as_ptr(),
-                    libc::AT_EMPTY_PATH,
-                    libc::STATX_BASIC_STATS | libc::STATX_MNT_ID,
-                    metadata.as_mut_ptr(),
-                )
-            };
-            if result < 0 {
-                Err(io::Error::last_os_error())
-            } else {
-                Ok(())
-            }
+    fn mount_identity(fd: BorrowedFd<'_>) -> io::Result<MountIdentity> {
+        let metadata = retry(|| {
+            fs::statx(fd, c"", AtFlags::EMPTY_PATH, fs::StatxFlags::BASIC_STATS | fs::StatxFlags::MNT_ID)
         })?;
-        // SAFETY: a successful statx call fills the structure.
-        let metadata = unsafe { metadata.assume_init_ref() };
-        if metadata.stx_mask & libc::STATX_MNT_ID == 0 {
+        if !fs::StatxFlags::from_bits_retain(metadata.stx_mask).contains(fs::StatxFlags::MNT_ID) {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "kernel did not report the directory mount ID",
             ));
         }
         Ok(MountIdentity {
-            device: libc::makedev(metadata.stx_dev_major, metadata.stx_dev_minor),
+            device: fs::makedev(metadata.stx_dev_major, metadata.stx_dev_minor),
             mount_id: metadata.stx_mnt_id,
         })
     }
@@ -657,13 +577,17 @@ mod posix {
         sender.send(DeleteEvent::Outcomes(values)).is_ok()
     }
 
-    fn retry_interrupted<T>(mut operation: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    fn retry_errno<T>(mut operation: impl FnMut() -> rustix::io::Result<T>) -> rustix::io::Result<T> {
         loop {
             match operation() {
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(Errno::INTR) => continue,
                 result => return result,
             }
         }
+    }
+
+    fn retry<T>(operation: impl FnMut() -> rustix::io::Result<T>) -> io::Result<T> {
+        retry_errno(operation).map_err(io::Error::from)
     }
 
     fn send_failure(sender: &SyncSender<DeleteEvent>, message: &str) {
@@ -783,11 +707,12 @@ mod tests {
         use crate::posix::run_with;
         use crate::{create_plan, DeleteEvent, DeleteOutcome, DeletionPlan, OutcomeKind};
         use fdu_core::{EntryType, FileIdentity, NodeId, NodeState, Tree};
-        use std::fs::{self, OpenOptions};
+        use rustix::fs::{Mode, OFlags};
+        use std::fs;
         use std::io;
-        use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
+        use std::os::fd::OwnedFd;
         use std::os::unix::ffi::OsStrExt;
-        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        use std::os::unix::fs::MetadataExt;
         use std::path::{Path, PathBuf};
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         use std::sync::mpsc;
@@ -883,12 +808,11 @@ mod tests {
         }
 
         fn root_fd(root: &Path) -> io::Result<OwnedFd> {
-            let file = OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-                .open(root)?;
-            let raw = file.into_raw_fd();
-            Ok(unsafe { OwnedFd::from_raw_fd(raw) })
+            Ok(rustix::fs::open(
+                root,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )?)
         }
 
         fn execute_plan(

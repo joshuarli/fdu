@@ -19,7 +19,12 @@ const SCAN_EVENT_CHANNEL_CAPACITY: usize = 512;
 const SCAN_BATCH_CAPACITY: usize = 1024;
 const SCAN_BATCH_POOL_CAPACITY: usize = 8;
 const DELETE_CHANNEL_CAPACITY: usize = 8;
-const MAX_SCAN_EVENTS_PER_TICK: usize = 128;
+/// A tick applies scan events until the channel is empty or this much time has passed, so a
+/// scan that produces many small events is not paced by the tick rate while input and drawing
+/// still get their turn.
+const SCAN_DRAIN_BUDGET: Duration = Duration::from_millis(4);
+/// The clock is read once per this many events.
+const SCAN_DRAIN_CLOCK_INTERVAL: usize = 32;
 const MAX_DELETE_EVENTS_PER_TICK: usize = 32;
 const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const SCAN_INPUT_POLL_INTERVAL: Duration = Duration::from_millis(1);
@@ -1605,13 +1610,19 @@ pub fn run(path: std::path::PathBuf, read_only: bool, apparent: bool) -> Result<
     let mut last_draw = Instant::now() - SCAN_REDRAW_INTERVAL;
     let mut draw_pending = true;
     let mut first_live_listing_directory = None;
+    // Set when a tick left scan events unread, so the next one does not wait for input.
+    let mut scan_backlog = false;
     loop {
         let text_input = matches!(&model.dialog, DialogState::Filter(_));
         // The scanner feeds events through a small bounded channel, so a long
         // idle wait here would cap how fast scanning can run. Deletion reports
         // progress without blocking, so it can wait the usual interval.
         let input_poll_interval = if matches!(&phase, AppPhase::Scanning(_)) {
-            SCAN_INPUT_POLL_INTERVAL
+            if scan_backlog {
+                Duration::ZERO
+            } else {
+                SCAN_INPUT_POLL_INTERVAL
+            }
         } else {
             INPUT_POLL_INTERVAL
         };
@@ -1657,8 +1668,18 @@ pub fn run(path: std::path::PathBuf, read_only: bool, apparent: bool) -> Result<
         let mut model_changed = false;
         let mut scan_finished = false;
         if let AppPhase::Scanning(worker) = &mut phase {
+            scan_backlog = false;
             if let Some(receiver) = worker.receiver.as_ref() {
-                for _ in 0..MAX_SCAN_EVENTS_PER_TICK {
+                let drain_started = Instant::now();
+                let mut applied = 0usize;
+                loop {
+                    if applied % SCAN_DRAIN_CLOCK_INTERVAL == SCAN_DRAIN_CLOCK_INTERVAL - 1
+                        && drain_started.elapsed() >= SCAN_DRAIN_BUDGET
+                    {
+                        scan_backlog = true;
+                        break;
+                    }
+                    applied += 1;
                     match receiver.try_recv() {
                         Ok(event) => {
                             worker.queue_metrics.event_received();

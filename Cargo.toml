@@ -29,6 +29,12 @@ fdu-tui = { path = "crates/fdu-tui", optional = true }
 
 [dev-dependencies]
 laputa-ptytest = { path = "../ptytest" }
+rustybench = { path = "../rustybench" }
+
+[[bench]]
+name = "fixture"
+harness = false
+required-features = ["interactive"]
 
 [profile.release]
 lto = "thin"

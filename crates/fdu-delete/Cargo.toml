@@ -7,4 +7,4 @@ description = "Descriptor-relative deletion for fdu indexes"
 
 [dependencies]
 fdu-core = { path = "../fdu-core" }
-libc = "0.2"
+rustix = { version = "1.1", features = ["fs", "std", "linux_latest"] }
