@@ -682,9 +682,7 @@ impl BrowserModel {
                 }
             }
             if matches!(self.cursor, Cursor::None) {
-                self.cursor = self.visible.first().copied().map(Cursor::Entry).unwrap_or_else(|| {
-                    if self.has_parent_row() { Cursor::Parent } else { Cursor::None }
-                });
+                self.cursor = self.visible.first().copied().map(Cursor::Entry).unwrap_or(Cursor::None);
                 self.refresh_cursor_index();
             }
         }
@@ -1007,7 +1005,6 @@ impl BrowserModel {
             tree: &self.tree,
             current_directory: self.current_directory,
             rows: &self.visible,
-            has_parent_row: self.has_parent_row(),
             cursor_index: self.cursor_index,
             marks: &self.marks.members,
             marked: &self.marks.order,
@@ -1298,7 +1295,6 @@ impl BrowserModel {
 
     fn valid_cursor(&self, cursor: Cursor) -> Option<Cursor> {
         match cursor {
-            Cursor::Parent if self.has_parent_row() => Some(Cursor::Parent),
             Cursor::Entry(id) if self.visible.contains(&id) => Some(Cursor::Entry(id)),
             _ => None,
         }
@@ -1307,15 +1303,9 @@ impl BrowserModel {
     fn first_cursor(&self) -> Cursor {
         if let Some(first) = self.visible.first() {
             Cursor::Entry(*first)
-        } else if self.has_parent_row() {
-            Cursor::Parent
         } else {
             Cursor::None
         }
-    }
-
-    fn has_parent_row(&self) -> bool {
-        self.current_directory != self.tree.root()
     }
 
     fn cursor_index(&self) -> Option<usize> {
@@ -1323,17 +1313,14 @@ impl BrowserModel {
     }
 
     fn refresh_cursor_index(&mut self) {
-        let offset = usize::from(self.has_parent_row());
         self.cursor_index = match self.cursor {
-            Cursor::Parent if self.has_parent_row() => Some(0),
-            Cursor::Entry(id) => self.visible.iter().position(|candidate| *candidate == id).map(|index| index + offset),
+            Cursor::Entry(id) => self.visible.iter().position(|candidate| *candidate == id),
             Cursor::None => None,
-            _ => None,
         };
     }
 
     fn move_cursor(&mut self, amount: isize) -> bool {
-        let count = self.visible.len() + usize::from(self.has_parent_row());
+        let count = self.visible.len();
         if count == 0 {
             return false;
         }
@@ -1347,7 +1334,7 @@ impl BrowserModel {
     }
 
     fn move_to_edge(&mut self, end: bool) -> bool {
-        let count = self.visible.len() + usize::from(self.has_parent_row());
+        let count = self.visible.len();
         if count == 0 {
             return false;
         }
@@ -1359,16 +1346,7 @@ impl BrowserModel {
     }
 
     fn set_cursor_index(&mut self, index: usize) -> bool {
-        let offset = usize::from(self.has_parent_row());
-        let next = if self.has_parent_row() && index == 0 {
-            Cursor::Parent
-        } else {
-            self.visible
-                .get(index.saturating_sub(offset))
-                .copied()
-                .map(Cursor::Entry)
-                .unwrap_or(Cursor::None)
-        };
+        let next = self.visible.get(index).copied().map(Cursor::Entry).unwrap_or(Cursor::None);
         let changed = !same_cursor(self.cursor, next);
         self.cursor = next;
         self.cursor_index = Some(index);
@@ -1564,7 +1542,6 @@ impl BrowserModel {
 
     fn enter_cursor(&mut self) -> bool {
         match self.cursor {
-            Cursor::Parent => self.go_parent(),
             Cursor::Entry(id) => {
                 let Some(record) = self.tree.record(id) else {
                     return false;
@@ -1621,7 +1598,7 @@ impl BrowserModel {
 
 fn same_cursor(left: Cursor, right: Cursor) -> bool {
     match (left, right) {
-        (Cursor::Parent, Cursor::Parent) | (Cursor::None, Cursor::None) => true,
+        (Cursor::None, Cursor::None) => true,
         (Cursor::Entry(left), Cursor::Entry(right)) => left == right,
         _ => false,
     }

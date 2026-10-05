@@ -148,7 +148,6 @@ fn marks_collect_across_directories_and_show_root_relative_paths() -> io::Result
     session.key(Key::Enter); // into alpha
     session.wait_for("inner.txt");
     session.key(Key::Home);
-    session.key(Key::Down); // past the ../ row
     session.text("d"); // inner.txt
     session.key(Key::Left); // back to the root
     session.wait_for("top.txt");
@@ -200,7 +199,6 @@ fn marking_a_directory_covers_its_contents_and_overlaps_are_refused() -> io::Res
     let screen = session.wait_for("Inside marked directory alpha");
     assert!(screen.shows("[=]"), "covered rows are cued without color");
 
-    session.key(Key::Down); // past the ../ row
     session.text("d");
     let screen = session.wait_for("Already covered by marked directory alpha");
     assert!(screen.shows("Marked 1 item"), "the refused mark is not added");
@@ -210,7 +208,6 @@ fn marking_a_directory_covers_its_contents_and_overlaps_are_refused() -> io::Res
     session.text("d");
     session.wait_until_absent("Marked 1 item");
     session.key(Key::Home);
-    session.key(Key::Down);
     session.text("d"); // inner.txt, marked directly now that alpha is unmarked
     session.wait_for("Marked 1 item");
     session.key(Key::Left);
@@ -453,7 +450,6 @@ fn confirmed_deletion_removes_marks_from_several_directories_and_reports_the_res
     session.key(Key::Enter); // into alpha
     session.wait_for("inner.txt");
     session.key(Key::Home);
-    session.key(Key::Down); // past the ../ row
     session.text("d"); // alpha/inner.txt
     session.key(Key::Left);
     session.wait_for("top.txt");

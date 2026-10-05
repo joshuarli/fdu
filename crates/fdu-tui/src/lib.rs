@@ -79,7 +79,6 @@ pub enum Intent {
 
 #[derive(Clone, Copy)]
 pub enum Cursor {
-    Parent,
     Entry(NodeId),
     None,
 }
@@ -138,7 +137,6 @@ pub struct View<'a> {
     pub tree: &'a Tree,
     pub current_directory: NodeId,
     pub rows: &'a [NodeId],
-    pub has_parent_row: bool,
     pub cursor_index: Option<usize>,
     pub marks: &'a HashSet<NodeId>,
     /// Marked roots in the order the marked-items pane lists them.
@@ -293,10 +291,9 @@ fn render_browser(frame: &mut Screen, area: Rect, view: &View<'_>) {
 
 fn render_rows(frame: &mut Screen, area: Rect, view: &View<'_>, directory_total: u64) {
     let focused = view.focus == Pane::Browser;
-    let parent_offset = usize::from(view.has_parent_row);
     let cursor_index = view.cursor_index;
     let available_rows = usize::from(area.height);
-    let row_count = view.rows.len() + parent_offset;
+    let row_count = view.rows.len();
     let start = window_start(cursor_index, row_count, available_rows);
     let visible_end = start.saturating_add(available_rows).min(row_count);
     let width = usize::from(area.width);
@@ -319,14 +316,7 @@ fn render_rows(frame: &mut Screen, area: Rect, view: &View<'_>, directory_total:
         let y = area.y.saturating_add(screen_row as u16);
         let row_area = Rect::new(area.x, y, area.width, 1);
         let is_selected = cursor_index == Some(index);
-        let selected_style = cursor_style(focused);
-        if index < parent_offset {
-            let text = pad_to("   ../".to_owned(), width);
-            let style = if is_selected { selected_style } else { Style::Dim };
-            frame.text(row_area, &text, style);
-            continue;
-        }
-        let Some(id) = view.rows.get(index - parent_offset).copied() else {
+        let Some(id) = view.rows.get(index).copied() else {
             continue;
         };
         let Some(record) = view.tree.record(id) else {
@@ -437,12 +427,6 @@ fn render_marked(frame: &mut Screen, area: Rect, view: &View<'_>) {
         let y = inner.y.saturating_add(screen_row as u16);
         frame.text(Rect::new(inner.x, y, inner.width, 1), &text, style);
     }
-}
-
-/// The cursor row is reversed in the focused pane and only bold in the other,
-/// so the pane that takes keystrokes is the one with a strong highlight.
-fn cursor_style(focused: bool) -> Style {
-    if focused { Style::Reversed } else { Style::Bold }
 }
 
 /// First row of a window that keeps the cursor visible.
@@ -820,7 +804,6 @@ mod tests {
             tree: &fixture.tree,
             current_directory: fixture.root,
             rows,
-            has_parent_row: false,
             cursor_index: Some(0),
             marks,
             marked,
@@ -1090,7 +1073,6 @@ mod tests {
                     let mut view = base_view(&fixture, &rows, &marks, &marked, &colors);
                     view.side_visible = true;
                     view.focus = Pane::Marked;
-                    view.has_parent_row = true;
                     match modal {
                         0 => {}
                         1 => view.modal = Modal::Help { focus: Pane::Browser },
