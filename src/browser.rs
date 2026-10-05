@@ -4,8 +4,8 @@ use fdu_core::{
 use fdu_delete::{create_plan, DeleteEvent, DeleteOutcome, DeletionPlan, OutcomeKind};
 use fdu_scan::{open_root, start_indexed_scan_with_metrics, RootAnchor, ScanQueueMetrics};
 use fdu_tui::{
-    self, Cursor, Intent, Modal, Operation, Pane, Phase, SizeMode, Split, SortMode, TerminalSession,
-    TerminalSize, View,
+    self, Cursor, Intent, LsColors, Modal, Operation, Pane, Phase, SizeMode, Split, SortMode,
+    TerminalSession, TerminalSize, View,
 };
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -281,6 +281,7 @@ struct BrowserModel {
     actual_deletions: usize,
     scanning: bool,
     read_only: bool,
+    ls_colors: LsColors,
 }
 
 struct BrowserProfile {
@@ -441,6 +442,7 @@ impl BrowserModel {
             actual_deletions: 0,
             scanning: true,
             read_only,
+            ls_colors: LsColors::from_env(),
         };
         model.size_mode = if apparent { SizeMode::Apparent } else { SizeMode::Allocated };
         model.rebuild_listing(false);
@@ -1029,6 +1031,7 @@ impl BrowserModel {
             detail_message,
             modal,
             operation,
+            ls_colors: &self.ls_colors,
         }
     }
 

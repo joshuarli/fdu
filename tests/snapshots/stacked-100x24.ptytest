@@ -27,10 +27,20 @@ modes: alternate-screen=true application-cursor=false application-keypad=false b
 23│·192238·entries···d·mark···Tab·marked···-·split···s·sort···/·filter···?·help···q·quit···············
 attr: row=0 columns=0..100 fg=Default bg=Default bold=false dim=false italic=false underline=false inverse=true
 attr: row=1 columns=1..56 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
-attr: row=3 columns=1..99 fg=Default bg=Default bold=false dim=false italic=false underline=false inverse=true
+attr: row=2 columns=1..99 fg=Indexed(1) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=3 columns=1..99 fg=Indexed(4) bg=Default bold=true dim=false italic=false underline=false inverse=true
+attr: row=4 columns=1..99 fg=Indexed(4) bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=5 columns=1..99 fg=Indexed(4) bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=6 columns=1..99 fg=Indexed(4) bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=7 columns=1..99 fg=Indexed(4) bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=8 columns=1..99 fg=Indexed(4) bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=9 columns=1..99 fg=Indexed(4) bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=10 columns=1..99 fg=Indexed(4) bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=11 columns=1..99 fg=Indexed(4) bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=12 columns=1..99 fg=Indexed(4) bg=Default bold=true dim=false italic=false underline=false inverse=false
 attr: row=14 columns=0..100 fg=Default bg=Default bold=false dim=true italic=false underline=false inverse=false
 attr: row=15 columns=0..1 fg=Default bg=Default bold=false dim=true italic=false underline=false inverse=false
-attr: row=15 columns=1..99 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=15 columns=1..99 fg=Indexed(1) bg=Default bold=true dim=false italic=false underline=false inverse=false
 attr: row=15 columns=99..100 fg=Default bg=Default bold=false dim=true italic=false underline=false inverse=false
 attr: row=16 columns=0..1 fg=Default bg=Default bold=false dim=true italic=false underline=false inverse=false
 attr: row=16 columns=99..100 fg=Default bg=Default bold=false dim=true italic=false underline=false inverse=false

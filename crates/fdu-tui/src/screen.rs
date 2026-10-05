@@ -26,27 +26,138 @@ impl Rect {
     }
 }
 
-#[derive(Clone, Copy, Default, Eq, PartialEq)]
-pub(crate) enum Style {
-    #[default]
-    Plain,
-    Bold,
-    Dim,
-    Reversed,
-    Yellow,
+#[derive(Clone, Copy, Default, Eq, PartialEq, Debug)]
+pub(crate) struct Style {
+    pub fg: Option<Color>,
+    pub bg: Option<Color>,
+    pub bold: bool,
+    pub dim: bool,
+    pub reversed: bool,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq, Debug)]
+pub(crate) enum Color {
+    Black,
     Red,
+    Green,
+    Yellow,
+    Blue,
+    Magenta,
+    Cyan,
+    White,
+    BrightBlack,
+    BrightRed,
+    BrightGreen,
+    BrightYellow,
+    BrightBlue,
+    BrightMagenta,
+    BrightCyan,
+    BrightWhite,
+    Ansi256(u8),
+    Rgb(u8, u8, u8),
 }
 
 impl Style {
-    fn ansi(self) -> &'static str {
-        match self {
-            Self::Plain => "\x1b[0m",
-            Self::Bold => "\x1b[0;1m",
-            Self::Dim => "\x1b[0;2m",
-            Self::Reversed => "\x1b[0;7m",
-            Self::Yellow => "\x1b[0;33m",
-            Self::Red => "\x1b[0;31m",
+    #[allow(non_upper_case_globals)]
+    pub const Plain: Self = Self { fg: None, bg: None, bold: false, dim: false, reversed: false };
+    #[allow(non_upper_case_globals)]
+    pub const Bold: Self = Self { fg: None, bg: None, bold: true, dim: false, reversed: false };
+    #[allow(non_upper_case_globals)]
+    pub const Dim: Self = Self { fg: None, bg: None, bold: false, dim: true, reversed: false };
+    #[allow(non_upper_case_globals)]
+    pub const Reversed: Self = Self { fg: None, bg: None, bold: false, dim: false, reversed: true };
+    #[allow(non_upper_case_globals)]
+    pub const Yellow: Self = Self {
+        fg: Some(Color::Yellow),
+        bg: None,
+        bold: false,
+        dim: false,
+        reversed: false,
+    };
+    #[allow(non_upper_case_globals)]
+    pub const Red: Self = Self {
+        fg: Some(Color::Red),
+        bg: None,
+        bold: false,
+        dim: false,
+        reversed: false,
+    };
+
+    /// Keeps the foreground/background while adding the cursor highlight, so a
+    /// selected row stays reversed (or bold when unfocused) without losing its color.
+    pub fn with_cursor(self, focused: bool) -> Self {
+        if focused {
+            Self { reversed: true, ..self }
+        } else {
+            Self { bold: true, ..self }
         }
+    }
+
+    fn ansi(self) -> String {
+        let mut output = String::from("\x1b[0");
+        if self.bold {
+            output.push_str(";1");
+        }
+        if self.dim {
+            output.push_str(";2");
+        }
+        if self.reversed {
+            output.push_str(";7");
+        }
+        if let Some(color) = self.fg {
+            match color {
+                Color::Black => output.push_str(";30"),
+                Color::Red => output.push_str(";31"),
+                Color::Green => output.push_str(";32"),
+                Color::Yellow => output.push_str(";33"),
+                Color::Blue => output.push_str(";34"),
+                Color::Magenta => output.push_str(";35"),
+                Color::Cyan => output.push_str(";36"),
+                Color::White => output.push_str(";37"),
+                Color::BrightBlack => output.push_str(";90"),
+                Color::BrightRed => output.push_str(";91"),
+                Color::BrightGreen => output.push_str(";92"),
+                Color::BrightYellow => output.push_str(";93"),
+                Color::BrightBlue => output.push_str(";94"),
+                Color::BrightMagenta => output.push_str(";95"),
+                Color::BrightCyan => output.push_str(";96"),
+                Color::BrightWhite => output.push_str(";97"),
+                Color::Ansi256(index) => {
+                    output.push_str(&format!(";38;5;{index}"));
+                }
+                Color::Rgb(red, green, blue) => {
+                    output.push_str(&format!(";38;2;{red};{green};{blue}"));
+                }
+            }
+        }
+        if let Some(color) = self.bg {
+            match color {
+                Color::Black => output.push_str(";40"),
+                Color::Red => output.push_str(";41"),
+                Color::Green => output.push_str(";42"),
+                Color::Yellow => output.push_str(";43"),
+                Color::Blue => output.push_str(";44"),
+                Color::Magenta => output.push_str(";45"),
+                Color::Cyan => output.push_str(";46"),
+                Color::White => output.push_str(";47"),
+                Color::BrightBlack => output.push_str(";100"),
+                Color::BrightRed => output.push_str(";101"),
+                Color::BrightGreen => output.push_str(";102"),
+                Color::BrightYellow => output.push_str(";103"),
+                Color::BrightBlue => output.push_str(";104"),
+                Color::BrightMagenta => output.push_str(";105"),
+                Color::BrightCyan => output.push_str(";106"),
+                Color::BrightWhite => output.push_str(";107"),
+                Color::Ansi256(index) => {
+                    output.push_str(&format!(";48;5;{index}"));
+                }
+                Color::Rgb(red, green, blue) => {
+                    output.push_str(&format!(";48;2;{red};{green};{blue}"));
+                }
+            }
+        }
+        output.push('m');
+        output
     }
 }
 
@@ -197,7 +308,7 @@ impl Screen {
                     write!(output, "\x1b[{};{}H", y + 1, x + 1).unwrap();
                 }
                 if style != cell.style {
-                    output.push_str(cell.style.ansi());
+                    output.push_str(&cell.style.ansi());
                     style = cell.style;
                 }
                 output.push_str(&cell.text);
@@ -205,7 +316,7 @@ impl Screen {
             }
         }
         if style != Style::Plain {
-            output.push_str(Style::Plain.ansi());
+            output.push_str(&Style::Plain.ansi());
         }
         output.into_bytes()
     }

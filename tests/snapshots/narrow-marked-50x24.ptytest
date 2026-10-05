@@ -27,4 +27,5 @@ modes: alternate-screen=true application-cursor=false application-keypad=false b
 23│·192238·entries···d·unmark···Enter·show···c·clear…
 attr: row=0 columns=0..50 fg=Default bg=Default bold=false dim=false italic=false underline=false inverse=true
 attr: row=1 columns=1..46 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
-attr: row=2 columns=1..49 fg=Default bg=Default bold=false dim=false italic=false underline=false inverse=true
+attr: row=2 columns=1..49 fg=Indexed(1) bg=Default bold=false dim=false italic=false underline=false inverse=true
+attr: row=3 columns=1..49 fg=Indexed(1) bg=Default bold=false dim=false italic=false underline=false inverse=false

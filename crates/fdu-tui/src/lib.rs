@@ -1,7 +1,9 @@
+mod lscolors;
 mod screen;
 mod terminal;
 
 use fdu_core::{EntryType, NodeId, NodeRecord, NodeState, Tree};
+pub use lscolors::LsColors;
 use screen::{Rect, Screen, Style};
 use std::collections::HashSet;
 use std::io;
@@ -162,6 +164,7 @@ pub struct View<'a> {
     pub detail_message: Option<&'a str>,
     pub modal: Modal<'a>,
     pub operation: Operation<'a>,
+    pub ls_colors: &'a LsColors,
 }
 
 pub struct TerminalSession {
@@ -353,19 +356,27 @@ fn render_rows(frame: &mut Screen, area: Rect, view: &View<'_>, directory_total:
             "{mark} {marker}{size_text:>size_width$} {percent}{bar}{link}",
             size_width = SIZE_COLUMN_WIDTH,
         );
-        let name = escape_name(view.tree.name(id).unwrap_or_default());
+        let raw_name = view.tree.name(id).unwrap_or_default();
+        let name = escape_name(raw_name);
         let name_budget = width.saturating_sub(cell_width(&prefix) + cell_width(suffix));
         let text = pad_to(format!("{prefix}{}{suffix}", clip_end(&name, name_budget)), width);
-        let style = if is_selected {
-            selected_style
-        } else {
-            match record.state {
-                NodeState::Incomplete | NodeState::Stale => Style::Yellow,
-                NodeState::Excluded(_) => Style::Red,
-                _ => Style::Plain,
-            }
-        };
+        let base = row_style(view, id, record, raw_name);
+        let style = if is_selected { base.with_cursor(focused) } else { base };
         frame.text(row_area, &text, style);
+    }
+}
+
+/// A row's color: red when it is marked for deletion, yellow for incomplete or
+/// stale, red for excluded, otherwise the `LS_COLORS` file color. The `[x]`,
+/// `!`, `~`, `M`, and `A` markers carry the same state in plain text.
+fn row_style(view: &View<'_>, id: NodeId, record: &NodeRecord, name: &[u8]) -> Style {
+    if view.marks.contains(&id) {
+        return Style::Red;
+    }
+    match record.state {
+        NodeState::Incomplete | NodeState::Stale => Style::Yellow,
+        NodeState::Excluded(_) => Style::Red,
+        _ => view.ls_colors.style_for(name, record.entry_type),
     }
 }
 
@@ -399,7 +410,6 @@ fn render_marked(frame: &mut Screen, area: Rect, view: &View<'_>) {
     }
     let available_rows = usize::from(inner.height);
     let start = window_start(view.marked_cursor, view.marked.len(), available_rows);
-    let selected_style = cursor_style(focused);
     for (screen_row, index) in (start..view.marked.len().min(start + available_rows)).enumerate() {
         let id = view.marked[index];
         let Some(record) = view.tree.record(id) else {
@@ -421,7 +431,9 @@ fn render_marked(frame: &mut Screen, area: Rect, view: &View<'_>) {
         let path = relative_path(view, id);
         let budget = width.saturating_sub(cell_width(&prefix) + cell_width(suffix));
         let text = pad_to(format!("{prefix}{}{suffix}", clip_start(&path, budget)), width);
-        let style = if is_selected { selected_style } else { Style::Plain };
+        // Every row here is queued for deletion, so every row is red; the
+        // cursor keeps its reverse/bold highlight on top of that.
+        let style = if is_selected { Style::Red.with_cursor(focused) } else { Style::Red };
         let y = inner.y.saturating_add(screen_row as u16);
         frame.text(Rect::new(inner.x, y, inner.width, 1), &text, style);
     }
@@ -524,22 +536,31 @@ fn render_status(frame: &mut Screen, area: Rect, view: &View<'_>) {
         view.indexed_entries,
         if view.phase == Phase::Scanning { "…" } else { "" }
     );
-    let text = match &view.operation {
-        Operation::Deleting { completed, total, current, stopping } => format!(
-            " Deleting {completed} of {total} · {current} · {} · {count}",
-            if *stopping { "stopping; removed entries cannot be restored" } else { "Esc stops; removed entries cannot be restored" }
+    let (text, style) = match &view.operation {
+        Operation::Deleting { completed, total, current, stopping } => (
+            format!(
+                " Deleting {completed} of {total} · {current} · {} · {count}",
+                if *stopping { "stopping; removed entries cannot be restored" } else { "Esc stops; removed entries cannot be restored" }
+            ),
+            Style::Red,
         ),
-        Operation::ConfirmDelete { roots, entries, allocated_bytes, .. } => format!(
-            " Permanently delete {roots} marked item{} ({entries} entries, {})? Enter confirms · Esc cancels · {count}",
-            if *roots == 1 { "" } else { "s" },
-            format_size(*allocated_bytes),
+        Operation::ConfirmDelete { roots, entries, allocated_bytes, .. } => (
+            format!(
+                " Permanently delete {roots} marked item{} ({entries} entries, {})? Enter confirms · Esc cancels · {count}",
+                if *roots == 1 { "" } else { "s" },
+                format_size(*allocated_bytes),
+            ),
+            Style::Red,
         ),
-        Operation::Idle => match view.message.or(view.detail_message) {
-            Some(message) => format!(" {count} · {message} · {}", key_hints(view)),
-            None => format!(" {count} · {}", key_hints(view)),
-        },
+        Operation::Idle => (
+            match view.message.or(view.detail_message) {
+                Some(message) => format!(" {count} · {message} · {}", key_hints(view)),
+                None => format!(" {count} · {}", key_hints(view)),
+            },
+            Style::Plain,
+        ),
     };
-    frame.text(area, &clip_end(&text, usize::from(area.width)), Style::Plain);
+    frame.text(area, &clip_end(&text, usize::from(area.width)), style);
 }
 
 fn render_modal(frame: &mut Screen, view: &View<'_>) {
@@ -579,8 +600,9 @@ fn help_lines(focus: Pane) -> (String, Vec<String>) {
         "  directory containing a mark, can be marked until that is removed.",
         "Deletion is permanent; there is no Trash. Byte totals are metadata",
         "  counts and released storage can differ.",
-        "Rows: [x] marked  [=] covered  ! incomplete  ~ stale  M mount  A alias",
+        "Rows: [x] marked (red)  [=] covered  ! incomplete  ~ stale  M mount  A alias",
         "  / directory  @ symlink (never followed)  * hardlinked name",
+        "  Directory and symlink colors follow LS_COLORS; marked rows stay red.",
         "The count at the bottom ends in … while the scan is still running.",
         "q or Ctrl-C quits. Esc or ? closes help.",
     ];
@@ -731,7 +753,7 @@ fn format_size(size: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        clip_end, clip_start, escape_name, render, Modal, Operation, Pane, Phase,
+        clip_end, clip_start, escape_name, render, LsColors, Modal, Operation, Pane, Phase,
         SizeMode, SortMode, Split, View,
     };
     use fdu_core::{EntryType, FileIdentity, NodeId, NodeState, Tree};
@@ -792,6 +814,7 @@ mod tests {
         rows: &'a [NodeId],
         marks: &'a HashSet<NodeId>,
         marked: &'a [NodeId],
+        ls_colors: &'a LsColors,
     ) -> View<'a> {
         View {
             tree: &fixture.tree,
@@ -821,6 +844,7 @@ mod tests {
             detail_message: None,
             modal: Modal::None,
             operation: Operation::Idle,
+            ls_colors,
         }
     }
 
@@ -847,7 +871,8 @@ mod tests {
         }
         let marks = HashSet::new();
         let fixture = Fixture { tree, root, directory: root, nested: root, top: root };
-        let mut view = base_view(&fixture, &rows, &marks, &[]);
+        let colors = LsColors::default();
+        let mut view = base_view(&fixture, &rows, &marks, &[], &colors);
         view.cursor_index = Some(rows.len() - 1);
         let output = draw(&view, 80, 12);
         assert!(output.contains("entry-0499"));
@@ -860,7 +885,8 @@ mod tests {
         let rows = [fixture.directory, fixture.top];
         let marks = HashSet::from([fixture.nested, fixture.top]);
         let marked = [fixture.nested, fixture.top];
-        let mut view = base_view(&fixture, &rows, &marks, &marked);
+        let colors = LsColors::default();
+        let mut view = base_view(&fixture, &rows, &marks, &marked, &colors);
         view.side_visible = true;
         view.focus = Pane::Marked;
         let output = draw(&view, 120, 24);
@@ -881,7 +907,8 @@ mod tests {
         let rows = [fixture.directory, fixture.top];
         let marks = HashSet::from([fixture.top]);
         let marked = [fixture.top];
-        let mut view = base_view(&fixture, &rows, &marks, &marked);
+        let colors = LsColors::default();
+        let mut view = base_view(&fixture, &rows, &marks, &marked, &colors);
         view.side_visible = true;
         // Column 0 is the list's left border, the last column the marked pane's.
         let list_border = |buffer: &Screen| buffer[(0, 2)].style;
@@ -889,14 +916,15 @@ mod tests {
         let list_focused = buffer(&view, 110, 20);
         assert!(list_border(&list_focused) != Style::Dim);
         assert!(marked_border(&list_focused) == Style::Dim);
-        assert!(list_focused[(5, 2)].style == Style::Reversed);
+        assert!(list_focused[(5, 2)].style.reversed);
+        assert!(!list_focused[(5, 2)].style.dim);
 
         view.focus = Pane::Marked;
         let marked_focused = buffer(&view, 110, 20);
         assert!(list_border(&marked_focused) == Style::Dim);
         assert!(marked_border(&marked_focused) != Style::Dim);
-        assert!(marked_focused[(5, 2)].style != Style::Reversed);
-        assert!(marked_focused[(70, 2)].style == Style::Reversed);
+        assert!(!marked_focused[(5, 2)].style.reversed);
+        assert!(marked_focused[(70, 2)].style.reversed);
     }
 
     #[test]
@@ -905,7 +933,8 @@ mod tests {
         let rows = [fixture.directory, fixture.top];
         let marks = HashSet::from([fixture.top]);
         let marked = [fixture.top];
-        let mut view = base_view(&fixture, &rows, &marks, &marked);
+        let colors = LsColors::default();
+        let mut view = base_view(&fixture, &rows, &marks, &marked, &colors);
         view.side_visible = true;
         view.split = Split::Horizontal;
         let output = draw(&view, 60, 20);
@@ -926,7 +955,8 @@ mod tests {
         let rows = [fixture.directory, fixture.top];
         let marks = HashSet::from([fixture.top]);
         let marked = [fixture.top];
-        let mut view = base_view(&fixture, &rows, &marks, &marked);
+        let colors = LsColors::default();
+        let mut view = base_view(&fixture, &rows, &marks, &marked, &colors);
         view.side_visible = true;
         view.focus = Pane::Marked;
         let narrow = draw(&view, 50, 24);
@@ -940,18 +970,67 @@ mod tests {
     }
 
     #[test]
-    fn rows_cue_marked_and_covered_entries_without_color() {
+    fn rows_cue_marked_and_covered_entries() {
         let fixture = fixture();
         let rows = [fixture.nested];
         let marks = HashSet::new();
-        let mut view = base_view(&fixture, &rows, &marks, &[]);
+        let colors = LsColors::default();
+        let mut view = base_view(&fixture, &rows, &marks, &[], &colors);
         view.current_directory = fixture.directory;
         view.covered_by = Some(fixture.directory);
         assert!(draw(&view, 80, 12).contains("[=]"));
         let marks = HashSet::from([fixture.nested]);
-        let mut view = base_view(&fixture, &rows, &marks, &[]);
+        let mut view = base_view(&fixture, &rows, &marks, &[], &colors);
         view.current_directory = fixture.directory;
         assert!(draw(&view, 80, 12).contains("[x]"));
+        // Marked rows are red so the deletion basket stands out (with reverse
+        // on top while the cursor is on them).
+        let marked_row = buffer(&view, 80, 12);
+        assert!(marked_row[(2, 2)].style.reversed);
+        assert!(marked_row[(2, 2)].style.fg.is_some_and(|color| matches!(color, super::screen::Color::Red)));
+    }
+
+    #[test]
+    fn directories_follow_ls_colors_and_marked_rows_stay_red() {
+        let fixture = fixture();
+        let rows = [fixture.directory, fixture.top];
+        let marks = HashSet::from([fixture.top]);
+        let colors = LsColors::default();
+        let mut view = base_view(&fixture, &rows, &marks, &[], &colors);
+        // Cursor starts on the directory; move it to the marked file so the
+        // directory row shows its base color without the cursor highlight.
+        view.cursor_index = Some(1);
+        let screen = buffer(&view, 80, 12);
+        let directory_style = screen[(2, 2)].style;
+        assert!(directory_style.fg.is_some(), "directories use LS_COLORS: {directory_style:?}");
+        assert!(!directory_style.reversed);
+        // The marked file row stays red with the cursor's reverse on top.
+        let marked_style = screen[(2, 3)].style;
+        assert!(marked_style.fg.is_some_and(|color| matches!(color, super::screen::Color::Red)));
+        assert!(marked_style.reversed, "the cursor keeps reverse on top of red: {marked_style:?}");
+    }
+
+    #[test]
+    fn marked_pane_and_delete_status_are_red() {
+        let fixture = fixture();
+        let rows = [fixture.directory, fixture.top];
+        let marks = HashSet::from([fixture.top]);
+        let marked = [fixture.top];
+        let colors = LsColors::default();
+        let mut view = base_view(&fixture, &rows, &marks, &marked, &colors);
+        view.side_visible = true;
+        view.focus = Pane::Marked;
+        // Marked pane rows are red; the selected one keeps reverse on top.
+        let screen = buffer(&view, 110, 20);
+        assert!(screen[(70, 2)].style.reversed);
+        assert!(screen[(70, 2)].style.fg.is_some());
+        // Confirmation and progress strips warn in red.
+        view.operation = Operation::ConfirmDelete { roots: 1, entries: 1, allocated_bytes: 1, apparent_bytes: 1 };
+        let confirming = buffer(&view, 100, 24);
+        assert!(confirming[(1, 23)].style == Style::Red);
+        view.operation = Operation::Deleting { completed: 0, total: 1, current: "x", stopping: false };
+        let deleting = buffer(&view, 100, 24);
+        assert!(deleting[(1, 23)].style == Style::Red);
     }
 
     #[test]
@@ -960,7 +1039,8 @@ mod tests {
         let rows = [fixture.directory, fixture.top];
         let marks = HashSet::from([fixture.nested, fixture.top]);
         let marked = [fixture.nested, fixture.top];
-        let mut view = base_view(&fixture, &rows, &marks, &marked);
+        let colors = LsColors::default();
+        let mut view = base_view(&fixture, &rows, &marks, &marked, &colors);
         view.side_visible = true;
         view.focus = Pane::Marked;
         view.operation = Operation::ConfirmDelete { roots: 2, entries: 2, allocated_bytes: 5120, apparent_bytes: 5000 };
@@ -981,7 +1061,8 @@ mod tests {
         let fixture = fixture();
         let rows = [fixture.directory, fixture.top];
         let marks = HashSet::new();
-        let mut view = base_view(&fixture, &rows, &marks, &[]);
+        let colors = LsColors::default();
+        let mut view = base_view(&fixture, &rows, &marks, &[], &colors);
         view.indexed_entries = 42;
         let ready = draw(&view, 100, 24);
         let status = ready.lines().last().unwrap().trim().to_owned();
@@ -1002,10 +1083,11 @@ mod tests {
         let rows = [fixture.directory, fixture.top];
         let marks = HashSet::from([fixture.top]);
         let marked = [fixture.top];
+        let colors = LsColors::default();
         for columns in [1, 2, 5, 12, 36, 59, 60, 100, 140] {
             for height in [1, 2, 3, 5, 8, 12, 30] {
                 for modal in 0..6 {
-                    let mut view = base_view(&fixture, &rows, &marks, &marked);
+                    let mut view = base_view(&fixture, &rows, &marks, &marked, &colors);
                     view.side_visible = true;
                     view.focus = Pane::Marked;
                     view.has_parent_row = true;
@@ -1032,7 +1114,8 @@ mod tests {
         let fixture = Fixture { tree, root, directory: root, nested: root, top: root };
         let marks = HashSet::<NodeId>::new();
         let selected = [];
-        let mut view = base_view(&fixture, &selected, &marks, &[]);
+        let colors = LsColors::default();
+        let mut view = base_view(&fixture, &selected, &marks, &[], &colors);
         view.size_mode = SizeMode::Apparent;
         view.read_only = true;
         view.modal = Modal::Help { focus: Pane::Marked };
@@ -1051,7 +1134,8 @@ mod tests {
         }
         let marks = HashSet::new();
         let fixture = Fixture { tree, root, directory: root, nested: root, top: root };
-        let view = base_view(&fixture, &rows, &marks, &[]);
+        let colors = LsColors::default();
+        let view = base_view(&fixture, &rows, &marks, &[], &colors);
         let output = draw(&view, 40, 10);
         assert!(output.contains("tab\\u{9}name\\xff"), "{output}");
         for line in output.lines().skip(2).take(3) {

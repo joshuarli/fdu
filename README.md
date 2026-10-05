@@ -59,7 +59,10 @@ shows each entry's size, share of the directory, and a bar. `[x]` marks an
 entry, `[=]` shows an entry already covered by a marked parent directory, and
 `!`, `~`, `M`, and `A` flag incomplete, stale, mount-boundary, and
 unsupported-alias entries. Directories end in `/` and symlinks in `@`;
-symlinks are never followed. `?` opens help.
+symlinks are never followed. Directory and symlink colors follow the standard
+`LS_COLORS` environment variable (`di`, `ln`, `fi`, and `*` patterns);
+marked entries and the marked-items pane stay red as the deletion review,
+and deletion prompts are red too. `?` opens help.
 
 Use arrows or `j`/`k` to move, Enter/right/`l` to open, and left/`h`/Backspace
 to return; navigation stops at the directory fdu was started in. Page Up/Down
