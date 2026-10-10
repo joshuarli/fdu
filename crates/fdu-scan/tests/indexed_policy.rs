@@ -2,7 +2,7 @@ use fdu_core::{
     DirectoryToken, EntryType, NodeId, NodeState, ScanEvent, Tree,
 };
 use fdu_scan::{open_root, scan, start_indexed_scan, EntryBatch, RootAnchor, ScanOptions};
-use std::collections::HashSet;
+use hashbrown::HashSet;
 use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io;

@@ -7,7 +7,7 @@ use fdu_tui::{
     self, Cursor, Intent, LsColors, Modal, Operation, Pane, Phase, SizeMode, Split, SortMode,
     TerminalSession, TerminalSize, View,
 };
-use std::collections::{HashMap, HashSet};
+use hashbrown::{HashMap, HashSet};
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError};
@@ -1695,59 +1695,58 @@ pub fn run(path: std::path::PathBuf, read_only: bool, apparent: bool) -> Result<
 
         let mut model_changed = false;
         let mut scan_finished = false;
-        if let AppPhase::Scanning(worker) = &mut phase {
-            if let Some(receiver) = worker.receiver.as_ref() {
-                let drain_started = Instant::now();
-                let mut applied = 0usize;
-                loop {
-                    if applied % SCAN_DRAIN_CLOCK_INTERVAL == SCAN_DRAIN_CLOCK_INTERVAL - 1
-                        && drain_started.elapsed() >= SCAN_DRAIN_BUDGET
-                    {
-                        break;
-                    }
-                    // Only an idle tick waits; one that already has work goes straight on to draw.
-                    let received = if applied == 0 {
-                        receiver.recv_timeout(SCAN_EVENT_WAIT).map_err(|error| match error {
-                            RecvTimeoutError::Timeout => TryRecvError::Empty,
-                            RecvTimeoutError::Disconnected => TryRecvError::Disconnected,
-                        })
-                    } else {
-                        receiver.try_recv()
-                    };
-                    applied += 1;
-                    match received {
-                        Ok(event) => {
-                            worker.queue_metrics.event_received();
-                            if matches!(&event, ScanEvent::Finished) {
-                                scan_finished = true;
-                                break;
-                            }
-                            match event {
-                                ScanEvent::Entries(batch) => {
-                                    let applying = profile.timer();
-                                    if profile.enabled { profile.first_entries.get_or_insert_with(|| profile.started.elapsed()); }
-                                    let batch = model.apply_entry_batch(batch);
-                                    worker.return_batch(batch);
-                                    model_changed = true;
-                                    if let Some(started) = applying {
-                                        profile.busy.entry_batches += started.elapsed();
-                                        profile.busy.entry_batch_count += 1;
-                                    }
-                                }
-                                other => {
-                                    let applying = profile.timer();
-                                    model_changed |= model.apply_scan_event(other);
-                                    if let Some(started) = applying {
-                                        profile.busy.other_events += started.elapsed();
-                                    }
-                                }
-                            }
-                        }
-                        Err(TryRecvError::Empty) => break,
-                        Err(TryRecvError::Disconnected) => {
+        if let AppPhase::Scanning(worker) = &mut phase
+            && let Some(receiver) = worker.receiver.as_ref() {
+            let drain_started = Instant::now();
+            let mut applied = 0usize;
+            loop {
+                if applied % SCAN_DRAIN_CLOCK_INTERVAL == SCAN_DRAIN_CLOCK_INTERVAL - 1
+                    && drain_started.elapsed() >= SCAN_DRAIN_BUDGET
+                {
+                    break;
+                }
+                // Only an idle tick waits; one that already has work goes straight on to draw.
+                let received = if applied == 0 {
+                    receiver.recv_timeout(SCAN_EVENT_WAIT).map_err(|error| match error {
+                        RecvTimeoutError::Timeout => TryRecvError::Empty,
+                        RecvTimeoutError::Disconnected => TryRecvError::Disconnected,
+                    })
+                } else {
+                    receiver.try_recv()
+                };
+                applied += 1;
+                match received {
+                    Ok(event) => {
+                        worker.queue_metrics.event_received();
+                        if matches!(&event, ScanEvent::Finished) {
                             scan_finished = true;
                             break;
                         }
+                        match event {
+                            ScanEvent::Entries(batch) => {
+                                let applying = profile.timer();
+                                if profile.enabled { profile.first_entries.get_or_insert_with(|| profile.started.elapsed()); }
+                                let batch = model.apply_entry_batch(batch);
+                                worker.return_batch(batch);
+                                model_changed = true;
+                                if let Some(started) = applying {
+                                    profile.busy.entry_batches += started.elapsed();
+                                    profile.busy.entry_batch_count += 1;
+                                }
+                            }
+                            other => {
+                                let applying = profile.timer();
+                                model_changed |= model.apply_scan_event(other);
+                                if let Some(started) = applying {
+                                    profile.busy.other_events += started.elapsed();
+                                }
+                            }
+                        }
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        scan_finished = true;
+                        break;
                     }
                 }
             }
@@ -1764,37 +1763,36 @@ pub fn run(path: std::path::PathBuf, read_only: bool, apparent: bool) -> Result<
         }
 
         let mut delete_finished = false;
-        if let AppPhase::Deleting(worker) = &mut phase {
-            if let Some(receiver) = worker.receiver.as_ref() {
-                for _ in 0..MAX_DELETE_EVENTS_PER_TICK {
-                    match receiver.try_recv() {
-                        Ok(DeleteEvent::Progress { completed, total, current }) => {
-                            worker.completed = completed;
-                            worker.total = total;
-                            worker.current = model
-                                .tree
-                                .name(current)
-                                .map(fdu_tui::escape_name)
-                                .unwrap_or_else(|| "entry".to_owned());
-                            model_changed = true;
-                        }
-                        Ok(DeleteEvent::Outcomes(outcomes)) => {
-                            worker.outcomes.extend(outcomes);
-                        }
-                        Ok(DeleteEvent::Failed { message }) => {
-                            worker.failure = Some(message.clone());
-                            model.message = Some(format!("Deletion stopped: {message}"));
-                            model_changed = true;
-                        }
-                        Ok(DeleteEvent::Finished) => {
-                            delete_finished = true;
-                            break;
-                        }
-                        Err(TryRecvError::Empty) => break,
-                        Err(TryRecvError::Disconnected) => {
-                            delete_finished = true;
-                            break;
-                        }
+        if let AppPhase::Deleting(worker) = &mut phase
+            && let Some(receiver) = worker.receiver.as_ref() {
+            for _ in 0..MAX_DELETE_EVENTS_PER_TICK {
+                match receiver.try_recv() {
+                    Ok(DeleteEvent::Progress { completed, total, current }) => {
+                        worker.completed = completed;
+                        worker.total = total;
+                        worker.current = model
+                            .tree
+                            .name(current)
+                            .map(fdu_tui::escape_name)
+                            .unwrap_or_else(|| "entry".to_owned());
+                        model_changed = true;
+                    }
+                    Ok(DeleteEvent::Outcomes(outcomes)) => {
+                        worker.outcomes.extend(outcomes);
+                    }
+                    Ok(DeleteEvent::Failed { message }) => {
+                        worker.failure = Some(message.clone());
+                        model.message = Some(format!("Deletion stopped: {message}"));
+                        model_changed = true;
+                    }
+                    Ok(DeleteEvent::Finished) => {
+                        delete_finished = true;
+                        break;
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        delete_finished = true;
+                        break;
                     }
                 }
             }

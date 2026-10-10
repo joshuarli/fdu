@@ -266,7 +266,7 @@ fn reports_scan_errors_and_partial_permission_failures() -> io::Result<()> {
     fs::create_dir(&blocked)?;
     fs::write(&good_file, b"good")?;
     fs::write(&blocked_file, b"blocked")?;
-    fs::set_permissions(&blocked, fs::Permissions::from_mode(0))?;
+    fs::set_permissions(&blocked, fs::Permissions::from_mode(0o0))?;
 
     let result = scan_path(&temporary.0, false);
     fs::set_permissions(&blocked, fs::Permissions::from_mode(0o700))?;

@@ -8,7 +8,7 @@ description = "Read-only filesystem scanning for fdu"
 [dependencies]
 fdu-core = { path = "../fdu-core" }
 crossbeam-deque = "0.8"
-foldhash = "0.2"
+hashbrown = { workspace = true }
 rustix = { version = "1.1", features = ["fs", "process", "std", "time", "linux_latest"] }
 
 # rustix does not wrap getattrlistbulk or its attribute structures.

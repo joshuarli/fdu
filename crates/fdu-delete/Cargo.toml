@@ -7,5 +7,6 @@ description = "Descriptor-relative deletion for fdu indexes"
 
 [dependencies]
 fdu-core = { path = "../fdu-core" }
+hashbrown = { workspace = true }
 rayon = "1.5.1"
 rustix = { version = "1.1", features = ["fs", "std", "linux_latest"] }

@@ -1,5 +1,5 @@
 use fdu_core::{EntryType, ExclusionReason, FileIdentity, NodeId, NodeRecord, NodeState, Tree};
-use std::collections::HashSet;
+use hashbrown::HashSet;
 use std::fmt;
 use std::io;
 use std::os::fd::OwnedFd;
@@ -733,10 +733,13 @@ mod posix {
         retry_errno(|| fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW))
     }
 
+    // `st_dev` is 32 bits on macOS but 64 bits on Linux: the checked conversion is
+    // required on one platform and a no-op where the field is already `u64`.
+    #[allow(clippy::useless_conversion)]
     fn identity(metadata: &Stat) -> io::Result<FileIdentity> {
         Ok(FileIdentity {
             device: u64::try_from(metadata.st_dev).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid device number"))?,
-            inode: u64::try_from(metadata.st_ino).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid inode number"))?,
+            inode: metadata.st_ino,
         })
     }
 

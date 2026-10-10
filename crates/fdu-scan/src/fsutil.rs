@@ -30,13 +30,19 @@ fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
+// `st_dev` is 32 bits on macOS but 64 bits on Linux: the checked conversion is
+// required on one platform and a no-op where the field is already `u64`.
+#[allow(clippy::useless_conversion)]
 pub(crate) fn identity(stat: &Stat) -> io::Result<FileIdentity> {
     Ok(FileIdentity {
         device: u64::try_from(stat.st_dev).map_err(|_| invalid("device number is outside supported range"))?,
-        inode: u64::try_from(stat.st_ino).map_err(|_| invalid("inode number is outside supported range"))?,
+        inode: stat.st_ino,
     })
 }
 
+// `st_nlink` is narrower than `u64` on every supported platform, so the checked
+// spelling is a no-op where clippy sees a target it cannot fail on.
+#[allow(clippy::unnecessary_fallible_conversions, clippy::useless_conversion)]
 pub(crate) fn link_count(stat: &Stat) -> io::Result<u64> {
     u64::try_from(stat.st_nlink).map_err(|_| invalid("negative link count"))
 }

@@ -222,13 +222,13 @@ impl ScanProgress<'_> {
 /// Directories already entered, to skip a directory reachable by two paths. Sharded so
 /// workers rarely meet on a lock.
 struct SeenDirectories {
-    shards: Box<[Mutex<foldhash::HashSet<FileIdentity>>]>,
+    shards: Box<[Mutex<hashbrown::HashSet<FileIdentity>>]>,
 }
 
 impl SeenDirectories {
     fn new() -> Self {
         Self {
-            shards: (0..SEEN_DIRECTORY_SHARDS).map(|_| Mutex::new(foldhash::HashSet::default())).collect(),
+            shards: (0..SEEN_DIRECTORY_SHARDS).map(|_| Mutex::new(hashbrown::HashSet::default())).collect(),
         }
     }
 
@@ -975,10 +975,8 @@ fn scan_indexed_directory_with_buffer(
             state: found.state,
         });
         // A very wide directory is published as it is read.
-        if outbox.batch.entries.len() >= PUBLISH_ENTRIES || outbox.held_open >= HELD_OPEN_DIRECTORIES {
-            if !outbox.flush(context) {
-                return Ok(false);
-            }
+        if (outbox.batch.entries.len() >= PUBLISH_ENTRIES || outbox.held_open >= HELD_OPEN_DIRECTORIES) && !outbox.flush(context) {
+            return Ok(false);
         }
     }
 
@@ -987,8 +985,8 @@ fn scan_indexed_directory_with_buffer(
     }
     outbox.releases.push((token, complete));
     // The root's entries are what the interface shows first, so they are never held back.
-    if (token == DirectoryToken(0) || outbox.should_flush(context)) && !outbox.flush(context) {
-        return Ok(false);
+    if token == DirectoryToken(0) || outbox.should_flush(context) {
+        return Ok(outbox.flush(context));
     }
     Ok(true)
 }
@@ -1006,7 +1004,7 @@ impl DirectorySample {
 
     fn start(context: &ScanContext<'_>, outbox: &mut Outbox) -> Option<Self> {
         outbox.directories_scanned = outbox.directories_scanned.wrapping_add(1);
-        if outbox.directories_scanned % Self::INTERVAL != 0 || !context.queue.wants_samples() {
+        if !outbox.directories_scanned.is_multiple_of(Self::INTERVAL) || !context.queue.wants_samples() {
             return None;
         }
         Some(Self { wall: std::time::Instant::now(), cpu_nanos: thread_cpu_nanos() })

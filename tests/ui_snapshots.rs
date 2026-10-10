@@ -51,7 +51,7 @@ fn marked_pane_beside_the_list() {
     session.wait_for("Marked 2 items");
     freeze(&mut session, "marked-100x24");
     session.key(Key::Tab);
-    session.wait("marked focus", |screen| support::list_is_dimmed(screen));
+    session.wait("marked focus", support::list_is_dimmed);
     freeze(&mut session, "marked-focus-100x24");
     session.quit();
 }

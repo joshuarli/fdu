@@ -78,6 +78,7 @@ dependencies = [
  "fdu-delete",
  "fdu-scan",
  "fdu-tui",
+ "hashbrown",
  "laputa-ptytest",
  "rustix",
  "rustybench",
@@ -92,6 +93,7 @@ name = "fdu-delete"
 version = "0.1.0"
 dependencies = [
  "fdu-core",
+ "hashbrown",
  "rayon",
  "rustix",
 ]
@@ -102,7 +104,7 @@ version = "0.1.0"
 dependencies = [
  "crossbeam-deque",
  "fdu-core",
- "foldhash",
+ "hashbrown",
  "libc",
  "rayon",
  "rustix",
@@ -113,6 +115,7 @@ name = "fdu-tui"
 version = "0.1.0"
 dependencies = [
  "fdu-core",
+ "hashbrown",
  "rustix",
  "unicode-width",
 ]
@@ -122,6 +125,15 @@ name = "foldhash"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
+
+[[package]]
+name = "hashbrown"
+version = "0.17.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+dependencies = [
+ "foldhash",
+]
 
 [[package]]
 name = "hermit-abi"

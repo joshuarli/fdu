@@ -170,8 +170,7 @@ fn entry_type_for_vnode(vnode_type: u32) -> EntryType {
 }
 
 fn round_allocated_bytes(bytes: u64) -> Option<u64> {
-    let blocks = bytes / STAT_BLOCK_BYTES + (bytes % STAT_BLOCK_BYTES != 0) as u64;
-    blocks.checked_mul(STAT_BLOCK_BYTES)
+    bytes.div_ceil(STAT_BLOCK_BYTES).checked_mul(STAT_BLOCK_BYTES)
 }
 
 fn invalid_data(message: &'static str) -> io::Error {

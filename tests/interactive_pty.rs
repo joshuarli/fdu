@@ -71,7 +71,7 @@ fn tab_moves_focus_between_the_list_and_the_marked_pane() -> io::Result<()> {
     assert!(!list_is_dimmed(&screen), "the list has focus after marking");
 
     session.key(Key::Tab);
-    session.wait("marked focus", |screen| list_is_dimmed(screen));
+    session.wait("marked focus", list_is_dimmed);
 
     // d in the marked pane removes the mark and closes the pane.
     session.text("d");
@@ -225,7 +225,7 @@ fn resize_keeps_focus_marks_and_a_readable_listing() -> io::Result<()> {
     session.ready_by_name();
     session.text("d");
     session.key(Key::Tab);
-    session.wait("marked focus", |screen| list_is_dimmed(screen));
+    session.wait("marked focus", list_is_dimmed);
 
     // Narrow: the list gives way instead of being crushed beside the pane.
     session.resize(50, 24);
@@ -357,7 +357,7 @@ fn read_only_session_rejects_delete_and_restores_terminal_state() -> io::Result<
     session.text("d");
     session.wait_for("Marked 1 item");
     session.key(Key::Tab);
-    session.wait("marked focus", |screen| list_is_dimmed(screen));
+    session.wait("marked focus", list_is_dimmed);
     session.key(Key::Ctrl('r'));
     let screen = session.wait_for("This session is read only; deletion is disabled.");
     assert!(!screen.shows("Permanently delete"));

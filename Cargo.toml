@@ -15,6 +15,9 @@ members = [
 ]
 resolver = "2"
 
+[workspace.dependencies]
+hashbrown = { version = "0.17.1", default-features = false, features = ["default-hasher", "inline-more"] }
+
 [features]
 allocation-profile = []
 default = ["interactive"]
@@ -22,6 +25,7 @@ interactive = ["dep:fdu-tui", "dep:fdu-delete"]
 
 [dependencies]
 fdu-core = { path = "crates/fdu-core" }
+hashbrown = { workspace = true }
 fdu-scan = { path = "crates/fdu-scan" }
 fdu-delete = { path = "crates/fdu-delete", optional = true }
 fdu-tui = { path = "crates/fdu-tui", optional = true }
@@ -40,8 +44,11 @@ harness = false
 required-features = ["interactive"]
 
 [profile.release]
-lto = "thin"
-incremental = true
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
 
 [profile.profiling]
 inherits = "release"

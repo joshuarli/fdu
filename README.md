@@ -214,6 +214,10 @@ cargo test --locked --workspace
 cargo test --locked -p fdu --no-default-features
 ```
 
+`make lint` formats the tree and runs Clippy with warnings denied;
+`make install` builds the release binary into `~/usr/bin/fdu`,
+re-signing it on macOS.
+
 The terminal tests use the sibling `../ptytest` crate, so that checkout must be
 present (Cargo needs it to load the workspace even for other builds). They run
 on macOS and Linux. `tests/interactive_pty.rs` checks

@@ -225,6 +225,8 @@ impl Tree {
         }
     }
 
+    // One record holds every field of an entry, so the constructor takes them all.
+    #[allow(clippy::too_many_arguments)]
     pub fn append(
         &mut self,
         parent: NodeId,
@@ -240,9 +242,7 @@ impl Tree {
         let id = NodeId::from_index(index)?;
         let name_start = u32::try_from(self.names.len()).ok()?;
         let name_end = name_start.checked_add(u32::try_from(name.len()).ok()?)?;
-        if self.record(parent).is_none() {
-            return None;
-        }
+        self.record(parent)?;
         self.names.extend_from_slice(name);
         self.nodes.push(NodeRecord {
             parent: Some(parent),

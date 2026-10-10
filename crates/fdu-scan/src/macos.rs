@@ -4,7 +4,7 @@ use crate::{ScanReport, TopLevelDirectory};
 use fdu_core::{EntryType, ExclusionReason, FileIdentity};
 use rustix::fs::{self, Dir, DirEntry, FileType};
 use std::cell::RefCell;
-use std::collections::HashSet;
+use hashbrown::HashSet;
 use std::ffi::{CStr, CString, OsString};
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};

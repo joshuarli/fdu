@@ -5,7 +5,7 @@ mod terminal;
 use fdu_core::{EntryType, NodeId, NodeRecord, NodeState, Tree};
 pub use lscolors::LsColors;
 use screen::{Rect, Screen, Style};
-use std::collections::HashSet;
+use hashbrown::HashSet;
 use std::io;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -742,7 +742,7 @@ mod tests {
     };
     use fdu_core::{EntryType, FileIdentity, NodeId, NodeState, Tree};
     use super::screen::{Screen, Style};
-    use std::collections::HashSet;
+    use hashbrown::HashSet;
 
     #[test]
     fn display_names_escape_controls_and_preserve_invalid_bytes() {
