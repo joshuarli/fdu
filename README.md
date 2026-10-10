@@ -182,6 +182,17 @@ subdirectories. The last task to finish a directory removes it and releases its
 parent. Every planned entry gets exactly one outcome, and entries not attempted
 after Esc are reported as not attempted.
 
+Sixteen threads is the default. Every identity check and removal passes through a
+gate that limits how many threads are inside a filesystem call and counts how long
+they spend there. `FDU_DELETE_THREADS=N` fixes another count, and
+`FDU_DELETE_THREADS=adaptive` has a controller thread move the limit instead, for
+deletions of at least 100 thousand entries. The controller hill-climbs on
+throughput (the median of three 250 ms windows per trial) over 2, 4, 8, 16 and 32
+threads, starting at 4, treating a gain under 10% as noise, preferring the lower
+count on a tie and stepping down at once when throughput falls while per-call
+latency jumps. It is opt-in because it has not beaten 16 threads where it was
+measured: see `TODO.md`.
+
 ## Performance
 
 Benchmarks use [rustybench](https://github.com/joshuarli/rustybench).

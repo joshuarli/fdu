@@ -28,14 +28,23 @@ Deletion issues one blocking `unlinkat` per entry from a 32-thread pool. On Linu
 - Linux only; macOS has no equivalent, so the thread pool stays there.
 - Needs a new dependency (an io_uring crate), so ask before adding it. Adopt it only if it wins on wall-clock time.
 
-## Adaptive deletion thread count
+## Adaptive deletion thread count: built, opt-in, not yet a win
 
-The fixed pool size is 16, chosen from a sweep on the layout fixture: on an idle host 32 was slightly faster, but on a busy host (load average 20 to 40) 8 to 16 beat 32 and 64 was twice as slow. So the best size depends on host load. The busy-host differences between 8, 16 and 32 were within run-to-run noise of a few seconds, so an adaptive pool could not be validated on that host; build it only after finding a quiet host to confirm gains on, and a way to repeat measurements under controlled load.
+`FDU_DELETE_THREADS=adaptive` runs the controller in `crates/fdu-delete/src/adaptive.rs`: workers share the Rayon pool (built at 32 threads) and a gate limits how many are inside a filesystem call, so a controller thread can park and unpark them by moving the limit. The default stays a fixed 16.
 
-Design constraints if it is built:
+Measured on a quiet 4 vCPU ext4 host, interleaved runs, whole-fixture deletion:
 
-- Hill-climb on throughput (deletions per second over a window long enough to smooth journal-commit bursts), not per-call latency. Workers pull from a shared queue and a controller parks or unparks them, since rayon's pool cannot be resized.
-- Ramp up slowly from a small count and stop growing as soon as throughput stops rising. A busy host must never be flooded with syscalls: when throughput falls while threads are added, or per-call latency climbs sharply, shrink.
-- Treat noise as the normal case. Act on several consecutive windows, not one, and prefer a lower thread count when two counts measure within noise of each other.
-- Short runs finish before the controller converges, so start from a conservative count and do not adapt below a minimum entry count.
-- Keep the controller apart from the identity-check and unlink path.
+| tree | load | adaptive | 16 threads | 32 threads |
+|---|---|---|---|---|
+| 192 thousand entries (5 runs) | idle | 2.63 s | 2.54 s | 2.43 s |
+| 192 thousand entries (3 runs) | 8 parallel `dd oflag=dsync` writers (journal contention) | 2.45 s | 2.64 s | 2.26 s |
+| 192 thousand entries (3 runs) | 28 CPU-bound processes | 4.74 s | 3.49 s | 3.43 s |
+| 1.5 million entries (3 runs) | idle | 21.3 s | 21.2 s | 19.9 s |
+
+It matches 16 threads when idle, beat it in all three paired runs under journal contention (by 5% to 11%, still short of 32), and loses under CPU-bound load, because it starts at 4 and a 5 s deletion ends before it climbs. On this host a fixed 32 was the best or tied for best in every row, which is not what the 16-thread default was chosen on (see `DEFAULT_THREADS`); that sweep was on a different, busier host and should be repeated before changing the default. It also never finds the 7% that 32 gives on the large tree, since that is under its 10% noise threshold. A window varies by tens of percent on its own, as the mix of cheap file removals and slow directory removals shifts, so neighboring thread counts cannot be told apart in a trial of about a second.
+
+Open questions before making it the default:
+
+- CPU-bound load makes more threads faster, because more runnable threads win more CPU time, which is the opposite of the busy host the 16-thread default was chosen on (load average 20 to 40, where 8 to 16 beat 32). Find a load that reproduces that host, and a deletion long enough (millions of entries) to converge under it. Without that there is nothing to show the controller helping.
+- Try starting at 16 and probing 8 and 32 from there, so a short run costs nothing. The TODO's original constraint was to start small; the numbers above say that is what loses on short runs.
+- Longer trials or paired (interleaved) comparisons of neighboring counts would cut the noise, at the cost of converging more slowly.

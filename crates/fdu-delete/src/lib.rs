@@ -1,3 +1,5 @@
+mod adaptive;
+
 use fdu_core::{EntryType, ExclusionReason, FileIdentity, NodeId, NodeRecord, NodeState, Tree};
 use hashbrown::HashSet;
 use std::fmt;
@@ -248,27 +250,22 @@ pub fn execute(
 
 mod posix {
     use super::*;
+    use crate::adaptive::{self, Concurrency, Gate};
     use rustix::fs::{self, AtFlags, FileType, Mode, OFlags, Stat};
     use rustix::io::Errno;
     use std::collections::BTreeMap;
     use std::os::fd::{AsFd, BorrowedFd};
     use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize};
-    use std::sync::Mutex;
+    use std::sync::{mpsc, Mutex};
     use std::time::Instant;
 
     const DIRECTORY_FLAGS: OFlags = OFlags::RDONLY
         .union(OFlags::DIRECTORY)
         .union(OFlags::NOFOLLOW)
         .union(OFlags::CLOEXEC);
-    /// Removing a directory mostly waits on the filesystem (a journal commit, not the CPU), and
-    /// that waiting overlaps across threads, so the pool is larger than the number of cores. More
-    /// threads stop helping early and then hurt, and the best size falls as the host gets busier.
-    /// Measured on the layout fixture (192 thousand entries), whole-tree deletion on an idle host
-    /// took 4.3 s with 2 threads, 2.9 s with 4, 2.7 s with 16, 2.3 s with 32, and no less with
-    /// 64 or 128. On a host with a load average of 20 to 40 it took a median of 11.6 s with 4
-    /// threads, 9.6 s with 8, 10.2 s with 16, 11.8 s with 32 and 22.7 s with 64. Sixteen gives up
-    /// little when idle and keeps a busy host from being flooded with filesystem calls.
-    const DELETE_THREADS: usize = 16;
+    /// Selects the thread count of a deletion: a number, or `adaptive`. For measuring one count
+    /// against another and against the controller; see `Concurrency::choose`.
+    const THREADS_VARIABLE: &str = "FDU_DELETE_THREADS";
 
     /// Identifies the mount a directory lives on, so a directory that became a mount point since
     /// scanning is never entered.
@@ -309,6 +306,8 @@ mod posix {
         cancelled: &'a AtomicBool,
         sender: &'a SyncSender<DeleteEvent>,
         after_operation: &'a (dyn Fn(usize) + Sync),
+        /// How many threads are in a filesystem call at once.
+        gate: Gate,
         /// Per node, whether its outcome is decided. Anything left undecided at the end was not
         /// attempted.
         recorded: Vec<AtomicBool>,
@@ -328,7 +327,9 @@ mod posix {
         cancelled: Arc<AtomicBool>,
         sender: SyncSender<DeleteEvent>,
     ) {
-        run_with(root, plan, cancelled, sender, DELETE_THREADS, |_| {});
+        let setting = std::env::var(THREADS_VARIABLE).ok();
+        let concurrency = Concurrency::choose(setting.as_deref(), plan.targets.len());
+        run_with(root, plan, cancelled, sender, concurrency, |_| {});
     }
 
     pub(super) fn run_with(
@@ -336,7 +337,7 @@ mod posix {
         plan: DeletionPlan,
         cancelled: Arc<AtomicBool>,
         sender: SyncSender<DeleteEvent>,
-        threads: usize,
+        concurrency: Concurrency,
         after_operation: impl Fn(usize) + Sync,
     ) {
         let tree: &Tree = &plan.tree;
@@ -359,6 +360,7 @@ mod posix {
             cancelled: &cancelled,
             sender: &sender,
             after_operation: &after_operation,
+            gate: Gate::new(concurrency.initial_limit()),
             recorded: (0..tree.len()).map(|_| AtomicBool::new(false)).collect(),
             holds: (0..tree.len()).map(|_| AtomicU32::new(0)).collect(),
             outcomes: Mutex::new(Vec::with_capacity(OUTCOME_BATCH_SIZE)),
@@ -387,7 +389,7 @@ mod posix {
             }
         };
         let pool = match rayon::ThreadPoolBuilder::new()
-            .num_threads(threads.max(1))
+            .num_threads(concurrency.pool_size())
             .thread_name(|index| format!("fdu-delete-{index}"))
             .build()
         {
@@ -398,14 +400,23 @@ mod posix {
             }
         };
         let deletion = &deletion;
-        pool.scope(|scope| {
-            for (parent, selected) in groups {
-                let root_context = Arc::clone(&root_context);
-                scope.spawn(move |scope| {
-                    let parent = NodeId::from_index(parent).expect("indexed parent");
-                    delete_group(deletion, &root_context, parent, selected, scope);
-                });
+        // The controller samples the gate while the pool works, and ends when the sender drops.
+        let (stop, stopped) = mpsc::channel::<()>();
+        std::thread::scope(|threads| {
+            if concurrency == Concurrency::Adaptive {
+                let gate = &deletion.gate;
+                threads.spawn(move || adaptive::steer(gate, &stopped));
             }
+            pool.scope(|scope| {
+                for (parent, selected) in groups {
+                    let root_context = Arc::clone(&root_context);
+                    scope.spawn(move |scope| {
+                        let parent = NodeId::from_index(parent).expect("indexed parent");
+                        delete_group(deletion, &root_context, parent, selected, scope);
+                    });
+                }
+            });
+            drop(stop);
         });
         drop(pool);
 
@@ -671,65 +682,58 @@ mod posix {
         let parent = context.parent.as_ref().expect("a directory being removed has a parent");
         let record = deletion.tree.record(node).expect("deletion target exists");
         let name = deletion.tree.name(node).expect("indexed entry has name");
-        let parent_fd = parent.fd.as_fd();
         // Entries were checked when the directory was opened; check once more what is there now.
-        let latest = match stat_at(parent_fd, name) {
-            Ok(stat) => stat,
-            Err(Errno::NOENT) => return deletion.record(node, OutcomeKind::AlreadyAbsent, None),
-            Err(error) => return deletion.record(node, OutcomeKind::Failed, Some(io::Error::from(error).to_string())),
-        };
-        match identity(&latest) {
-            Ok(found) if found == record.identity && entry_type(&latest) == record.entry_type => {}
-            Ok(_) => {
-                return deletion.record(
-                    node,
-                    OutcomeKind::Changed,
-                    Some("entry changed immediately before removal".to_owned()),
-                );
-            }
-            Err(error) => return deletion.record(node, OutcomeKind::Failed, Some(error.to_string())),
-        }
-        unlink(deletion, parent_fd, name, node, AtFlags::REMOVEDIR);
+        let (kind, message) = remove_entry(
+            &deletion.gate,
+            parent.fd.as_fd(),
+            name,
+            record,
+            AtFlags::REMOVEDIR,
+            "entry changed immediately before removal",
+        );
+        deletion.record(node, kind, message);
     }
 
     /// Removes one entry that is not a directory, after checking it is the entry that was indexed.
     fn delete_file(deletion: &Deletion<'_>, parent_fd: BorrowedFd<'_>, node: NodeId) {
         let record = deletion.tree.record(node).expect("deletion target exists");
         let name = deletion.tree.name(node).expect("indexed entry has name");
+        let (kind, message) =
+            remove_entry(&deletion.gate, parent_fd, name, record, AtFlags::empty(), "entry was replaced since scanning");
+        deletion.record(node, kind, message);
+    }
+
+    /// Checks that `name` in `parent_fd` is still the entry that was indexed as `record`, and
+    /// removes it. Only these calls are inside the gate: recording the outcome can wait on the
+    /// interface, which says nothing about the filesystem.
+    fn remove_entry(
+        gate: &Gate,
+        parent_fd: BorrowedFd<'_>,
+        name: &[u8],
+        record: &NodeRecord,
+        flags: AtFlags,
+        replaced: &str,
+    ) -> (OutcomeKind, Option<String>) {
+        let _permit = gate.enter();
         let current = match stat_at(parent_fd, name) {
             Ok(stat) => stat,
-            Err(Errno::NOENT) => return deletion.record(node, OutcomeKind::AlreadyAbsent, None),
-            Err(error) => return deletion.record(node, OutcomeKind::Failed, Some(io::Error::from(error).to_string())),
+            Err(Errno::NOENT) => return (OutcomeKind::AlreadyAbsent, None),
+            Err(error) => return (OutcomeKind::Failed, Some(io::Error::from(error).to_string())),
         };
         match identity(&current) {
             Ok(found) if found == record.identity && entry_type(&current) == record.entry_type => {}
-            Ok(_) => {
-                return deletion.record(
-                    node,
-                    OutcomeKind::Changed,
-                    Some("entry was replaced since scanning".to_owned()),
-                );
-            }
-            Err(error) => return deletion.record(node, OutcomeKind::Failed, Some(error.to_string())),
+            Ok(_) => return (OutcomeKind::Changed, Some(replaced.to_owned())),
+            Err(error) => return (OutcomeKind::Failed, Some(error.to_string())),
         }
-        unlink(deletion, parent_fd, name, node, AtFlags::empty());
-    }
-
-    fn unlink(deletion: &Deletion<'_>, parent_fd: BorrowedFd<'_>, name: &[u8], node: NodeId, flags: AtFlags) {
         match fs::unlinkat(parent_fd, name, flags) {
-            Ok(()) => deletion.record(node, OutcomeKind::Deleted, None),
-            Err(Errno::NOENT) => deletion.record(node, OutcomeKind::AlreadyAbsent, None),
-            Err(Errno::INTR) => deletion.record(
-                node,
+            Ok(()) => (OutcomeKind::Deleted, None),
+            Err(Errno::NOENT) => (OutcomeKind::AlreadyAbsent, None),
+            Err(Errno::INTR) => (
                 OutcomeKind::Failed,
                 Some("unlink was interrupted; removal outcome is uncertain, refresh required".to_owned()),
             ),
-            Err(Errno::NOTEMPTY) => deletion.record(
-                node,
-                OutcomeKind::Failed,
-                Some("directory gained unindexed children".to_owned()),
-            ),
-            Err(error) => deletion.record(node, OutcomeKind::Failed, Some(io::Error::from(error).to_string())),
+            Err(Errno::NOTEMPTY) => (OutcomeKind::Failed, Some("directory gained unindexed children".to_owned())),
+            Err(error) => (OutcomeKind::Failed, Some(io::Error::from(error).to_string())),
         }
     }
 
@@ -926,6 +930,7 @@ mod tests {
     }
 
     mod filesystem {
+        use crate::adaptive::Concurrency;
         use crate::posix::run_with;
         use crate::{create_plan, DeleteEvent, DeleteOutcome, DeletionPlan, OutcomeKind};
         use fdu_core::{EntryType, FileIdentity, NodeId, NodeState, Tree};
@@ -1049,7 +1054,7 @@ mod tests {
             let worker = thread::spawn(move || {
                 // One thread makes "stop after exactly this many operations" deterministic.
                 let threads = if cancel_after.is_some() { 1 } else { 4 };
-                run_with(root, plan, cancelled, sender, threads, move |completed| {
+                run_with(root, plan, cancelled, sender, Concurrency::Fixed(threads), move |completed| {
                     if cancel_after == Some(completed) {
                         hook_cancelled.store(true, Ordering::Relaxed);
                     }
@@ -1331,6 +1336,45 @@ mod tests {
                 }
                 Ok(())
             })
+        }
+
+        /// The adaptive pool is built at its largest and gated down to its start, so the gate and
+        /// the controller thread are exercised end to end, including their shutdown.
+        #[test]
+        fn adaptive_deletion_removes_every_entry_and_stops_its_controller() -> io::Result<()> {
+            let temp = TempRoot::new()?;
+            let mut expected = 0;
+            for directory in 0..8 {
+                let path = temp.root.join(format!("d{directory}"));
+                fs::create_dir(&path)?;
+                for file in 0..500 {
+                    fs::write(path.join(format!("f{file}")), b"x")?;
+                }
+                expected += 501;
+            }
+            let tree = index_root(&temp.root)?;
+            let selected = tree.children(tree.root()).collect::<Vec<_>>();
+            let plan = create_plan(Arc::clone(&tree), &selected).unwrap();
+            assert_eq!(plan.operation_count(), expected);
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let (sender, receiver) = mpsc::sync_channel(2);
+            let root = root_fd(&temp.root)?;
+            let worker = thread::spawn(move || run_with(root, plan, cancelled, sender, Concurrency::Adaptive, |_| {}));
+            let mut deleted = 0;
+            loop {
+                match receiver.recv_timeout(Duration::from_secs(30)).expect("deletion reports completion") {
+                    DeleteEvent::Outcomes(batch) => {
+                        deleted += batch.iter().filter(|item| item.kind == OutcomeKind::Deleted).count()
+                    }
+                    DeleteEvent::Failed { message } => panic!("unexpected worker failure: {message}"),
+                    DeleteEvent::Progress { .. } => {}
+                    DeleteEvent::Finished => break,
+                }
+            }
+            worker.join().expect("deletion worker exits");
+            assert_eq!(deleted, expected);
+            assert_eq!(fs::read_dir(&temp.root)?.count(), 0);
+            Ok(())
         }
 
         #[test]
