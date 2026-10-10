@@ -126,6 +126,10 @@ pub(crate) fn open_directory(path: &std::path::Path) -> io::Result<OwnedFd> {
     retry(|| fs::open(path, OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC, Mode::empty()))
 }
 
+pub(crate) fn open_directory_no_follow(path: &std::path::Path) -> io::Result<OwnedFd> {
+    retry(|| fs::open(path, DIRECTORY_FLAGS, Mode::empty()))
+}
+
 fn raise_soft_nofile_limit() -> io::Result<()> {
     let _guard = match FILE_LIMIT_LOCK.try_lock() {
         Ok(guard) => guard,

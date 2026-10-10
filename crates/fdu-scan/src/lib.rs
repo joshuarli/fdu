@@ -126,8 +126,18 @@ impl ScanQueueMetrics {
 }
 
 pub fn open_root(path: &std::path::Path) -> io::Result<RootAnchor> {
+    anchor_root(path, fsutil::open_directory(path)?)
+}
+
+/// Like [`open_root`], but fails when the final path component is a symlink
+/// instead of following it. Earlier components, and a trailing slash, still
+/// resolve through symlinks as the kernel always does.
+pub fn open_root_no_follow(path: &std::path::Path) -> io::Result<RootAnchor> {
+    anchor_root(path, fsutil::open_directory_no_follow(path)?)
+}
+
+fn anchor_root(path: &std::path::Path, fd: OwnedFd) -> io::Result<RootAnchor> {
     use std::os::unix::ffi::OsStrExt;
-    let fd = fsutil::open_directory(path)?;
     let (identity, link_count) = fsutil::identity_and_link_count(fd.as_fd())?;
     Ok(RootAnchor {
         fd: Arc::new(fd),

@@ -2,6 +2,8 @@
 mod allocation_profile;
 #[cfg(feature = "interactive")]
 mod browser;
+#[cfg(feature = "interactive")]
+mod rmrf;
 
 use fdu_core::ExclusionReason;
 use fdu_scan::{scan, ScanOptions, TopLevelDirectory};
@@ -20,6 +22,8 @@ struct Options {
     help: bool,
     mode: RunMode,
     read_only: bool,
+    rmrf: bool,
+    assume_yes: bool,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -50,6 +54,10 @@ fn run() -> Result<(), Box<dyn Error>> {
     {
         require_linux_6()?;
         configure_rayon_threads();
+    }
+
+    if options.rmrf {
+        return run_rmrf(options.path, options.assume_yes);
     }
 
     let terminal_available = io::stdin().is_terminal() && io::stdout().is_terminal();
@@ -115,12 +123,14 @@ fn write_summary_entry(output: &mut impl Write, directory: &TopLevelDirectory) -
 }
 
 fn parse_args() -> io::Result<Options> {
-    let mut path = None;
+    let mut paths: Vec<PathBuf> = Vec::new();
     let mut apparent = false;
     let mut help = false;
     let mut summary = false;
     let mut interactive = false;
     let mut read_only = false;
+    let mut rmrf = false;
+    let mut assume_yes = false;
     let mut positional_only = false;
 
     for argument in env::args_os().skip(1) {
@@ -150,6 +160,14 @@ fn parse_args() -> io::Result<Options> {
                     read_only = true;
                     continue;
                 }
+                Some("--rmrf") => {
+                    rmrf = true;
+                    continue;
+                }
+                Some("--yes") => {
+                    assume_yes = true;
+                    continue;
+                }
                 Some(option) if option.starts_with('-') => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
@@ -160,13 +178,13 @@ fn parse_args() -> io::Result<Options> {
             }
         }
 
-        if path.is_some() {
+        paths.push(PathBuf::from(argument));
+        if paths.len() > 1 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "only one path may be scanned",
+                "only one path may be given",
             ));
         }
-        path = Some(PathBuf::from(argument));
     }
 
     if summary && interactive {
@@ -175,9 +193,36 @@ fn parse_args() -> io::Result<Options> {
             "--summary and --interactive cannot be used together",
         ));
     }
+    if rmrf {
+        for (conflicting, flag) in [
+            (summary, "--summary"),
+            (interactive, "--interactive"),
+            (read_only, "--read-only"),
+            (apparent, "--apparent"),
+        ] {
+            if conflicting {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("--rmrf cannot be used with {flag}"),
+                ));
+            }
+        }
+        // Emptying the current directory must be spelled out, never implied.
+        if paths.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "--rmrf requires an explicit PATH",
+            ));
+        }
+    } else if assume_yes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--yes only applies to --rmrf",
+        ));
+    }
 
     Ok(Options {
-        path: path.unwrap_or_else(|| PathBuf::from(".")),
+        path: paths.pop().unwrap_or_else(|| PathBuf::from(".")),
         apparent,
         help,
         mode: if summary {
@@ -188,6 +233,8 @@ fn parse_args() -> io::Result<Options> {
             RunMode::Automatic
         },
         read_only,
+        rmrf,
+        assume_yes,
     })
 }
 
@@ -231,11 +278,32 @@ fn configure_rayon_threads() {
 
 fn print_help() {
     println!("Usage: fdu [--apparent] [--summary | --interactive] [--read-only] [PATH]");
+    println!("       fdu --rmrf [--yes] PATH");
     println!();
     println!("Browse a directory in the terminal, or print immediate child-directory totals.");
     println!("By default, sizes are allocated bytes; --apparent uses logical lengths.");
     println!("--summary forces output mode; --interactive requires a usable terminal.");
     println!("--read-only disables deletion in interactive mode.");
+    println!("--rmrf deletes every entry below PATH, keeping PATH itself, without a terminal");
+    println!("interface. PATH is required, must not be a symlink, and must not be / , your");
+    println!("home directory, or a parent of the current directory. It asks for confirmation");
+    println!("on a terminal; --yes skips that and is required when stdin is not a terminal.");
+}
+
+fn run_rmrf(path: PathBuf, assume_yes: bool) -> Result<(), Box<dyn Error>> {
+    #[cfg(feature = "interactive")]
+    {
+        rmrf::run(path, assume_yes)
+    }
+    #[cfg(not(feature = "interactive"))]
+    {
+        let _ = (path, assume_yes);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "--rmrf support is disabled in this summary-only build",
+        )
+        .into())
+    }
 }
 
 fn run_interactive(path: PathBuf, read_only: bool, apparent: bool) -> Result<(), Box<dyn Error>> {

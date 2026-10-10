@@ -7,10 +7,25 @@ Piped and redirected runs use the summary scanner.
 
 ```text
 fdu [--apparent] [--summary | --interactive] [--read-only] [PATH]
+fdu --rmrf [--yes] PATH
 ```
 
-`PATH` defaults to the current directory. The command line resolves symlinks
-in the supplied root path before traversal anchors to the opened directory.
+`--rmrf` deletes every entry below `PATH` without a terminal interface, through
+the same indexed scan and descriptor-relative deletion engine as interactive
+mode; the directory itself is left in place. It reports an error when this is a
+summary-only build. Because it cannot be undone, it is deliberately strict:
+
+- `PATH` is required; the current directory is never assumed.
+- `PATH` must not be a symlink, and `/`, the home directory, and any parent of
+  the current directory are refused. Symlinks found below `PATH` are unlinked,
+  never followed.
+- The resolved path and entry count are shown and `yes` must be typed. `--yes`
+  skips the question and is required when stdin is not a terminal.
+- Nothing is deleted unless the whole scan is complete: an unreadable
+  directory or a nested mount point rejects the run.
+
+When browsing or summarizing, `PATH` defaults to the current directory. The
+command line resolves symlinks in the supplied root path before traversal anchors to the opened directory.
 Discovered symlinks are selectable leaf entries and are never followed.
 
 By default, sizes use filesystem-allocated bytes (native metadata blocks
