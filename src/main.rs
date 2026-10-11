@@ -272,7 +272,10 @@ fn require_linux_6() -> io::Result<()> {
 #[cfg(target_os = "linux")]
 fn configure_rayon_threads() {
     if env::var_os("RAYON_NUM_THREADS").is_none() {
-        env::set_var("RAYON_NUM_THREADS", DEFAULT_RAYON_THREADS.to_string());
+        // This runs before Rayon or the terminal UI starts worker threads.
+        unsafe {
+            env::set_var("RAYON_NUM_THREADS", DEFAULT_RAYON_THREADS.to_string());
+        }
     }
 }
 
