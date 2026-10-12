@@ -565,14 +565,16 @@ mod tests {
         fs::write(root.join("locked/inside"), b"inside").unwrap();
         fs::write(root.join("sibling"), b"sibling").unwrap();
         fs::set_permissions(root.join("locked"), fs::Permissions::from_mode(0o000)).unwrap();
-        // Permission bits do not bind a privileged user, so there is nothing to observe.
+        // Decide before running the delete: a privileged user reads the directory anyway, so the
+        // scan is complete and run() would remove the tree, which leaves nothing to restore.
         let readable_anyway = fs::read_dir(root.join("locked")).is_ok();
+        if readable_anyway {
+            fs::set_permissions(root.join("locked"), fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
 
         let result = run(root.clone(), true);
         fs::set_permissions(root.join("locked"), fs::Permissions::from_mode(0o755)).unwrap();
-        if readable_anyway {
-            return;
-        }
         assert!(result.is_err(), "an incomplete scan must not delete anything");
         assert!(root.join("sibling").exists(), "no entry is removed when the plan is rejected");
         assert!(root.join("locked/inside").exists());
