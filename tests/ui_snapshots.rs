@@ -12,7 +12,7 @@ mod support;
 use ptytest::{Key, SnapshotOptions};
 use std::path::PathBuf;
 use std::time::Duration;
-use support::{layout_fixture, Session};
+use support::{layout_fixture, ScreenText, Session};
 
 /// Opening the 192 thousand entry tree takes far longer than the small trees
 /// the behavior tests use.
@@ -108,10 +108,16 @@ fn filter_prompt_and_applied_filter() {
     let mut session = open("snapshot-filter", 100, 24);
     session.text("/");
     session.text("directory-00001");
-    session.wait_for("directory-00001");
+    // The listing itself contains "directory-00001", so the typed text is only
+    // on screen once the prompt line echoes it; matching the bare name would
+    // freeze a frame in which the prompt has not caught up with the keystrokes.
+    session.wait_for("/ directory-00001");
     freeze(&mut session, "filter-prompt-100x24");
     session.key(Key::Enter);
-    session.wait_for("filter \"directory-00001\"");
+    // The header shows the applied filter only after the prompt has closed.
+    session.wait("applied filter", |screen| {
+        screen.shows("filter \"directory-00001\"") && !screen.shows("Type a name fragment")
+    });
     freeze(&mut session, "filtered-100x24");
     session.quit();
 }
