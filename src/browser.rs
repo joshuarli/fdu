@@ -377,7 +377,7 @@ impl BrowserProfile {
         let entries = model.indexed_entries;
         let arena_bytes = model.tree.retained_arena_bytes();
         eprintln!(
-            "fdu-profile elapsed_ms={} initial_scan_settled_ms={} first_render_ms={} first_usable_listing_ms={} first_entries_ms={} entries={} tree_arena_bytes={} tree_arena_bytes_per_entry={:.2} scan_event_queue_high_water={} input_render_samples={} input_render_p50_us={} input_render_max_us={} delete_worker_ms={} delete_apply_ms={} busy_entry_batches_ms={} entry_batches={} busy_other_events_ms={} busy_draw_ms={} draws={} waiting_for_input_ms={}",
+            "fdu-profile elapsed_ms={} initial_scan_settled_ms={:.3} first_render_ms={:.3} first_usable_listing_ms={:.3} first_entries_ms={:.3} entries={} tree_arena_bytes={} tree_arena_bytes_per_entry={:.2} scan_event_queue_high_water={} input_render_samples={} input_render_p50_us={} input_render_max_us={} delete_worker_ms={:.3} delete_apply_ms={:.3} busy_entry_batches_ms={} entry_batches={} busy_other_events_ms={} busy_draw_ms={} draws={} waiting_for_input_ms={}",
             self.started.elapsed().as_millis(),
             duration_ms(self.initial_scan_settled),
             duration_ms(self.first_render),
@@ -402,8 +402,10 @@ impl BrowserProfile {
     }
 }
 
-fn duration_ms(duration: Option<Duration>) -> u128 {
-    duration.map_or(0, |duration| duration.as_millis())
+/// Fractional milliseconds: whole-millisecond truncation would make a listing drawn just
+/// before the scan settles indistinguishable from one drawn at the same time.
+fn duration_ms(duration: Option<Duration>) -> f64 {
+    duration.map_or(0.0, |duration| duration.as_secs_f64() * 1000.0)
 }
 
 impl BrowserModel {
@@ -1732,6 +1734,11 @@ pub fn run(path: std::path::PathBuf, read_only: bool, apparent: bool) -> Result<
                                 if let Some(started) = applying {
                                     profile.busy.entry_batches += started.elapsed();
                                     profile.busy.entry_batch_count += 1;
+                                }
+                                // Draw the first listing before applying anything further, so a scan that
+                                // finishes within this tick still settles after the listing is on screen.
+                                if !model.visible.is_empty() && first_live_listing_directory != Some(model.current_directory) {
+                                    break;
                                 }
                             }
                             other => {

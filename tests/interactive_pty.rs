@@ -596,14 +596,14 @@ fn first_listing_is_drawn_before_the_nested_scan_settles() -> io::Result<()> {
 
     let output = String::from_utf8_lossy(session.terminal.raw_output()).into_owned();
     let profile_field = |name: &str| output.split_whitespace().find_map(|field| field.strip_prefix(name));
-    let first_listing_ms: u128 = profile_field("first_usable_listing_ms=")
+    let first_listing_ms: f64 = profile_field("first_usable_listing_ms=")
         .expect("profile output must report the first usable listing time")
         .parse()
-        .expect("listing time must be an integer number of milliseconds");
-    let settled_ms: u128 = profile_field("initial_scan_settled_ms=")
+        .expect("listing time must be a number of milliseconds");
+    let settled_ms: f64 = profile_field("initial_scan_settled_ms=")
         .expect("profile output must report the initial scan settle time")
         .parse()
-        .expect("settle time must be an integer number of milliseconds");
+        .expect("settle time must be a number of milliseconds");
     assert!(
         first_listing_ms < settled_ms,
         "the root listing should be drawn before its nested scan completes; first listing {first_listing_ms} ms, settled {settled_ms} ms"
@@ -633,10 +633,10 @@ fn release_artifact_tree_reaches_ready_under_100ms() -> io::Result<()> {
 
         let output = String::from_utf8_lossy(session.terminal.raw_output()).into_owned();
         let profile_field = |name: &str| output.split_whitespace().find_map(|field| field.strip_prefix(name));
-        let settled_ms: u128 = profile_field("initial_scan_settled_ms=")
+        let settled_ms: f64 = profile_field("initial_scan_settled_ms=")
             .expect("profile output must report the initial scan settle time")
             .parse()
-            .expect("settle time must be an integer number of milliseconds");
+            .expect("settle time must be a number of milliseconds");
         let entries: usize = profile_field("entries=")
             .expect("profile output must report the indexed entry count")
             .parse()
@@ -648,9 +648,9 @@ fn release_artifact_tree_reaches_ready_under_100ms() -> io::Result<()> {
         samples.push(settled_ms);
     }
 
-    samples.sort_unstable();
+    samples.sort_unstable_by(f64::total_cmp);
     let median_ms = samples[samples.len() / 2];
     eprintln!("initial scan settle samples: {samples:?} ms; median: {median_ms} ms");
-    assert!(median_ms < 100, "initial scan settle median must be below 100 ms; samples: {samples:?}");
+    assert!(median_ms < 100.0, "initial scan settle median must be below 100 ms; samples: {samples:?}");
     Ok(())
 }
