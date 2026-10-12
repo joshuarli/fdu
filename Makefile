@@ -25,7 +25,6 @@ test-ci:
 	$(call cargo,test) test --locked --release --workspace
 
 lint:
-	cargo fmt --all
 	cargo clippy --fix --allow-dirty --all-targets --all-features -- --deny warnings
 
 release:
