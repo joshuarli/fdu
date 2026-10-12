@@ -231,7 +231,11 @@ cargo test --locked -p fdu --no-default-features
 
 `make lint` formats the tree and runs Clippy with warnings denied;
 `make install` builds the release binary into `~/usr/bin/fdu`,
-re-signing it on macOS.
+re-signing it on macOS. `make release` rebuilds the standard library with the
+flags used for published artifacts, while `cargo build --locked --release` uses
+the prebuilt standard library. The `release.yml` workflow is dispatched manually
+and publishes a `release-<sha>` prerelease for macOS arm64 and Linux musl
+(dynamic and static).
 
 The terminal tests use the sibling `../ptytest` crate, so that checkout must be
 present (Cargo needs it to load the workspace even for other builds). They run

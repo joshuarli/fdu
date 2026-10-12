@@ -30,35 +30,61 @@ jobs:
         include:
           - runner: macos-26
             target: aarch64-apple-darwin
-            musl: false
+            docker_platform: ''
           - runner: ubuntu-latest
             target: x86_64-unknown-linux-musl
-            musl: true
+            docker_platform: linux/amd64
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
-            musl: true
+            docker_platform: linux/arm64
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install musl linker
-        if: matrix.musl
-        run: sudo apt-get update && sudo apt-get install --yes musl-tools
-      - name: Add Rust target
-        if: matrix.musl
-        run: rustup target add "${{ matrix.target }}"
-      - name: Test
-        run: cargo test --locked --workspace
-      - name: Build release
-        env:
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
-        run: cargo build --locked --release --target "${{ matrix.target }}"
-      - name: Save release binary
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        if: matrix.docker_platform != ''
+      - name: Build Linux release image
+        if: matrix.docker_platform != ''
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: Dockerfile
+          platforms: ${{ matrix.docker_platform }}
+          load: true
+          tags: fdu-builder:${{ matrix.target }}
+          cache-from: type=gha,scope=fdu-${{ matrix.target }}
+          cache-to: type=gha,mode=max,scope=fdu-${{ matrix.target }}
+      - uses: laputa-systems/setup-rust@a7d09bfe692e431e6a98cd107ac2df77d47b5bba
+        if: matrix.docker_platform == ''
+      - name: Build macOS release
+        if: matrix.docker_platform == ''
+        run: make release TARGET="${{ matrix.target }}"
+      - name: Run macOS tests
+        if: matrix.docker_platform == ''
+        run: make test-ci TARGET="${{ matrix.target }}"
+      - name: Save macOS release
+        if: matrix.docker_platform == ''
         run: cp "target/${{ matrix.target }}/release/fdu" "fdu-${{ matrix.target }}"
+      - name: Build and verify Linux releases
+        if: matrix.docker_platform != ''
+        run: |
+          docker run --rm --init \
+            --platform "${{ matrix.docker_platform }}" \
+            -v "$GITHUB_WORKSPACE:/fdu" \
+            -w /fdu \
+            fdu-builder:${{ matrix.target }} \
+            sh -ec '
+              make release-dynamic TARGET=${{ matrix.target }}
+              make verify-release-dynamic TARGET=${{ matrix.target }}
+              make test-ci TARGET=${{ matrix.target }}
+              cp target/${{ matrix.target }}/release/fdu fdu-${{ matrix.target }}
+              make release TARGET=${{ matrix.target }}
+              make verify-release TARGET=${{ matrix.target }}
+              cp target/${{ matrix.target }}/release/fdu fdu-${{ matrix.target }}-static
+            '
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: fdu-${{ matrix.target }}
-          path: fdu-${{ matrix.target }}
+          path: fdu-*
 
   release:
     name: Create pre-release
