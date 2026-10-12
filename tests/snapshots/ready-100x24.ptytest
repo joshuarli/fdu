@@ -1,5 +1,5 @@
 size: columns=100 rows=24
-cursor: row=23 column=63 visible=false
+cursor: row=0 column=0 visible=false
 modes: alternate-screen=true application-cursor=false application-keypad=false bracketed-paste=false
 00│·fdu···read·only···apparent·sizes···································································
 01│┌·/tmp/fdu-layout-fixture·(48·shown,·48·total,·51.9·KiB)───────────────────────────────────────────┐

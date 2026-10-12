@@ -318,6 +318,12 @@ impl Screen {
         if style != Style::Plain {
             output.push_str(&Style::Plain.ansi());
         }
+        // The cursor is hidden, but where it rests is otherwise the last cell this diff
+        // happened to touch, which depends on which earlier frames were drawn. Parking it
+        // makes the terminal state a function of the screen alone.
+        if !output.is_empty() {
+            output.push_str("\x1b[1;1H");
+        }
         output.into_bytes()
     }
 

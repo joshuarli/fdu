@@ -1,5 +1,5 @@
 size: columns=100 rows=24
-cursor: row=23 column=100 visible=false
+cursor: row=0 column=0 visible=false
 modes: alternate-screen=true application-cursor=false application-keypad=false bracketed-paste=false
 00│·fdu···read·only···apparent·sizes···································································
 01│┌·…ure/directory-000030·(26·shown,·26·total,·17.5·KiB)┐┌·Marked·1·item·(17.5·KiB,·33.7%·of·51.9·Ki…┐

@@ -1,5 +1,5 @@
 size: columns=100 rows=24
-cursor: row=22 column=97 visible=false
+cursor: row=0 column=0 visible=false
 modes: alternate-screen=true application-cursor=false application-keypad=false bracketed-paste=false
 00│·fd┌Help────────────────────────────────────────────────────────────────────────────────────────┐···
 01│┌·/│Focus:·list·················································································│──┐
