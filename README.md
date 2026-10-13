@@ -43,9 +43,10 @@ terminal input and output.
 By default, sizes are filesystem-allocated bytes; `--apparent` uses logical
 file lengths. Use `--read-only` to disable deletion in the browser. The summary
 prints each included immediate child directory in descending size order as a
-byte count, a tab, and a quoted name. Root-level files are not listed; mount
-boundaries are labeled separately. Warnings report skipped entries or
-boundaries. Hidden names are included, and fdu does not read `.gitignore`.
+compact size (such as `5G` or `2.4M`), a tab, and a quoted name. Sizes use
+1024-based units. Root-level files are not listed; mount boundaries are labeled
+separately. Warnings report skipped entries or boundaries. Hidden names are
+included, and fdu does not read `.gitignore`.
 
 The supplied root path may resolve through symlinks; the browser shows
 discovered symlinks beneath it as entries and never follows them.

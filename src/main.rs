@@ -118,8 +118,33 @@ fn write_summary_entry(output: &mut impl Write, directory: &TopLevelDirectory) -
         Some(ExclusionReason::UnsupportedAlias) => {
             writeln!(output, "UNSUPPORTED DIRECTORY ALIAS\t{:?}", directory.name)
         }
-        None => writeln!(output, "{}\t{:?}", directory.disk_size, directory.name),
+        None => writeln!(output, "{}\t{:?}", format_summary_size(directory.disk_size), directory.name),
     }
+}
+
+fn format_summary_size(bytes: u64) -> String {
+    const UNITS: [&str; 7] = ["B", "K", "M", "G", "T", "P", "E"];
+    if bytes < 1024 {
+        return format!("{bytes}B");
+    }
+
+    let bytes = u128::from(bytes);
+    let mut divisor = 1024u128;
+    let mut unit = 1usize;
+    let tenths = loop {
+        let rounded = (bytes * 10 + divisor / 2) / divisor;
+        if rounded < 10_240 || unit == UNITS.len() - 1 {
+            break rounded;
+        }
+        divisor *= 1024;
+        unit += 1;
+    };
+    let value = if tenths % 10 == 0 {
+        (tenths / 10).to_string()
+    } else {
+        format!("{}.{:01}", tenths / 10, tenths % 10)
+    };
+    format!("{value}{}", UNITS[unit])
 }
 
 fn parse_args() -> io::Result<Options> {
@@ -351,7 +376,7 @@ mod tests {
                 exclusion: Some(ExclusionReason::MountBoundary),
             },
         ).unwrap();
-        assert_eq!(String::from_utf8(output).unwrap(), "42\t\"included\"\nMOUNT BOUNDARY\t\"mounted\"\n");
+        assert_eq!(String::from_utf8(output).unwrap(), "42B\t\"included\"\nMOUNT BOUNDARY\t\"mounted\"\n");
     }
 
     #[test]
