@@ -3,7 +3,7 @@
 //! directory enumeration, mount identity, and worker sizing.
 use crate::fsutil::{open_directory_at, stat_entry_at};
 use crate::{DirectoryToken, EntryBatch, RootAnchor, ScanExclusions, ScanQueueMetrics};
-use fdu_core::{EntryType, ExclusionReason, FileIdentity, NodeState, ScanEntry, ScanEvent};
+use fdu_core::{EntryType, ExclusionReason, FileIdentity, NodeStatus, ScanEntry, ScanEvent};
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 use std::cell::RefCell;
 use std::io;
@@ -594,6 +594,10 @@ pub(crate) fn scan_indexed(
         Ok(_) => return fail("scan root identity changed after it was opened".to_owned()),
         Err(error) => return fail(error.to_string()),
     };
+    let root_scan_fd = match crate::fsutil::open_directory_at(anchor.as_fd(), c".") {
+        Ok(fd) => fd,
+        Err(error) => return fail(error.to_string()),
+    };
     let root_mount = match mount_identity(anchor.as_fd()) {
         Ok(identity) => identity,
         Err(error) => return fail(error.to_string()),
@@ -646,7 +650,12 @@ pub(crate) fn scan_indexed(
         // The root is scanned like any other directory, on this thread, which then shares the
         // work its own subtree holds with the workers.
         let root_task = IndexedDirectoryTask {
-            source: IndexedDirectorySource::Opened(anchor.clone()),
+            source: IndexedDirectorySource::Opened(RootAnchor {
+                fd: Arc::new(root_scan_fd),
+                name: anchor.name.clone(),
+                identity: root_identity,
+                link_count: anchor.link_count,
+            }),
             name: Vec::new(),
             identity: root_identity,
             token: DirectoryToken(0),
@@ -776,7 +785,7 @@ struct ClassifiedEntry {
     link_count: u64,
     apparent_bytes: u64,
     allocated_bytes: u64,
-    state: NodeState,
+    state: NodeStatus,
     child_token: Option<DirectoryToken>,
     /// At most one problem is reported per entry.
     failure: Option<String>,
@@ -784,7 +793,7 @@ struct ClassifiedEntry {
 
 impl ClassifiedEntry {
     fn incomplete(&mut self, message: impl ToString) {
-        self.state = NodeState::Incomplete;
+        self.state = NodeStatus::Incomplete;
         self.failure = Some(message.to_string());
     }
 }
@@ -804,7 +813,7 @@ fn classify_entry(
         link_count: 0,
         apparent_bytes: 0,
         allocated_bytes: 0,
-        state: NodeState::Complete,
+        state: NodeStatus::Complete,
         child_token: None,
         failure: None,
     };
@@ -870,9 +879,9 @@ fn classify_entry(
     }
     found.identity = facts.identity;
     if !facts.same_mount {
-        found.state = NodeState::Excluded(ExclusionReason::MountBoundary);
+        found.state = NodeStatus::Excluded(ExclusionReason::MountBoundary);
     } else if !context.seen_directories.insert(facts.identity) {
-        found.state = NodeState::Excluded(ExclusionReason::UnsupportedAlias);
+        found.state = NodeStatus::Excluded(ExclusionReason::UnsupportedAlias);
     } else {
         let child_token = match allocate_directory_token(context.next_token) {
             Ok(child_token) => child_token,
@@ -952,7 +961,7 @@ fn scan_indexed_directory_with_buffer(
         }
 
         let mut found = classify_entry(&entry, directory, token, child_exclusion_node, context, outbox);
-        if found.state != NodeState::Complete {
+        if found.state != NodeStatus::Complete {
             complete = false;
         }
         if let Some(message) = found.failure.take() {

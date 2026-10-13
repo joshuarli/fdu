@@ -50,6 +50,29 @@ pub enum NodeState {
     Tombstone,
 }
 
+/// A node state that can be assigned without changing tree totals. Tombstones
+/// are created only by `Tree::tombstone_subtree`, which also updates totals.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NodeStatus {
+    Scanning,
+    Complete,
+    Incomplete,
+    Excluded(ExclusionReason),
+    Stale,
+}
+
+impl From<NodeStatus> for NodeState {
+    fn from(status: NodeStatus) -> Self {
+        match status {
+            NodeStatus::Scanning => Self::Scanning,
+            NodeStatus::Complete => Self::Complete,
+            NodeStatus::Incomplete => Self::Incomplete,
+            NodeStatus::Excluded(reason) => Self::Excluded(reason),
+            NodeStatus::Stale => Self::Stale,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ScanEntry {
     /// The directory this entry was found in.
@@ -61,7 +84,7 @@ pub struct ScanEntry {
     pub link_count: u64,
     pub apparent_bytes: u64,
     pub allocated_bytes: u64,
-    pub state: NodeState,
+    pub state: NodeStatus,
 }
 
 /// Entries found by the scanner, in discovery order. Entries of different directories may share
@@ -236,7 +259,7 @@ impl Tree {
         link_count: u64,
         apparent_bytes: u64,
         allocated_bytes: u64,
-        state: NodeState,
+        state: NodeStatus,
     ) -> Option<NodeId> {
         let index = self.nodes.len();
         let id = NodeId::from_index(index)?;
@@ -255,7 +278,7 @@ impl Tree {
             link_count,
             apparent_bytes,
             allocated_bytes,
-            state,
+            state: state.into(),
         });
         if let Some(last) = self.nodes[parent.index()].last_child {
             self.nodes[last.index()].next_sibling = Some(id);
@@ -266,11 +289,11 @@ impl Tree {
         Some(id)
     }
 
-    pub fn set_state(&mut self, id: NodeId, state: NodeState) -> bool {
+    pub fn set_state(&mut self, id: NodeId, state: NodeStatus) -> bool {
         let Some(record) = self.nodes.get_mut(id.index()) else {
             return false;
         };
-        record.state = state;
+        record.state = state.into();
         true
     }
 
@@ -452,7 +475,7 @@ impl<'a> Iterator for Children<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{EntryType, FileIdentity, NodeState, Tree};
+    use super::{EntryType, FileIdentity, NodeState, NodeStatus, Tree};
 
     #[test]
     fn names_and_sibling_links_share_the_arena_and_keep_stable_ids() {
@@ -466,7 +489,7 @@ mod tests {
                 1,
                 7,
                 512,
-                NodeState::Complete,
+                NodeStatus::Complete,
             )
             .unwrap();
         let second = tree
@@ -478,7 +501,7 @@ mod tests {
                 2,
                 7,
                 512,
-                NodeState::Complete,
+                NodeStatus::Complete,
             )
             .unwrap();
         assert_eq!(tree.name(first), Some(b"first-\xff".as_slice()));
@@ -498,7 +521,7 @@ mod tests {
                 2,
                 0,
                 0,
-                NodeState::Complete,
+                NodeStatus::Complete,
             )
             .unwrap();
         let file = tree
@@ -510,7 +533,7 @@ mod tests {
                 1,
                 7,
                 512,
-                NodeState::Complete,
+                NodeStatus::Complete,
             )
             .unwrap();
         assert!(tree.add_to_ancestors(directory, 7, 512));
@@ -535,7 +558,7 @@ mod tests {
                 2,
                 0,
                 0,
-                NodeState::Complete,
+                NodeStatus::Complete,
             )
             .unwrap();
         assert!(tree.add_to_ancestors(tree.root(), u64::MAX, u64::MAX));

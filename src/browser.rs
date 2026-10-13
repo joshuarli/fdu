@@ -1,5 +1,5 @@
 use fdu_core::{
-    DirectoryToken, EntryType, ExclusionReason, NodeId, NodeState, ScanEvent, Tree,
+    DirectoryToken, EntryType, ExclusionReason, NodeId, NodeState, NodeStatus, ScanEvent, Tree,
 };
 use fdu_delete::{create_plan, DeleteEvent, DeleteOutcome, DeletionPlan, OutcomeKind};
 use fdu_scan::{
@@ -500,7 +500,7 @@ impl BrowserModel {
                 let root = self.tree.record(self.tree.root()).expect("root record exists");
                 if root.identity != identity {
                     self.message = Some("Opened root identity changed before scanning started.".to_owned());
-                    self.set_state(self.tree.root(), NodeState::Incomplete);
+                    self.set_state(self.tree.root(), NodeStatus::Incomplete);
                     self.mark_incomplete_chain(self.tree.root());
                 }
                 true
@@ -518,7 +518,7 @@ impl BrowserModel {
             }
             ScanEvent::DirectoryExcluded { directory, reason } => {
                 if let Some(node) = self.node_for_token(directory) {
-                    self.set_state(node, NodeState::Excluded(reason));
+                    self.set_state(node, NodeStatus::Excluded(reason));
                     if let Some(parent) = self.tree.record(node).and_then(|record| record.parent()) {
                         self.mark_incomplete_chain(parent);
                     }
@@ -556,7 +556,7 @@ impl BrowserModel {
             if old.is_some_and(|state| !matches!(state, NodeState::Excluded(_) | NodeState::Tombstone)) {
                 if complete {
                     if old == Some(NodeState::Scanning) {
-                        self.set_state(node, NodeState::Complete);
+                        self.set_state(node, NodeStatus::Complete);
                     }
                 } else {
                     self.mark_incomplete_chain(node);
@@ -632,17 +632,17 @@ impl BrowserModel {
                         self.token_nodes[index] = Some(id);
                     }
                     match entry.state {
-                        NodeState::Incomplete => {
+                        NodeStatus::Incomplete => {
                             incomplete_entries += 1;
                             run.problem = true;
                         }
-                        NodeState::Excluded(_) => {
+                        NodeStatus::Excluded(_) => {
                             excluded_entries += 1;
                             run.problem = true;
                         }
                         _ => {}
                     }
-                    if entry.entry_type != EntryType::Directory && entry.state == NodeState::Complete {
+                    if entry.entry_type != EntryType::Directory && entry.state == NodeStatus::Complete {
                         match (
                             run.apparent.checked_add(entry.apparent_bytes),
                             run.allocated.checked_add(entry.allocated_bytes),
@@ -1055,7 +1055,7 @@ impl BrowserModel {
                 .mark_scanning_incomplete();
             self.bump_incomplete(changed);
         } else if self.tree.record(self.tree.root()).is_some_and(|record| record.state == NodeState::Scanning) {
-            self.set_state(self.tree.root(), NodeState::Complete);
+            self.set_state(self.tree.root(), NodeStatus::Complete);
         }
         if let Some(tree) = Arc::get_mut(&mut self.tree) {
             tree.shrink_to_fit();
@@ -1125,16 +1125,17 @@ impl BrowserModel {
         self.token_nodes.get(token.0 as usize).copied().flatten()
     }
 
-    fn set_state(&mut self, id: NodeId, state: NodeState) {
+    fn set_state(&mut self, id: NodeId, state: NodeStatus) {
         let old = self.tree.record(id).map(|record| record.state);
-        if old == Some(state) {
+        let next_state = NodeState::from(state);
+        if old == Some(next_state) {
             return;
         }
         if let Some(old) = old {
             self.adjust_state_count(old, -1);
         }
         if Arc::get_mut(&mut self.tree).is_some_and(|tree| tree.set_state(id, state)) {
-            self.adjust_state_count(state, 1);
+            self.adjust_state_count(next_state, 1);
         }
     }
 
@@ -1177,7 +1178,7 @@ impl BrowserModel {
             };
             let parent = record.parent();
             if matches!(record.state, NodeState::Scanning | NodeState::Complete) {
-                self.set_state(id, NodeState::Incomplete);
+                self.set_state(id, NodeStatus::Incomplete);
             }
             current = parent;
         }
@@ -1191,7 +1192,7 @@ impl BrowserModel {
             };
             let parent = record.parent();
             if record.state != NodeState::Tombstone {
-                self.set_state(id, NodeState::Stale);
+                self.set_state(id, NodeStatus::Stale);
             }
             current = parent;
         }
@@ -1883,7 +1884,7 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::{create_plan, Action, BrowserModel, DialogState};
-    use fdu_core::{DirectoryToken, EntryType, FileIdentity, NodeId, NodeState, ScanEvent};
+    use fdu_core::{DirectoryToken, EntryType, FileIdentity, NodeId, NodeState, NodeStatus, ScanEvent};
     use fdu_delete::{DeleteOutcome, OutcomeKind};
     use fdu_scan::{open_root, RootAnchor};
     use fdu_tui::{Cursor, Intent, Pane, Phase, SizeMode, SortMode, Split, TerminalSize};
@@ -1929,7 +1930,7 @@ mod tests {
         bytes: u64,
         inode: u64,
     ) -> NodeId {
-        let state = NodeState::Complete;
+        let state = NodeStatus::Complete;
         let tree = Arc::get_mut(&mut model.tree).expect("test model has a single tree owner");
         let id = tree
             .append(
@@ -2375,7 +2376,7 @@ mod tests {
         let good = append(&mut model, root, b"good.bin", EntryType::RegularFile, 9, 2);
         let bad = append(&mut model, root, b"bad.bin", EntryType::RegularFile, 5, 3);
         ready(&mut model);
-        model.set_state(bad, NodeState::Incomplete);
+        model.set_state(bad, NodeStatus::Incomplete);
 
         assert!(matches!(press_delete_on_marks(&mut model, &[good, bad]), Action::None));
         assert!(model.pending_delete.is_none());

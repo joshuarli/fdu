@@ -1,4 +1,4 @@
-use fdu_core::{EntryType, NodeState, ScanEvent, Tree};
+use fdu_core::{EntryType, NodeState, NodeStatus, ScanEvent, Tree};
 use fdu_delete::{DeleteEvent, OutcomeKind, create_plan};
 use fdu_scan::{RootAnchor, open_root_no_follow, start_indexed_scan};
 use std::error::Error;
@@ -85,6 +85,9 @@ impl Drop for Progress {
 /// `yes`; without a terminal to ask on, that is an error.
 pub fn run(path: PathBuf, assume_yes: bool) -> Result<(), Box<dyn Error>> {
     let root = open_root_no_follow(&path).map_err(|error| describe_open_failure(&path, error))?;
+    let confirmation_path = (!assume_yes)
+        .then(|| resolve_confirmation_path(&root, &path))
+        .transpose()?;
     let cwd = std::env::current_dir()?;
     let home = std::env::var_os("HOME");
     if let Some(reason) = protected_root_reason(&root, &cwd, home.as_deref())? {
@@ -120,7 +123,13 @@ pub fn run(path: PathBuf, assume_yes: bool) -> Result<(), Box<dyn Error>> {
     })?;
     let total = plan.operation_count();
     if !assume_yes {
-        confirm_interactively(&path, selected.len(), total)?;
+        confirm_interactively(
+            &root,
+            &path,
+            confirmation_path.as_deref().expect("confirmation path is resolved"),
+            selected.len(),
+            total,
+        )?;
     }
     let root_fd = root.try_clone_fd()?;
     let (sender, receiver) = mpsc::sync_channel(DELETE_CHANNEL_CAPACITY);
@@ -255,20 +264,51 @@ fn protected_root_reason(
     Ok(None)
 }
 
-fn confirm_interactively(path: &Path, top_level: usize, total: usize) -> io::Result<()> {
+fn resolve_confirmation_path(root: &RootAnchor, path: &Path) -> io::Result<PathBuf> {
+    let resolved = std::fs::canonicalize(path)?;
+    verify_confirmation_target(root, path)?;
+    verify_confirmation_target(root, &resolved)?;
+    Ok(resolved)
+}
+
+fn verify_confirmation_target(root: &RootAnchor, path: &Path) -> io::Result<()> {
+    if last_path_component_is_symlink(path) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "selected path became a symlink after it was opened",
+        ));
+    }
+    let metadata = std::fs::metadata(path)?;
+    if metadata.dev() != root.identity.device || metadata.ino() != root.identity.inode {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "selected path no longer resolves to the opened directory",
+        ));
+    }
+    Ok(())
+}
+
+fn confirm_interactively(
+    root: &RootAnchor,
+    selected_path: &Path,
+    resolved_path: &Path,
+    top_level: usize,
+    total: usize,
+) -> io::Result<()> {
     if !io::stdin().is_terminal() {
         return Err(io::Error::new(
             io::ErrorKind::NotConnected,
             "cannot ask for confirmation without a terminal; pass --yes to delete without asking",
         ));
     }
-    let resolved = std::fs::canonicalize(path)?;
+    verify_confirmation_target(root, selected_path)?;
+    verify_confirmation_target(root, resolved_path)?;
     let mut stderr = io::stderr().lock();
     write!(
         stderr,
         "Permanently delete {top_level} entries ({total} including nested) below {}? \
          The directory itself is kept. Type 'yes' to continue: ",
-        resolved.display()
+        resolved_path.display()
     )?;
     stderr.flush()?;
     if read_confirmation(&mut io::stdin().lock())? {
@@ -351,7 +391,7 @@ fn build_index(root: &RootAnchor, progress: &mut Progress) -> io::Result<Tree> {
             }
             ScanEvent::DirectoryExcluded { directory, reason } => {
                 if let Some(node) = token_nodes.get(directory.0 as usize).copied().flatten() {
-                    tree.set_state(node, NodeState::Excluded(reason));
+                    tree.set_state(node, NodeStatus::Excluded(reason));
                     if let Some(parent) = tree.record(node).and_then(|record| record.parent()) {
                         tree.mark_incomplete_to_root(parent);
                     }
@@ -383,7 +423,7 @@ fn build_index(root: &RootAnchor, progress: &mut Progress) -> io::Result<Tree> {
         return Err(io::Error::other(message));
     }
     if tree.record(tree.root()).is_some_and(|record| record.state == NodeState::Scanning) {
-        tree.set_state(tree.root(), NodeState::Complete);
+        tree.set_state(tree.root(), NodeStatus::Complete);
     }
     tree.shrink_to_fit();
     Ok(tree)
@@ -401,7 +441,7 @@ fn finish_directory(
     let state = tree.record(node).map(|record| record.state);
     if complete {
         if state == Some(NodeState::Scanning) {
-            tree.set_state(node, NodeState::Complete);
+            tree.set_state(node, NodeStatus::Complete);
         }
     } else {
         tree.mark_incomplete_to_root(node);
@@ -466,7 +506,7 @@ fn apply_batch(
             token_nodes[index] = Some(id);
         }
         match entry.state {
-            NodeState::Complete => {
+            NodeStatus::Complete => {
                 if entry.entry_type != EntryType::Directory {
                     match (
                         current.apparent.checked_add(entry.apparent_bytes),
@@ -480,10 +520,10 @@ fn apply_batch(
                     }
                 }
             }
-            NodeState::Incomplete | NodeState::Excluded(_) => {
+            NodeStatus::Incomplete | NodeStatus::Excluded(_) => {
                 current.problem = true;
             }
-            NodeState::Scanning | NodeState::Stale | NodeState::Tombstone => {
+            NodeStatus::Scanning | NodeStatus::Stale => {
                 current.problem = true;
             }
         }
@@ -496,13 +536,17 @@ fn apply_batch(
 
 #[cfg(test)]
 mod tests {
-    use super::{protected_root_reason, read_confirmation, require_complete_scan_root, run};
-    use fdu_core::{EntryType, FileIdentity, NodeState, Tree};
+    use super::{
+        protected_root_reason, read_confirmation, require_complete_scan_root, resolve_confirmation_path, run,
+        verify_confirmation_target,
+    };
+    use fdu_core::{EntryType, FileIdentity, NodeStatus, Tree};
     use fdu_scan::open_root_no_follow;
     use std::ffi::OsStr;
     use std::fs;
     use std::io::{self, Cursor};
     use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::symlink;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -588,6 +632,30 @@ mod tests {
     }
 
     #[test]
+    fn confirmation_path_stays_bound_to_the_open_root_when_an_ancestor_link_moves() {
+        let temp = TempDir::new().unwrap();
+        let first = temp.0.join("first");
+        let second = temp.0.join("second");
+        fs::create_dir_all(first.join("root")).unwrap();
+        fs::create_dir_all(second.join("root")).unwrap();
+        let alias = temp.0.join("alias");
+        symlink(&first, &alias).unwrap();
+        let selected_path = alias.join("root");
+        let root = open_root_no_follow(&selected_path).unwrap();
+
+        let confirmation_path = resolve_confirmation_path(&root, &selected_path).unwrap();
+        assert_eq!(confirmation_path, first.join("root"));
+
+        fs::remove_file(&alias).unwrap();
+        symlink(&second, &alias).unwrap();
+
+        let error = verify_confirmation_target(&root, &selected_path).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        verify_confirmation_target(&root, &confirmation_path).unwrap();
+        assert_eq!(confirmation_path, first.join("root"));
+    }
+
+    #[test]
     fn trailing_slash_symlink_root_is_refused_and_its_target_left_alone() {
         let temp = TempDir::new().unwrap();
         let target = temp.0.join("target");
@@ -607,7 +675,7 @@ mod tests {
     fn incomplete_root_scan_is_refused_before_children_are_selected() {
         let mut tree = Tree::new(b"root", FileIdentity { device: 1, inode: 1 }, 1).unwrap();
         let root = tree.root();
-        tree.set_state(root, NodeState::Incomplete);
+        tree.set_state(root, NodeStatus::Incomplete);
         tree.append(
             root,
             b"visible",
@@ -616,7 +684,7 @@ mod tests {
             1,
             1,
             1,
-            NodeState::Complete,
+            NodeStatus::Complete,
         )
         .unwrap();
         assert_eq!(tree.children(root).count(), 1, "one indexed child would otherwise be selected");

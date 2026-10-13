@@ -823,20 +823,20 @@ mod posix {
 #[cfg(test)]
 mod tests {
     use super::{append_postorder, create_plan, ineligible_reason};
-    use fdu_core::{EntryType, FileIdentity, NodeId, NodeState, Tree};
+    use fdu_core::{EntryType, FileIdentity, NodeId, NodeStatus, Tree};
     use std::sync::Arc;
 
     fn test_tree() -> (Arc<Tree>, NodeId, NodeId, NodeId) {
         let identity = FileIdentity { device: 1, inode: 1 };
         let mut tree = Tree::new(b"root", identity, 1).unwrap();
         let directory = tree
-            .append(tree.root(), b"dir", EntryType::Directory, FileIdentity { device: 1, inode: 2 }, 2, 10, 512, NodeState::Complete)
+            .append(tree.root(), b"dir", EntryType::Directory, FileIdentity { device: 1, inode: 2 }, 2, 10, 512, NodeStatus::Complete)
             .unwrap();
         let file = tree
-            .append(directory, b"file", EntryType::RegularFile, FileIdentity { device: 1, inode: 3 }, 1, 10, 512, NodeState::Complete)
+            .append(directory, b"file", EntryType::RegularFile, FileIdentity { device: 1, inode: 3 }, 1, 10, 512, NodeStatus::Complete)
             .unwrap();
         let second = tree
-            .append(directory, b"second", EntryType::RegularFile, FileIdentity { device: 1, inode: 4 }, 1, 0, 0, NodeState::Complete)
+            .append(directory, b"second", EntryType::RegularFile, FileIdentity { device: 1, inode: 4 }, 1, 0, 0, NodeStatus::Complete)
             .unwrap();
         (Arc::new(tree), directory, file, second)
     }
@@ -853,7 +853,7 @@ mod tests {
     fn ineligible_directory_is_rejected_as_a_whole() {
         let (tree, directory, file, _) = test_tree();
         let mut mutable = Arc::try_unwrap(tree).ok().unwrap();
-        mutable.set_state(file, NodeState::Incomplete);
+        mutable.set_state(file, NodeStatus::Incomplete);
         let tree = Arc::new(mutable);
         assert_eq!(ineligible_reason(&tree, directory, EntryType::Directory), Some("subtree contains scan errors"));
         assert!(create_plan(tree, &[directory]).is_err());
@@ -875,14 +875,14 @@ mod tests {
         ] {
             let (tree, directory, _, _) = test_tree();
             let mut mutable = Arc::try_unwrap(tree).ok().unwrap();
-            mutable.set_state(directory, NodeState::Excluded(reason));
+            mutable.set_state(directory, NodeStatus::Excluded(reason));
             let tree = Arc::new(mutable);
             assert_eq!(ineligible_reason(&tree, directory, EntryType::Directory), Some(direct));
             assert!(create_plan(Arc::clone(&tree), &[directory]).is_err());
 
             let (tree, directory, file, _) = test_tree();
             let mut mutable = Arc::try_unwrap(tree).ok().unwrap();
-            mutable.set_state(file, NodeState::Excluded(reason));
+            mutable.set_state(file, NodeStatus::Excluded(reason));
             let tree = Arc::new(mutable);
             assert_eq!(ineligible_reason(&tree, directory, EntryType::Directory), Some(nested));
             assert!(create_plan(tree, &[directory]).is_err());
@@ -894,7 +894,7 @@ mod tests {
         let (tree, _, file, _) = test_tree();
         let mut mutable = Arc::try_unwrap(tree).ok().unwrap();
         let top_level = mutable
-            .append(mutable.root(), b"top", EntryType::RegularFile, FileIdentity { device: 1, inode: 9 }, 1, 5, 512, NodeState::Complete)
+            .append(mutable.root(), b"top", EntryType::RegularFile, FileIdentity { device: 1, inode: 9 }, 1, 5, 512, NodeStatus::Complete)
             .unwrap();
         let tree = Arc::new(mutable);
         let plan = create_plan(tree, &[file, top_level]).unwrap();
@@ -917,7 +917,7 @@ mod tests {
         let (tree, _, file, _) = test_tree();
         let mut mutable = Arc::try_unwrap(tree).ok().unwrap();
         let blocked = mutable
-            .append(mutable.root(), b"blocked", EntryType::RegularFile, FileIdentity { device: 1, inode: 9 }, 1, 5, 512, NodeState::Incomplete)
+            .append(mutable.root(), b"blocked", EntryType::RegularFile, FileIdentity { device: 1, inode: 9 }, 1, 5, 512, NodeStatus::Incomplete)
             .unwrap();
         let tree = Arc::new(mutable);
         let rejection = create_plan(tree, &[file, blocked]).err().expect("selection is rejected");
@@ -928,7 +928,7 @@ mod tests {
     mod filesystem {
         use crate::posix::run_with;
         use crate::{create_plan, DeleteEvent, DeleteOutcome, DeletionPlan, OutcomeKind};
-        use fdu_core::{EntryType, FileIdentity, NodeId, NodeState, Tree};
+        use fdu_core::{EntryType, FileIdentity, NodeId, NodeStatus, Tree};
         use rustix::fs::{Mode, OFlags};
         use std::fs;
         use std::io;
@@ -993,7 +993,7 @@ mod tests {
                 metadata.blocks().checked_mul(512).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "allocated size overflow"))?
             };
             let id = tree
-                .append(parent, name, entry_type, identity, metadata.nlink(), apparent, allocated, NodeState::Complete)
+                .append(parent, name, entry_type, identity, metadata.nlink(), apparent, allocated, NodeStatus::Complete)
                 .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "index exhausted"))?;
             if entry_type == EntryType::Directory {
                 let mut entries = fs::read_dir(path)?.collect::<Result<Vec<_>, _>>()?;
@@ -1021,7 +1021,7 @@ mod tests {
             for entry in entries {
                 append_path(&mut tree, root_id, &entry.path(), entry.file_name().as_bytes())?;
             }
-            tree.set_state(tree.root(), NodeState::Complete);
+            tree.set_state(tree.root(), NodeStatus::Complete);
             Ok(Arc::new(tree))
         }
 
@@ -1343,7 +1343,7 @@ mod tests {
             let selected = child(&tree, tree.root(), b"selected");
             let important = child(&tree, selected, b"important");
             let mut tree = tree;
-            tree.set_state(important, NodeState::Incomplete);
+            tree.set_state(important, NodeStatus::Incomplete);
             assert!(create_plan(Arc::new(tree), &[selected]).is_err());
             assert_eq!(fs::read(directory.join("important"))?, b"keep");
             Ok(())

@@ -64,9 +64,11 @@ RUN for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do \
         done; \
     done
 
-ADD https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-musl/rustup-init /rustup-init-x86_64
-ADD https://static.rust-lang.org/rustup/dist/aarch64-unknown-linux-musl/rustup-init /rustup-init-aarch64
-RUN case "$TARGETARCH" in \
+ADD https://static.rust-lang.org/rustup/archive/1.29.0/x86_64-unknown-linux-musl/rustup-init /rustup-init-x86_64
+ADD https://static.rust-lang.org/rustup/archive/1.29.0/aarch64-unknown-linux-musl/rustup-init /rustup-init-aarch64
+RUN echo '9cd3fda5fd293890e36ab271af6a786ee22084b5f6c2b83fd8323cec6f0992c1  /rustup-init-x86_64' | sha256sum -c - \
+    && echo '88761caacddb92cd79b0b1f939f3990ba1997d701a38b3e8dd6746a562f2a759  /rustup-init-aarch64' | sha256sum -c - \
+    && case "$TARGETARCH" in \
         amd64) init=/rustup-init-x86_64 ;; \
         arm64) init=/rustup-init-aarch64 ;; \
         *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \

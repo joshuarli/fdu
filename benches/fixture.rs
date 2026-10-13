@@ -7,7 +7,7 @@
 //!
 //! Compare runs with the rustybench `baseline` and `diff` commands.
 
-use fdu_core::{EntryType, NodeState, ScanEvent, Tree};
+use fdu_core::{EntryType, NodeStatus, ScanEvent, Tree};
 use fdu_delete::{create_plan, DeleteEvent};
 use fdu_scan::{open_root, scan, start_indexed_scan, EntryBatch, ScanOptions};
 use rustybench::{black_box, counter::ItemsCount, Bencher};
@@ -108,7 +108,7 @@ fn index_fixture(root: &Path) -> Tree {
                     }
                     nodes[index] = Some(id);
                 }
-                if entry.entry_type != EntryType::Directory && entry.state == NodeState::Complete {
+                if entry.entry_type != EntryType::Directory && entry.state == NodeStatus::Complete {
                     *apparent += entry.apparent_bytes;
                     *allocated += entry.allocated_bytes;
                 }
@@ -121,7 +121,7 @@ fn index_fixture(root: &Path) -> Tree {
             for (directory, complete) in directories.iter() {
                 if let Some(node) = nodes.get(directory.0 as usize).copied().flatten() {
                     if *complete {
-                        tree.set_state(node, NodeState::Complete);
+                        tree.set_state(node, NodeStatus::Complete);
                     } else {
                         tree.mark_incomplete_to_root(node);
                     }
@@ -131,7 +131,7 @@ fn index_fixture(root: &Path) -> Tree {
         ScanEvent::Failed { message } | ScanEvent::DirectoryFailed { message, .. } => panic!("scan failed: {message}"),
         _ => {}
     });
-    tree.set_state(tree.root(), NodeState::Complete);
+    tree.set_state(tree.root(), NodeStatus::Complete);
     tree
 }
 

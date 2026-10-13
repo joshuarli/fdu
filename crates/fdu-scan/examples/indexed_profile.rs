@@ -1,4 +1,4 @@
-use fdu_core::{EntryBatch, EntryType, NodeState, ScanEvent, Tree};
+use fdu_core::{EntryBatch, EntryType, NodeState, NodeStatus, ScanEvent, Tree};
 use fdu_scan::{open_root, start_indexed_scan_with_metrics, ScanQueueMetrics};
 use std::io;
 use std::path::PathBuf;
@@ -98,7 +98,7 @@ fn main() -> io::Result<()> {
                         }
                         token_nodes[token_index] = Some(id);
                     }
-                    if entry.entry_type != EntryType::Directory && entry.state == NodeState::Complete {
+                    if entry.entry_type != EntryType::Directory && entry.state == NodeStatus::Complete {
                         match (
                             apparent_batch.checked_add(entry.apparent_bytes),
                             allocated_batch.checked_add(entry.allocated_bytes),
@@ -109,7 +109,7 @@ fn main() -> io::Result<()> {
                             }
                             _ => *totals_fit = false,
                         }
-                    } else if entry.state == NodeState::Incomplete {
+                    } else if entry.state == NodeStatus::Incomplete {
                         tree.mark_incomplete_to_root(parent);
                         scan_errors = scan_errors.saturating_add(1);
                     }
@@ -123,7 +123,7 @@ fn main() -> io::Result<()> {
             ScanEvent::DirectoryFinished { directory, complete } => {
                 if let Some(node) = token_nodes.get(directory.0 as usize).copied().flatten() {
                     if complete && tree.record(node).is_some_and(|record| record.state == NodeState::Scanning) {
-                        tree.set_state(node, NodeState::Complete);
+                        tree.set_state(node, NodeStatus::Complete);
                     } else if !complete {
                         tree.mark_incomplete_to_root(node);
                     }
@@ -133,7 +133,7 @@ fn main() -> io::Result<()> {
                 for (directory, complete) in directories {
                     if let Some(node) = token_nodes.get(directory.0 as usize).copied().flatten() {
                         if complete && tree.record(node).is_some_and(|record| record.state == NodeState::Scanning) {
-                            tree.set_state(node, NodeState::Complete);
+                            tree.set_state(node, NodeStatus::Complete);
                         } else if !complete {
                             tree.mark_incomplete_to_root(node);
                         }
@@ -142,7 +142,7 @@ fn main() -> io::Result<()> {
             }
             ScanEvent::DirectoryExcluded { directory, reason } => {
                 if let Some(node) = token_nodes.get(directory.0 as usize).copied().flatten() {
-                    tree.set_state(node, NodeState::Excluded(reason));
+                    tree.set_state(node, NodeStatus::Excluded(reason));
                 }
             }
             ScanEvent::DirectoryFailed { directory, .. } => {

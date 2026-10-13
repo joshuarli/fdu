@@ -24,6 +24,10 @@ The browser owns the mutable tree. The indexed scan sends bounded batches and
 completion events to it; the browser appends entries to an arena and keeps
 filename bytes in packed storage. A refresh replaces the index.
 
+`NodeStatus` represents states accepted when appending or updating a node.
+Removal uses `Tree::tombstone_subtree`, which also subtracts the removed
+subtree's byte totals from its ancestors.
+
 The operation phases are scanning, ready, and deleting. Scan and deletion
 workers finish and their results are consumed before the browser changes phase.
 The indexed scanner is shared across platforms; each backend supplies directory

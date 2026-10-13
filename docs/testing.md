@@ -27,6 +27,11 @@ increase its repeated scan or deletion rounds.
 [`indexed_policy.rs`](../crates/fdu-scan/tests/indexed_policy.rs) contains
 the scan stress test.
 
+The Linux mount-boundary test is ignored in the general suite because it needs
+`CAP_SYS_ADMIN`. Run it in a Linux container with that capability using
+`make test-mounts TARGET=x86_64-unknown-linux-musl` (or the matching target for
+the host architecture). The release workflow runs this test explicitly.
+
 The whole-fixture interactive deletion test is ignored by default because it
 removes about 190,000 entries from a private fixture clone. Run it with:
 

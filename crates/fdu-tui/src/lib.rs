@@ -740,7 +740,7 @@ mod tests {
         clip_end, clip_start, escape_name, render, LsColors, Modal, Operation, Pane, Phase,
         SizeMode, SortMode, Split, View,
     };
-    use fdu_core::{EntryType, FileIdentity, NodeId, NodeState, Tree};
+    use fdu_core::{EntryType, FileIdentity, NodeId, NodeStatus, Tree};
     use super::screen::{Screen, Style};
     use hashbrown::HashSet;
 
@@ -778,7 +778,7 @@ mod tests {
         let mut tree = Tree::new(b"root", FileIdentity { device: 1, inode: 1 }, 1).unwrap();
         let root = tree.root();
         let append = |tree: &mut Tree, parent, name: &[u8], kind, inode, bytes| {
-            tree.append(parent, name, kind, FileIdentity { device: 1, inode }, 1, bytes, bytes, NodeState::Complete).unwrap()
+            tree.append(parent, name, kind, FileIdentity { device: 1, inode }, 1, bytes, bytes, NodeStatus::Complete).unwrap()
         };
         let directory = append(&mut tree, root, b"projects", EntryType::Directory, 2, 0);
         let nested = append(&mut tree, directory, b"payload.bin", EntryType::RegularFile, 3, 4096);
@@ -847,7 +847,7 @@ mod tests {
                     1,
                     index as u64,
                     index as u64,
-                    NodeState::Complete,
+                    NodeStatus::Complete,
                 )
                 .unwrap();
             rows.push(id);
@@ -1111,7 +1111,7 @@ mod tests {
         let mut rows = Vec::new();
         for (index, name) in [&b"\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e-wide-name-that-is-long"[..], b"e\xcc\x81e\xcc\x81-combining", b"tab\tname\xff"].into_iter().enumerate() {
             rows.push(
-                tree.append(root, name, EntryType::RegularFile, FileIdentity { device: 1, inode: index as u64 + 2 }, 1, 10, 10, NodeState::Complete).unwrap(),
+                tree.append(root, name, EntryType::RegularFile, FileIdentity { device: 1, inode: index as u64 + 2 }, 1, 10, 10, NodeStatus::Complete).unwrap(),
             );
         }
         let marks = HashSet::new();

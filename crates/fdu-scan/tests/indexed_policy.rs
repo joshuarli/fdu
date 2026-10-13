@@ -1,5 +1,5 @@
 use fdu_core::{
-    DirectoryToken, EntryType, NodeId, NodeState, ScanEvent, Tree,
+    DirectoryToken, EntryType, NodeId, NodeState, NodeStatus, ScanEvent, Tree,
 };
 use fdu_scan::{
     open_root, scan, scan_with_exclusions, start_indexed_scan, start_indexed_scan_with_exclusions, EntryBatch,
@@ -77,7 +77,7 @@ fn finish_directory(
         }
     }
     if complete && tree.record(node).unwrap().state == NodeState::Scanning {
-        tree.set_state(node, NodeState::Complete);
+        tree.set_state(node, NodeStatus::Complete);
     } else if !complete {
         tree.mark_incomplete_to_root(node);
     }
@@ -159,7 +159,7 @@ fn scan_to_tree_with_exclusions(
                         }
                         tokens[token.0 as usize] = Some(id);
                     }
-                    if entry.entry_type != EntryType::Directory && entry.state == NodeState::Complete {
+                    if entry.entry_type != EntryType::Directory && entry.state == NodeStatus::Complete {
                         *apparent = apparent.checked_add(entry.apparent_bytes).ok_or_else(|| {
                             io::Error::new(io::ErrorKind::InvalidData, "test apparent overflow")
                         })?;
@@ -168,9 +168,9 @@ fn scan_to_tree_with_exclusions(
                         })?;
                     }
                     match entry.state {
-                        NodeState::Incomplete => tree.mark_incomplete_to_root(parent),
-                        NodeState::Excluded(reason) => {
-                            tree.set_state(id, NodeState::Excluded(reason));
+                        NodeStatus::Incomplete => tree.mark_incomplete_to_root(parent),
+                        NodeStatus::Excluded(reason) => {
+                            tree.set_state(id, NodeStatus::Excluded(reason));
                             tree.mark_incomplete_to_root(parent);
                         }
                         _ => {}
@@ -194,7 +194,7 @@ fn scan_to_tree_with_exclusions(
             }
             ScanEvent::DirectoryExcluded { directory, reason } => {
                 if let Some(node) = tokens.get(directory.0 as usize).copied().flatten() {
-                    tree.set_state(node, NodeState::Excluded(reason));
+                    tree.set_state(node, NodeStatus::Excluded(reason));
                 }
             }
             ScanEvent::DirectoryFailed { directory, message } => {
@@ -217,6 +217,25 @@ fn scan_to_tree_with_exclusions(
         batches,
         directory_finish_batch_sizes,
     })
+}
+
+#[test]
+fn repeated_indexed_scans_on_one_anchor_start_at_the_root_directory_beginning() -> io::Result<()> {
+    let temp = TempDir::new()?;
+    fs::create_dir_all(temp.0.join("subdirectory"))?;
+    fs::write(temp.0.join("first"), b"first")?;
+    fs::write(temp.0.join("subdirectory/second"), b"second")?;
+    let root = open_root(&temp.0)?;
+
+    let first = scan_to_tree(root.clone(), 4)?;
+    let repeated = scan_to_tree(root, 4)?;
+
+    for result in [&first, &repeated] {
+        assert!(result.errors.is_empty(), "scanner errors: {:?}", result.errors);
+        assert_eq!(result.tree.len(), 4);
+        assert_eq!(result.tree.record(result.tree.root()).unwrap().state, NodeState::Complete);
+    }
+    Ok(())
 }
 
 fn child_named(tree: &Tree, parent: NodeId, name: &[u8]) -> Option<NodeId> {
@@ -509,7 +528,7 @@ fn dropping_a_full_scan_queue_releases_a_blocked_worker() -> io::Result<()> {
     Ok(())
 }
 
-/// Mounts need privileges, so the test reports why it did nothing when they are missing.
+/// Mounts need privileges; release validation runs this test with CAP_SYS_ADMIN.
 #[cfg(target_os = "linux")]
 struct Mount(PathBuf);
 
@@ -535,6 +554,7 @@ impl Drop for Mount {
 
 #[cfg(target_os = "linux")]
 #[test]
+#[ignore = "requires CAP_SYS_ADMIN; run through `make test-mounts`"]
 fn mounts_and_bind_mounts_below_the_root_are_boundaries_without_children() -> io::Result<()> {
     let temp = TempDir::new()?;
     let plain = temp.0.join("plain");
@@ -544,13 +564,7 @@ fn mounts_and_bind_mounts_below_the_root_are_boundaries_without_children() -> io
         fs::create_dir(directory)?;
     }
     fs::write(plain.join("payload"), b"counted once")?;
-    let _tmpfs = match Mount::tmpfs(&tmpfs) {
-        Ok(mount) => mount,
-        Err(error) => {
-            eprintln!("skipping mount boundary test: cannot mount ({error})");
-            return Ok(());
-        }
-    };
+    let _tmpfs = Mount::tmpfs(&tmpfs)?;
     let _bound = Mount::bind(&plain, &bound)?;
     fs::write(tmpfs.join("hidden"), b"on another filesystem")?;
 
