@@ -1,6 +1,6 @@
 use crate::fsutil::{self, retry};
 use crate::indexed::{BulkMetadata, DirectoryFacts, EntryHint, IndexedScanLimits};
-use crate::{ScanReport, TopLevelDirectory};
+use crate::{ScanExclusions, ScanReport, TopLevelDirectory};
 use fdu_core::{EntryType, ExclusionReason, FileIdentity};
 use rustix::fs::{self, Dir, DirEntry, FileType};
 use std::cell::RefCell;
@@ -80,6 +80,7 @@ fn entry_kind(file_type: FileType) -> EntryKind {
 struct DirectoryPath {
     parent: Option<usize>,
     name: Option<CString>,
+    exclusion_node: Option<usize>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -254,7 +255,7 @@ impl<'buffer> IndexedDirectoryStream<'buffer> {
     }
 }
 
-pub(super) fn scan(path: &Path, apparent: bool) -> io::Result<ScanReport> {
+pub(super) fn scan(path: &Path, apparent: bool, exclusions: &ScanExclusions) -> io::Result<ScanReport> {
     let root = fsutil::open_directory(path)?;
     let entries = read_entries(&root)?;
     let root_fd = root.as_fd();
@@ -269,6 +270,10 @@ pub(super) fn scan(path: &Path, apparent: bool) -> io::Result<ScanReport> {
     };
 
     for entry in entries {
+        let exclusion_node = exclusions.child(exclusions.root_node(), entry.name.as_bytes());
+        if exclusion_node.is_some_and(|node| exclusions.excludes(node)) {
+            continue;
+        }
         let is_directory = match entry.kind {
             EntryKind::Directory => true,
             EntryKind::Other => false,
@@ -331,6 +336,8 @@ pub(super) fn scan(path: &Path, apparent: bool) -> io::Result<ScanReport> {
             &mut report.skipped_entries,
             &mut report.mount_boundaries,
             &mut report.unsupported_aliases,
+            exclusion_node.filter(|node| exclusions.has_children(*node)),
+            exclusions,
         ) {
             Ok(disk_size) => report.directories.push(TopLevelDirectory {
                 name: OsString::from_vec(entry.name.as_bytes().to_vec()),
@@ -360,10 +367,13 @@ fn scan_subtree(
     skipped_entries: &mut usize,
     mount_boundaries: &mut usize,
     unsupported_aliases: &mut usize,
+    root_exclusion_node: Option<usize>,
+    exclusions: &ScanExclusions,
 ) -> io::Result<u64> {
     let mut paths = vec![DirectoryPath {
         parent: None,
         name: None,
+        exclusion_node: root_exclusion_node,
     }];
     let mut pending = vec![0usize];
     let mut disk_size = 0u64;
@@ -411,6 +421,11 @@ fn scan_subtree(
         };
 
         for entry in entries {
+            let exclusion_node =
+                exclusions.child(paths[path_index].exclusion_node, entry.name.as_bytes());
+            if exclusion_node.is_some_and(|node| exclusions.excludes(node)) {
+                continue;
+            }
             let child_directory = match entry.kind {
                 EntryKind::Directory => true,
                 EntryKind::Other => {
@@ -445,6 +460,7 @@ fn scan_subtree(
                 paths.push(DirectoryPath {
                     parent: Some(path_index),
                     name: Some(entry.name),
+                    exclusion_node: exclusion_node.filter(|node| exclusions.has_children(*node)),
                 });
                 pending.push(child_index);
             }

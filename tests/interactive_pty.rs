@@ -45,6 +45,43 @@ fn startup_shows_a_minimal_title_and_the_entry_count_and_restores_the_terminal()
 }
 
 #[test]
+fn repeated_exclusions_hide_exact_root_relative_paths_in_the_browser() -> io::Result<()> {
+    let (_temp, root) = TempDir::standard_tree()?;
+    let mut session = Session::start("exclude-paths", &root, &["-x", "alpha", "--exclude", "beta"], 100, 24);
+    let screen = session.wait_ready();
+    assert!(screen.shows("top.txt"));
+    assert!(!screen.shows("alpha/"));
+    assert!(!screen.shows("beta/"));
+    assert!(screen.shows("root (1 shown, 1 total,"));
+    session.quit();
+    Ok(())
+}
+
+#[test]
+fn directory_with_excluded_contents_cannot_be_deleted_as_a_whole() -> io::Result<()> {
+    let temp = TempDir::new()?;
+    let root = temp.0.join("root");
+    fs::create_dir_all(root.join("alpha/nested"))?;
+    fs::write(root.join("alpha/nested/hidden.txt"), b"excluded")?;
+    fs::write(root.join("alpha/visible.txt"), b"included")?;
+
+    let mut session = Session::start("exclude-delete-safety", &root, &["--exclude", "alpha/nested"], 100, 24);
+    session.ready_by_name();
+    session.text("d");
+    session.wait_for("Marked 1 item");
+    session.key(Key::Tab);
+    session.key(Key::Ctrl('r'));
+    let screen = session.wait_for("Nothing deleted or narrowed");
+    assert!(screen.shows("scan is incomplete"));
+    assert!(!screen.shows("Permanently delete"));
+    session.quit();
+
+    assert!(root.join("alpha/nested/hidden.txt").exists());
+    assert!(root.join("alpha/visible.txt").exists());
+    Ok(())
+}
+
+#[test]
 fn marking_reveals_a_second_pane_on_a_typical_terminal() -> io::Result<()> {
     let (_temp, root) = TempDir::standard_tree()?;
     // 80 columns is the classic terminal size; both panes must fit.

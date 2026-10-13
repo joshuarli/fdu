@@ -9,11 +9,13 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 pub use fdu_core::{DirectoryToken, EntryBatch, FileIdentity, ScanEvent};
+pub use exclusions::ScanExclusions;
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 compile_error!("fdu supports Linux and macOS");
 
 mod fsutil;
+mod exclusions;
 mod indexed;
 #[cfg(target_os = "linux")]
 mod linux;
@@ -167,13 +169,18 @@ fn anchor_root(path: &std::path::Path, fd: OwnedFd) -> io::Result<RootAnchor> {
 }
 
 pub fn scan(options: &ScanOptions) -> io::Result<ScanReport> {
+    scan_with_exclusions(options, &ScanExclusions::default())
+}
+
+/// Scans the selected root while omitting exact relative paths and their subtrees.
+pub fn scan_with_exclusions(options: &ScanOptions, exclusions: &ScanExclusions) -> io::Result<ScanReport> {
     #[cfg(target_os = "linux")]
     {
-        linux::scan(&options.path, options.apparent)
+        linux::scan(&options.path, options.apparent, exclusions)
     }
     #[cfg(target_os = "macos")]
     {
-        macos::scan(&options.path, options.apparent)
+        macos::scan(&options.path, options.apparent, exclusions)
     }
 }
 
@@ -184,7 +191,32 @@ pub fn start_indexed_scan(
     returned_batches: Receiver<EntryBatch>,
     cancelled: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
-    start_indexed_scan_with_metrics(root, sender, returned_batches, cancelled, ScanQueueMetrics::default())
+    start_indexed_scan_with_exclusions_and_metrics(
+        root,
+        ScanExclusions::default(),
+        sender,
+        returned_batches,
+        cancelled,
+        ScanQueueMetrics::default(),
+    )
+}
+
+/// Starts an indexed scan that omits exact relative paths and their subtrees.
+pub fn start_indexed_scan_with_exclusions(
+    root: RootAnchor,
+    exclusions: ScanExclusions,
+    sender: SyncSender<ScanEvent>,
+    returned_batches: Receiver<EntryBatch>,
+    cancelled: Arc<AtomicBool>,
+) -> JoinHandle<()> {
+    start_indexed_scan_with_exclusions_and_metrics(
+        root,
+        exclusions,
+        sender,
+        returned_batches,
+        cancelled,
+        ScanQueueMetrics::default(),
+    )
 }
 
 /// Starts an indexed scan with optional event-queue instrumentation.
@@ -195,7 +227,28 @@ pub fn start_indexed_scan_with_metrics(
     cancelled: Arc<AtomicBool>,
     metrics: ScanQueueMetrics,
 ) -> JoinHandle<()> {
-    thread::spawn(move || indexed::scan_indexed(&root, sender, returned_batches, cancelled, metrics))
+    start_indexed_scan_with_exclusions_and_metrics(
+        root,
+        ScanExclusions::default(),
+        sender,
+        returned_batches,
+        cancelled,
+        metrics,
+    )
+}
+
+/// Starts an indexed scan with exclusions and optional event-queue instrumentation.
+pub fn start_indexed_scan_with_exclusions_and_metrics(
+    root: RootAnchor,
+    exclusions: ScanExclusions,
+    sender: SyncSender<ScanEvent>,
+    returned_batches: Receiver<EntryBatch>,
+    cancelled: Arc<AtomicBool>,
+    metrics: ScanQueueMetrics,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        indexed::scan_indexed(&root, &exclusions, sender, returned_batches, cancelled, metrics)
+    })
 }
 
 #[cfg(test)]

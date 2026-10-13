@@ -31,7 +31,7 @@ keep `~/.local/bin` on `PATH` in new sessions.
 ## Run
 
 ```text
-fdu [--apparent] [--summary | --interactive] [--read-only] [PATH]
+fdu [--apparent] [-x PATH | --exclude PATH]... [--summary | --interactive] [--read-only] [PATH]
 fdu --rmrf [--yes] PATH
 ```
 
@@ -39,6 +39,12 @@ With no path, fdu scans the current directory. In a terminal it opens the
 browser; when stdin or stdout is redirected it prints a summary. Use
 `--summary` to select summary output explicitly. `--interactive` requires
 terminal input and output.
+
+Use `-x PATH` or `--exclude PATH` to omit an exact path beneath the selected
+root, including its subtree. Exclusion paths are relative to the selected root;
+repeat the option to omit more paths. Path components must match exactly.
+In the browser, directories whose contents include excluded paths are marked
+incomplete and cannot be deleted as a whole.
 
 By default, sizes are filesystem-allocated bytes; `--apparent` uses logical
 file lengths. Use `--read-only` to disable deletion in the browser. The summary
@@ -71,7 +77,8 @@ describe a live scan, not an atomic snapshot.
 ### Empty a directory
 
 `--rmrf` permanently deletes every entry below the explicit path and leaves
-the directory itself in place. It is unavailable in summary-only builds.
+the directory itself in place. Exclusions cannot be combined with `--rmrf`. It
+is unavailable in summary-only builds.
 
 - A symlink as the final path component is refused, including when the path
   has trailing slashes. Earlier path components may resolve through symlinks.

@@ -16,9 +16,11 @@ struct TemporaryDirectory(PathBuf);
 
 impl TemporaryDirectory {
     fn new() -> io::Result<Self> {
+        let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join(".work/tmp");
+        fs::create_dir_all(&scratch)?;
         loop {
             let id = TEMP_DIRECTORY_ID.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!(
+            let path = scratch.join(format!(
                 "fdu-integration-{}-{id}",
                 std::process::id()
             ));
@@ -323,5 +325,34 @@ fn prints_only_immediate_directory_totals_in_both_size_modes() -> io::Result<()>
         String::from_utf8_lossy(&output.stdout),
         "8\t\"alpha\"\n0\t\"empty\"\n"
     );
+    Ok(())
+}
+
+#[test]
+fn summary_cli_omits_repeated_exact_root_relative_paths() -> io::Result<()> {
+    let temporary = TemporaryDirectory::new()?;
+    let root = &temporary.0;
+    fs::create_dir_all(root.join("parent/target"))?;
+    fs::create_dir_all(root.join("parent/targeted"))?;
+    fs::create_dir_all(root.join("parent/keep"))?;
+    fs::write(root.join("parent/target/hidden"), b"omit subtree")?;
+    fs::write(root.join("parent/targeted/visible"), b"keep")?;
+    fs::write(root.join("parent/keep/hidden"), b"omit file")?;
+    fs::write(root.join("parent/keep/visible"), b"visible")?;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fdu"))
+        .args([
+            "--summary",
+            "--apparent",
+            "-x",
+            "parent/target",
+            "--exclude",
+            "parent/keep/hidden",
+        ])
+        .arg(root)
+        .output()?;
+    assert!(output.status.success());
+    assert_expected_diagnostics(&output.stderr);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "11B\t\"parent\"\n");
     Ok(())
 }

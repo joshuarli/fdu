@@ -9,6 +9,11 @@ and deletion planner.
 - Allocated bytes are the default; apparent mode uses logical file lengths.
 - Directory inode storage is excluded. Hardlinked paths count separately.
 - Hidden and ignored names are included. fdu does not apply ignore-file rules.
+- `-x PATH` / `--exclude PATH` omits an exact path relative to the selected root
+  and its subtree. Repeat the option for multiple paths; matching is by path
+  component, not by substring. These exclusions apply to summary and browser
+  scans, and are not accepted with `--rmrf`. Browser directories that contain
+  omitted paths are marked incomplete, so they cannot be deleted as a whole.
 - Discovered symlinks are leaves. Files and directories beyond a filesystem or
   mount boundary are not traversed.
 - Errors and unsupported directory aliases make affected totals incomplete.

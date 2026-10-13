@@ -1,7 +1,10 @@
 use fdu_core::{
     DirectoryToken, EntryType, NodeId, NodeState, ScanEvent, Tree,
 };
-use fdu_scan::{open_root, scan, start_indexed_scan, EntryBatch, RootAnchor, ScanOptions};
+use fdu_scan::{
+    open_root, scan, scan_with_exclusions, start_indexed_scan, start_indexed_scan_with_exclusions, EntryBatch,
+    RootAnchor, ScanExclusions, ScanOptions,
+};
 use hashbrown::HashSet;
 use std::ffi::OsString;
 use std::fs::{self, File};
@@ -21,9 +24,11 @@ struct TempDir(PathBuf);
 
 impl TempDir {
     fn new() -> io::Result<Self> {
+        let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.work/tmp");
+        fs::create_dir_all(&scratch)?;
         loop {
             let id = TEMP_ID.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!("fdu-indexed-{}-{id}", std::process::id()));
+            let path = scratch.join(format!("fdu-indexed-{}-{id}", std::process::id()));
             match fs::create_dir(&path) {
                 Ok(()) => return Ok(Self(path)),
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -80,6 +85,14 @@ fn finish_directory(
 }
 
 fn scan_to_tree(root: RootAnchor, capacity: usize) -> io::Result<IndexedResult> {
+    scan_to_tree_with_exclusions(root, capacity, ScanExclusions::default())
+}
+
+fn scan_to_tree_with_exclusions(
+    root: RootAnchor,
+    capacity: usize,
+    exclusions: ScanExclusions,
+) -> io::Result<IndexedResult> {
     let mut tree = Tree::new(&root.name, root.identity, root.link_count)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "root index name too long"))?;
     let mut tokens = vec![Some(tree.root())];
@@ -92,7 +105,13 @@ fn scan_to_tree(root: RootAnchor, capacity: usize) -> io::Result<IndexedResult> 
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "batch pool closed"))?;
     }
     let cancelled = Arc::new(AtomicBool::new(false));
-    let worker = start_indexed_scan(root.clone(), sender, batch_receiver, Arc::clone(&cancelled));
+    let worker = start_indexed_scan_with_exclusions(
+        root.clone(),
+        exclusions,
+        sender,
+        batch_receiver,
+        Arc::clone(&cancelled),
+    );
     let mut errors = Vec::new();
     let mut batches = Vec::new();
     let mut directory_finish_batch_sizes = Vec::new();
@@ -202,6 +221,59 @@ fn scan_to_tree(root: RootAnchor, capacity: usize) -> io::Result<IndexedResult> 
 
 fn child_named(tree: &Tree, parent: NodeId, name: &[u8]) -> Option<NodeId> {
     tree.children(parent).find(|id| tree.name(*id) == Some(name))
+}
+
+#[test]
+fn indexed_exclusions_omit_exact_paths_and_mark_the_index_incomplete() -> io::Result<()> {
+    let temp = TempDir::new()?;
+    let root = &temp.0;
+    fs::create_dir_all(root.join("parent/target"))?;
+    fs::create_dir_all(root.join("parent/targeted"))?;
+    fs::create_dir_all(root.join("parent/keep/target"))?;
+    fs::create_dir_all(root.join("parent/keep/targeted"))?;
+    fs::write(root.join("parent/target/hidden.txt"), b"hidden directory")?;
+    fs::write(root.join("parent/targeted/kept.txt"), b"substring sibling")?;
+    fs::write(root.join("parent/keep/target/hidden.txt"), b"hidden file")?;
+    fs::write(root.join("parent/keep/targeted/kept.txt"), b"same basename path")?;
+
+    let exclusions = ScanExclusions::from_paths([
+        PathBuf::from("parent/target"),
+        PathBuf::from("parent/keep/target/hidden.txt"),
+    ])?;
+    let result = scan_to_tree_with_exclusions(open_root(root)?, 8, exclusions.clone())?;
+    assert!(result.errors.is_empty(), "scan errors: {:?}", result.errors);
+
+    let tree = &result.tree;
+    let root_id = tree.root();
+    let parent = child_named(tree, root_id, b"parent").expect("parent is indexed");
+    assert!(child_named(tree, parent, b"target").is_none());
+    let targeted = child_named(tree, parent, b"targeted").expect("substring sibling remains indexed");
+    assert!(child_named(tree, targeted, b"kept.txt").is_some());
+    let keep = child_named(tree, parent, b"keep").expect("parent path remains indexed");
+    let target = child_named(tree, keep, b"target").expect("same basename at a different path remains indexed");
+    assert!(child_named(tree, target, b"hidden.txt").is_none());
+    let other_target = child_named(tree, keep, b"targeted").expect("second substring sibling remains indexed");
+    assert!(child_named(tree, other_target, b"kept.txt").is_some());
+    assert_eq!(tree.record(root_id).unwrap().state, NodeState::Incomplete);
+    assert_eq!(tree.record(parent).unwrap().state, NodeState::Incomplete);
+
+    let summary = scan_with_exclusions(
+        &ScanOptions {
+            path: root.to_path_buf(),
+            apparent: true,
+        },
+        &exclusions,
+    )?;
+    let parent_summary = summary
+        .directories
+        .iter()
+        .find(|directory| directory.name == "parent")
+        .expect("summary keeps the non-excluded parent directory");
+    assert_eq!(
+        parent_summary.disk_size,
+        b"substring sibling".len() as u64 + b"same basename path".len() as u64
+    );
+    Ok(())
 }
 
 fn allocated(path: &Path) -> io::Result<u64> {

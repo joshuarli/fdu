@@ -2,7 +2,9 @@ use fdu_core::{
     DirectoryToken, EntryType, ExclusionReason, NodeId, NodeState, ScanEvent, Tree,
 };
 use fdu_delete::{create_plan, DeleteEvent, DeleteOutcome, DeletionPlan, OutcomeKind};
-use fdu_scan::{open_root, start_indexed_scan_with_metrics, RootAnchor, ScanQueueMetrics};
+use fdu_scan::{
+    open_root, start_indexed_scan_with_exclusions_and_metrics, RootAnchor, ScanExclusions, ScanQueueMetrics,
+};
 use fdu_tui::{
     self, Cursor, Intent, LsColors, Modal, Operation, Pane, Phase, SizeMode, Split, SortMode,
     TerminalSession, TerminalSize, View,
@@ -57,7 +59,7 @@ struct ScanRun {
 }
 
 impl ScanRun {
-    fn start(root: RootAnchor, queue_metrics: ScanQueueMetrics) -> Self {
+    fn start(root: RootAnchor, exclusions: ScanExclusions, queue_metrics: ScanQueueMetrics) -> Self {
         let (sender, receiver) = mpsc::sync_channel(SCAN_EVENT_CHANNEL_CAPACITY);
         let (batch_sender, batch_receiver) = mpsc::sync_channel(SCAN_BATCH_POOL_CAPACITY);
         for _ in 0..SCAN_BATCH_POOL_CAPACITY {
@@ -67,8 +69,9 @@ impl ScanRun {
             }
         }
         let cancelled = Arc::new(AtomicBool::new(false));
-        let worker = start_indexed_scan_with_metrics(
+        let worker = start_indexed_scan_with_exclusions_and_metrics(
             root,
+            exclusions,
             sender,
             batch_receiver,
             Arc::clone(&cancelled),
@@ -1645,14 +1648,19 @@ fn size_for(record: &fdu_core::NodeRecord, mode: SizeMode) -> u64 {
     }
 }
 
-pub fn run(path: std::path::PathBuf, read_only: bool, apparent: bool) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(
+    path: std::path::PathBuf,
+    read_only: bool,
+    apparent: bool,
+    exclusions: ScanExclusions,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = TerminalSession::enter()?;
     let root = open_root(&path)?;
     let mut model = BrowserModel::new(&root, read_only, apparent, fdu_tui::terminal_size()?)?;
     let profiling_enabled = std::env::var_os("FDU_PROFILE").is_some();
     let scan_metrics = ScanQueueMetrics::new(SCAN_EVENT_CHANNEL_CAPACITY, profiling_enabled);
     let mut profile = BrowserProfile::new(profiling_enabled, scan_metrics.clone());
-    let mut phase = AppPhase::Scanning(ScanRun::start(root.clone(), scan_metrics));
+    let mut phase = AppPhase::Scanning(ScanRun::start(root.clone(), exclusions.clone(), scan_metrics));
     let mut last_draw = Instant::now() - SCAN_REDRAW_INTERVAL;
     let mut draw_pending = true;
     let mut first_live_listing_directory = None;
@@ -1688,7 +1696,7 @@ pub fn run(path: std::path::PathBuf, read_only: bool, apparent: bool) -> Result<
                 first_live_listing_directory = None;
                 let metrics = ScanQueueMetrics::new(SCAN_EVENT_CHANNEL_CAPACITY, profiling_enabled);
                 profile.reset_scan_queue(metrics.clone());
-                phase = AppPhase::Scanning(ScanRun::start(root.clone(), metrics));
+                phase = AppPhase::Scanning(ScanRun::start(root.clone(), exclusions.clone(), metrics));
                 draw_pending = true;
             }
             Action::Delete(plan) => match root.try_clone_fd() {

@@ -2,7 +2,7 @@
 //! directory completion tracking, and event batching. Each platform supplies
 //! directory enumeration, mount identity, and worker sizing.
 use crate::fsutil::{open_directory_at, stat_entry_at};
-use crate::{DirectoryToken, EntryBatch, RootAnchor, ScanQueueMetrics};
+use crate::{DirectoryToken, EntryBatch, RootAnchor, ScanExclusions, ScanQueueMetrics};
 use fdu_core::{EntryType, ExclusionReason, FileIdentity, NodeState, ScanEntry, ScanEvent};
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 use std::cell::RefCell;
@@ -95,6 +95,7 @@ struct IndexedDirectoryTask {
     name: Vec<u8>,
     identity: FileIdentity,
     token: DirectoryToken,
+    exclusion_node: Option<usize>,
 }
 
 const NO_PARENT: u32 = u32::MAX;
@@ -455,6 +456,7 @@ struct ScanContext<'a> {
     seen_directories: &'a SeenDirectories,
     next_token: &'a AtomicUsize,
     root_mount: &'a MountIdentity,
+    exclusions: &'a ScanExclusions,
     hints: ScanHints,
     progress: &'a ScanProgress<'a>,
     queue: &'a IndexedWorkQueue,
@@ -573,6 +575,7 @@ fn take_batch(returned_batches: &Mutex<Receiver<EntryBatch>>) -> EntryBatch {
 
 pub(crate) fn scan_indexed(
     anchor: &RootAnchor,
+    exclusions: &ScanExclusions,
     sender: SyncSender<ScanEvent>,
     returned_batches: Receiver<EntryBatch>,
     cancelled: Arc<AtomicBool>,
@@ -629,6 +632,7 @@ pub(crate) fn scan_indexed(
         seen_directories: &seen_directories,
         next_token: &next_token,
         root_mount: &root_mount,
+        exclusions,
         hints: scan_hints(anchor.as_fd()),
         progress: &progress,
         queue: &queue,
@@ -646,6 +650,7 @@ pub(crate) fn scan_indexed(
             name: Vec::new(),
             identity: root_identity,
             token: DirectoryToken(0),
+            exclusion_node: exclusions.root_node(),
         };
         if !run_task_tree(root_task, context, &mut Outbox::new()) {
             queue.cancel();
@@ -732,7 +737,7 @@ fn scan_indexed_task(
             Arc::new(child)
         }
     };
-    match scan_indexed_directory(&directory, task.token, context, outbox) {
+    match scan_indexed_directory(&directory, task.token, task.exclusion_node, context, outbox) {
         Ok(keep_running) => keep_running,
         Err(error) => failed_task(task.token, error.to_string(), context, outbox),
     }
@@ -755,11 +760,12 @@ fn failed_task(
 fn scan_indexed_directory(
     directory: &Arc<OwnedFd>,
     token: DirectoryToken,
+    exclusion_node: Option<usize>,
     context: &ScanContext<'_>,
     outbox: &mut Outbox,
 ) -> io::Result<bool> {
     with_indexed_directory_buffer(|buffer| {
-        scan_indexed_directory_with_buffer(directory, token, context, buffer, outbox)
+        scan_indexed_directory_with_buffer(directory, token, exclusion_node, context, buffer, outbox)
     })
 }
 
@@ -787,6 +793,7 @@ fn classify_entry(
     entry: &StreamEntry<'_>,
     directory: &Arc<OwnedFd>,
     token: DirectoryToken,
+    exclusion_node: Option<usize>,
     context: &ScanContext<'_>,
     outbox: &mut Outbox,
 ) -> ClassifiedEntry {
@@ -887,6 +894,7 @@ fn classify_entry(
                 name: entry.name().to_bytes().to_vec(),
                 identity: facts.identity,
                 token: child_token,
+                exclusion_node: exclusion_node.filter(|node| context.exclusions.has_children(*node)),
             },
             parent: Some(Arc::clone(directory)),
         });
@@ -899,6 +907,7 @@ fn classify_entry(
 fn scan_indexed_directory_with_buffer(
     directory: &Arc<OwnedFd>,
     token: DirectoryToken,
+    exclusion_node: Option<usize>,
     context: &ScanContext<'_>,
     buffer: &mut DirectoryBuffer,
     outbox: &mut Outbox,
@@ -935,7 +944,14 @@ fn scan_indexed_directory_with_buffer(
             continue;
         }
 
-        let mut found = classify_entry(&entry, directory, token, context, outbox);
+        let child_exclusion_node = context.exclusions.child(exclusion_node, name_bytes);
+        if child_exclusion_node.is_some_and(|node| context.exclusions.excludes(node)) {
+            // An excluded path makes this directory incomplete, so it cannot be deleted as a whole.
+            complete = false;
+            continue;
+        }
+
+        let mut found = classify_entry(&entry, directory, token, child_exclusion_node, context, outbox);
         if found.state != NodeState::Complete {
             complete = false;
         }

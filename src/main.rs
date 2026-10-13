@@ -6,7 +6,7 @@ mod browser;
 mod rmrf;
 
 use fdu_core::ExclusionReason;
-use fdu_scan::{scan, ScanOptions, TopLevelDirectory};
+use fdu_scan::{scan_with_exclusions, ScanExclusions, ScanOptions, TopLevelDirectory};
 use std::env;
 use std::error::Error;
 use std::io::{self, IsTerminal, Write};
@@ -18,6 +18,7 @@ const DEFAULT_RAYON_THREADS: usize = 4;
 
 struct Options {
     path: PathBuf,
+    exclusions: Vec<PathBuf>,
     apparent: bool,
     help: bool,
     mode: RunMode,
@@ -59,6 +60,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     if options.rmrf {
         return run_rmrf(options.path, options.assume_yes);
     }
+    let exclusions = ScanExclusions::from_paths(options.exclusions)?;
 
     let terminal_available = io::stdin().is_terminal() && io::stdout().is_terminal();
     let use_interactive = match options.mode {
@@ -75,13 +77,16 @@ fn run() -> Result<(), Box<dyn Error>> {
     };
 
     if use_interactive {
-        return run_interactive(options.path, options.read_only, options.apparent);
+        return run_interactive(options.path, options.read_only, options.apparent, exclusions);
     }
 
-    let report = scan(&ScanOptions {
-        path: options.path,
-        apparent: options.apparent,
-    })?;
+    let report = scan_with_exclusions(
+        &ScanOptions {
+            path: options.path,
+            apparent: options.apparent,
+        },
+        &exclusions,
+    )?;
     if report.skipped_entries != 0 {
         eprintln!(
             "fdu: warning: skipped {} entries after errors; size totals may be incomplete",
@@ -148,7 +153,12 @@ fn format_summary_size(bytes: u64) -> String {
 }
 
 fn parse_args() -> io::Result<Options> {
+    parse_args_from(env::args_os().skip(1))
+}
+
+fn parse_args_from(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> io::Result<Options> {
     let mut paths: Vec<PathBuf> = Vec::new();
+    let mut exclusions = Vec::new();
     let mut apparent = false;
     let mut help = false;
     let mut summary = false;
@@ -158,7 +168,8 @@ fn parse_args() -> io::Result<Options> {
     let mut assume_yes = false;
     let mut positional_only = false;
 
-    for argument in env::args_os().skip(1) {
+    let mut arguments = arguments.into_iter();
+    while let Some(argument) = arguments.next() {
         if !positional_only {
             match argument.to_str() {
                 Some("--") => {
@@ -171,6 +182,12 @@ fn parse_args() -> io::Result<Options> {
                 }
                 Some("-a") | Some("--apparent") => {
                     apparent = true;
+                    continue;
+                }
+                Some("-x") | Some("--exclude") => {
+                    exclusions.push(PathBuf::from(arguments.next().ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidInput, "-x/--exclude requires a PATH")
+                    })?));
                     continue;
                 }
                 Some("--summary") => {
@@ -239,6 +256,12 @@ fn parse_args() -> io::Result<Options> {
                 "--rmrf requires an explicit PATH",
             ));
         }
+        if !exclusions.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "--rmrf cannot be used with --exclude",
+            ));
+        }
     } else if assume_yes {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -248,6 +271,7 @@ fn parse_args() -> io::Result<Options> {
 
     Ok(Options {
         path: paths.pop().unwrap_or_else(|| PathBuf::from(".")),
+        exclusions,
         apparent,
         help,
         mode: if summary {
@@ -305,13 +329,14 @@ fn configure_rayon_threads() {
 }
 
 fn print_help() {
-    println!("Usage: fdu [--apparent] [--summary | --interactive] [--read-only] [PATH]");
+    println!("Usage: fdu [--apparent] [-x PATH | --exclude PATH]... [--summary | --interactive] [--read-only] [PATH]");
     println!("       fdu --rmrf [--yes] PATH");
     println!();
     println!("Browse a directory in the terminal, or print immediate child-directory totals.");
     println!("By default, sizes are allocated bytes; --apparent uses logical lengths.");
     println!("--summary forces output mode; --interactive requires a usable terminal.");
     println!("--read-only disables deletion in interactive mode.");
+    println!("-x, --exclude PATH omits an exact path relative to the selected root; repeat as needed.");
     println!("--rmrf deletes indexed entries below PATH, keeping PATH itself, without a");
     println!("terminal interface. PATH is required. A symlink root is refused, even");
     println!("with trailing slashes. /, your home directory, and any parent of");
@@ -320,6 +345,7 @@ fn print_help() {
     println!("any entries are removed.");
     println!("It asks for confirmation on a terminal; --yes skips that and is required");
     println!("when stdin is not a terminal.");
+    println!("Exclusions are not accepted with --rmrf.");
 }
 
 fn run_rmrf(path: PathBuf, assume_yes: bool) -> Result<(), Box<dyn Error>> {
@@ -338,14 +364,19 @@ fn run_rmrf(path: PathBuf, assume_yes: bool) -> Result<(), Box<dyn Error>> {
     }
 }
 
-fn run_interactive(path: PathBuf, read_only: bool, apparent: bool) -> Result<(), Box<dyn Error>> {
+fn run_interactive(
+    path: PathBuf,
+    read_only: bool,
+    apparent: bool,
+    exclusions: ScanExclusions,
+) -> Result<(), Box<dyn Error>> {
     #[cfg(feature = "interactive")]
     {
-        browser::run(path, read_only, apparent)
+        browser::run(path, read_only, apparent, exclusions)
     }
     #[cfg(not(feature = "interactive"))]
     {
-        let _ = (path, read_only, apparent);
+        let _ = (path, read_only, apparent, exclusions);
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "interactive support is disabled in this summary-only build",
@@ -356,10 +387,12 @@ fn run_interactive(path: PathBuf, read_only: bool, apparent: bool) -> Result<(),
 
 #[cfg(test)]
 mod tests {
-    use super::{automatic_mode_uses_tui, write_summary_entry};
+    use super::{automatic_mode_uses_tui, parse_args_from, write_summary_entry};
     use fdu_core::ExclusionReason;
     use fdu_scan::TopLevelDirectory;
     use std::ffi::OsString;
+    use std::io;
+    use std::path::PathBuf;
 
     #[test]
     fn summary_keeps_regular_row_format_and_names_excluded_boundaries() {
@@ -386,5 +419,33 @@ mod tests {
             automatic_mode_uses_tui(true),
             cfg!(feature = "interactive"),
         );
+    }
+
+    #[test]
+    fn parses_repeatable_short_and_long_exclude_options() -> io::Result<()> {
+        let options = parse_args_from(
+            ["-x", "build/cache", "--exclude", "vendor", "--summary", "root"]
+                .into_iter()
+                .map(OsString::from),
+        )?;
+
+        assert_eq!(options.path, PathBuf::from("root"));
+        assert_eq!(options.exclusions, [PathBuf::from("build/cache"), PathBuf::from("vendor")]);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_exclusions_for_rmrf() {
+        let result = parse_args_from(
+            ["--rmrf", "-x", "cache", "root"]
+                .into_iter()
+                .map(OsString::from),
+        );
+        let error = match result {
+            Ok(_) => panic!("rmrf exclusions must be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("--rmrf cannot be used with --exclude"));
     }
 }

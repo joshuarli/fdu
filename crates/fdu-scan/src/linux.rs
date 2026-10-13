@@ -1,5 +1,5 @@
 use crate::fsutil::{self, retry};
-use crate::{ScanReport, TopLevelDirectory};
+use crate::{ScanExclusions, ScanReport, TopLevelDirectory};
 use rayon::prelude::*;
 use rustix::fs::{self, AtFlags, FileType, Mode, OFlags, RawDir, ResolveFlags, Statx, StatxFlags};
 use rustix::io::Errno;
@@ -192,14 +192,50 @@ struct DirectoryEntries {
     disk_size: u64,
 }
 
-struct DirectoryFrame {
+struct DirectoryFrame<'a> {
     directory: OwnedFd,
     names: DirectoryNames,
     entries: PooledDirectoryEntries,
     next_entry: usize,
     disk_size: u64,
     overflowed: bool,
+    position: SummaryScanPosition<'a>,
+}
+
+/// Carries the current path filter and depth through recursive and iterative traversal alike.
+#[derive(Clone, Copy)]
+struct SummaryScanPosition<'a> {
+    exclusions: &'a ScanExclusions,
+    exclusion_node: Option<usize>,
     ext4_eof_cookie: bool,
+    depth: usize,
+}
+
+impl<'a> SummaryScanPosition<'a> {
+    fn root(exclusions: &'a ScanExclusions, ext4_eof_cookie: bool) -> Self {
+        Self {
+            exclusions,
+            exclusion_node: exclusions.root_node(),
+            ext4_eof_cookie,
+            depth: 0,
+        }
+    }
+
+    fn child(self, name: &[u8]) -> Self {
+        let exclusion_node = self.exclusions.child(self.exclusion_node, name);
+        Self {
+            exclusions: self.exclusions,
+            exclusion_node: exclusion_node.filter(|node| self.exclusions.has_children(*node)),
+            ext4_eof_cookie: self.ext4_eof_cookie,
+            depth: self.depth + 1,
+        }
+    }
+
+    fn excludes_child(self, name: &[u8]) -> bool {
+        self.exclusions
+            .child(self.exclusion_node, name)
+            .is_some_and(|node| self.exclusions.excludes(node))
+    }
 }
 
 enum ScannedEntry {
@@ -314,23 +350,24 @@ fn is_directory(stat: &Statx) -> bool {
 }
 
 // Choose size accounting before descent so every metadata call requests a fixed field.
-pub(super) fn scan(path: &Path, apparent: bool) -> io::Result<ScanReport> {
+pub(super) fn scan(path: &Path, apparent: bool, exclusions: &ScanExclusions) -> io::Result<ScanReport> {
     if apparent {
-        scan_mode::<true>(path)
+        scan_mode::<true>(path, exclusions)
     } else {
-        scan_mode::<false>(path)
+        scan_mode::<false>(path, exclusions)
     }
 }
 
-fn scan_mode<const APPARENT: bool>(path: &Path) -> io::Result<ScanReport> {
+fn scan_mode<const APPARENT: bool>(path: &Path, exclusions: &ScanExclusions) -> io::Result<ScanReport> {
     let root = fsutil::open_directory(path)?;
     let root_fd = root.as_fd();
     let ext4_eof_cookie = is_ext4(root_fd);
+    let root_position = SummaryScanPosition::root(exclusions, ext4_eof_cookie);
     let skipped_entries = AtomicUsize::new(0);
     let mount_boundaries = AtomicUsize::new(0);
     let DirectoryEntries { names, entries, .. } = read_directory::<APPARENT, true>(
         root_fd,
-        ext4_eof_cookie,
+        root_position,
         &skipped_entries,
     )?;
     let name_bytes = names.as_slice();
@@ -343,7 +380,7 @@ fn scan_mode<const APPARENT: bool>(path: &Path) -> io::Result<ScanReport> {
                 root_fd,
                 name_bytes,
                 entry,
-                ext4_eof_cookie,
+                root_position,
                 &skipped_entries,
                 &mount_boundaries,
             ) {
@@ -369,10 +406,11 @@ fn scan_top_level_entry<const APPARENT: bool>(
     parent: BorrowedFd<'_>,
     names: &[u8],
     entry: DirectoryEntry,
-    ext4_eof_cookie: bool,
+    position: SummaryScanPosition<'_>,
     skipped_entries: &AtomicUsize,
     mount_boundaries: &AtomicUsize,
 ) -> io::Result<Option<TopLevelDirectory>> {
+    let child_position = position.child(entry.as_c_str(names).to_bytes());
     if matches!(entry.kind, EntryKind::Other) {
         return Ok(None);
     }
@@ -400,8 +438,7 @@ fn scan_top_level_entry<const APPARENT: bool>(
     let disk_size = scan_child_directory::<APPARENT>(
         parent,
         entry.as_c_str(names),
-        ext4_eof_cookie,
-        1,
+        child_position,
         skipped_entries,
         mount_boundaries,
     )?;
@@ -414,15 +451,14 @@ fn scan_top_level_entry<const APPARENT: bool>(
 
 fn scan_directory_contents<const APPARENT: bool>(
     directory: OwnedFd,
-    ext4_eof_cookie: bool,
-    depth: usize,
+    position: SummaryScanPosition<'_>,
     skipped_entries: &AtomicUsize,
     mount_boundaries: &AtomicUsize,
 ) -> io::Result<u64> {
-    if depth >= MAX_RECURSIVE_DIRECTORY_DEPTH {
+    if position.depth >= MAX_RECURSIVE_DIRECTORY_DEPTH {
         return scan_directory_iterative::<APPARENT>(
             directory,
-            ext4_eof_cookie,
+            position,
             skipped_entries,
             mount_boundaries,
         );
@@ -432,11 +468,7 @@ fn scan_directory_contents<const APPARENT: bool>(
         names,
         entries,
         disk_size,
-    } = read_directory::<APPARENT, false>(
-        directory.as_fd(),
-        ext4_eof_cookie,
-        skipped_entries,
-    )?;
+    } = read_directory::<APPARENT, false>(directory.as_fd(), position, skipped_entries)?;
     if entries.is_empty() {
         return Ok(disk_size);
     }
@@ -450,8 +482,7 @@ fn scan_directory_contents<const APPARENT: bool>(
                 directory_fd,
                 name_bytes,
                 entry,
-                ext4_eof_cookie,
-                depth + 1,
+                position,
                 skipped_entries,
                 mount_boundaries,
             ) {
@@ -481,21 +512,17 @@ fn scan_directory_contents<const APPARENT: bool>(
     })
 }
 
-impl DirectoryFrame {
+impl<'a> DirectoryFrame<'a> {
     fn new<const APPARENT: bool>(
         directory: OwnedFd,
-        ext4_eof_cookie: bool,
+        position: SummaryScanPosition<'a>,
         skipped_entries: &AtomicUsize,
     ) -> io::Result<Self> {
         let DirectoryEntries {
             names,
             entries,
             disk_size,
-        } = read_directory::<APPARENT, false>(
-            directory.as_fd(),
-            ext4_eof_cookie,
-            skipped_entries,
-        )?;
+        } = read_directory::<APPARENT, false>(directory.as_fd(), position, skipped_entries)?;
         Ok(Self {
             directory,
             names,
@@ -503,7 +530,7 @@ impl DirectoryFrame {
             next_entry: 0,
             disk_size,
             overflowed: false,
-            ext4_eof_cookie,
+            position,
         })
     }
 
@@ -529,11 +556,11 @@ impl DirectoryFrame {
 
 fn scan_directory_iterative<const APPARENT: bool>(
     directory: OwnedFd,
-    ext4_eof_cookie: bool,
+    position: SummaryScanPosition<'_>,
     skipped_entries: &AtomicUsize,
     mount_boundaries: &AtomicUsize,
 ) -> io::Result<u64> {
-    let root = DirectoryFrame::new::<APPARENT>(directory, ext4_eof_cookie, skipped_entries)?;
+    let root = DirectoryFrame::new::<APPARENT>(directory, position, skipped_entries)?;
     let mut stack = vec![root];
 
     loop {
@@ -551,14 +578,19 @@ fn scan_directory_iterative<const APPARENT: bool>(
         if let Some(entry) = entry {
             let scanned = {
                 let frame = stack.last().expect("root directory frame remains present");
-                scan_entry_iterative::<APPARENT>(
-                    frame.directory.as_fd(),
-                    frame.names.as_slice(),
-                    entry,
-                    frame.ext4_eof_cookie,
+                let child_position = frame.position.child(entry.as_c_str(frame.names.as_slice()).to_bytes());
+                (
+                    scan_entry_iterative::<APPARENT>(
+                        frame.directory.as_fd(),
+                        frame.names.as_slice(),
+                        entry,
+                        frame.position.ext4_eof_cookie,
+                    ),
+                    child_position,
                 )
             };
 
+            let (scanned, child_position) = scanned;
             match scanned {
                 Ok(ScannedEntry::Item(size)) => stack
                     .last_mut()
@@ -569,17 +601,19 @@ fn scan_directory_iterative<const APPARENT: bool>(
                 }
                 Ok(ScannedEntry::Directory {
                     directory,
-                    ext4_eof_cookie,
-                }) => match DirectoryFrame::new::<APPARENT>(
-                    directory,
-                    ext4_eof_cookie,
-                    skipped_entries,
-                ) {
+                    ext4_eof_cookie: child_ext4_eof_cookie,
+                }) => {
+                    let child_position = SummaryScanPosition {
+                        ext4_eof_cookie: child_ext4_eof_cookie,
+                        ..child_position
+                    };
+                    match DirectoryFrame::new::<APPARENT>(directory, child_position, skipped_entries) {
                     Ok(frame) => stack.push(frame),
                     Err(_) => {
                         skipped_entries.fetch_add(1, Ordering::Relaxed);
                     }
-                },
+                    }
+                }
                 Err(_) => {
                     skipped_entries.fetch_add(1, Ordering::Relaxed);
                 }
@@ -608,17 +642,16 @@ fn scan_entry_size<const APPARENT: bool>(
     parent: BorrowedFd<'_>,
     names: &[u8],
     entry: DirectoryEntry,
-    ext4_eof_cookie: bool,
-    child_depth: usize,
+    position: SummaryScanPosition<'_>,
     skipped_entries: &AtomicUsize,
     mount_boundaries: &AtomicUsize,
 ) -> io::Result<u64> {
+    let child_position = position.child(entry.as_c_str(names).to_bytes());
     match entry.kind {
         EntryKind::Directory => scan_child_directory::<APPARENT>(
             parent,
             entry.as_c_str(names),
-            ext4_eof_cookie,
-            child_depth,
+            child_position,
             skipped_entries,
             mount_boundaries,
         ),
@@ -626,7 +659,7 @@ fn scan_entry_size<const APPARENT: bool>(
             parent,
             entry.as_c_str(names),
             entry_size_mask::<APPARENT>(),
-            |stat| file_size::<APPARENT>(stat),
+            file_size::<APPARENT>,
         ),
         EntryKind::Unknown => {
             let scanned = with_stat_at(
@@ -651,8 +684,7 @@ fn scan_entry_size<const APPARENT: bool>(
                 UnknownEntry::Directory => scan_child_directory::<APPARENT>(
                     parent,
                     entry.as_c_str(names),
-                    ext4_eof_cookie,
-                    child_depth,
+                    child_position,
                     skipped_entries,
                     mount_boundaries,
                 ),
@@ -722,15 +754,14 @@ fn entry_size_mask<const APPARENT: bool>() -> StatxFlags {
 fn scan_child_directory<const APPARENT: bool>(
     parent: BorrowedFd<'_>,
     name: &CStr,
-    ext4_eof_cookie: bool,
-    child_depth: usize,
+    position: SummaryScanPosition<'_>,
     skipped_entries: &AtomicUsize,
     mount_boundaries: &AtomicUsize,
 ) -> io::Result<u64> {
     let (child, child_ext4_eof_cookie) = match open_child_directory(
         parent,
         name,
-        ext4_eof_cookie,
+        position.ext4_eof_cookie,
     )? {
         OpenedChildDirectory::MountBoundary => {
             mount_boundaries.fetch_add(1, Ordering::Relaxed);
@@ -742,8 +773,10 @@ fn scan_child_directory<const APPARENT: bool>(
     };
     scan_directory_contents::<APPARENT>(
         child,
-        child_ext4_eof_cookie,
-        child_depth,
+        SummaryScanPosition {
+            ext4_eof_cookie: child_ext4_eof_cookie,
+            ..position
+        },
         skipped_entries,
         mount_boundaries,
     )
@@ -853,11 +886,11 @@ pub(super) fn is_ext4(fd: BorrowedFd<'_>) -> bool {
     retry(|| fs::fstatfs(fd)).is_ok_and(|filesystem| filesystem.f_type as u64 == EXT4_SUPER_MAGIC)
 }
 
-/// Lists a directory, sizing files in place. With `DIRECTORIES_ONLY` it keeps only entries that
-/// may be directories.
+/// Lists a directory, applying exclusions before sizing files in place. With `DIRECTORIES_ONLY`
+/// it keeps only entries that may be directories.
 fn read_directory<const APPARENT: bool, const DIRECTORIES_ONLY: bool>(
     fd: BorrowedFd<'_>,
-    ext4_eof_cookie: bool,
+    position: SummaryScanPosition<'_>,
     skipped_entries: &AtomicUsize,
 ) -> io::Result<DirectoryEntries> {
     DirectoryBuffer::with(|buffer| {
@@ -878,7 +911,7 @@ fn read_directory<const APPARENT: bool, const DIRECTORIES_ONLY: bool>(
                 Err(error) => return Err(error.into()),
             };
             // Ext4 HTree reserves these cookies for the last entry of an exhausted directory.
-            let last_entry = ext4_eof_cookie
+            let last_entry = position.ext4_eof_cookie
                 && matches!(record.next_entry_cookie(), EXT4_HTREE_EOF_32BIT | EXT4_HTREE_EOF_64BIT);
             let name = record.file_name();
             let name_bytes = name.to_bytes();
@@ -888,7 +921,8 @@ fn read_directory<const APPARENT: bool, const DIRECTORIES_ONLY: bool>(
                 _ => EntryKind::Other,
             };
 
-            if name_bytes != b"." && name_bytes != b".." {
+            let excluded = position.excludes_child(name_bytes);
+            if name_bytes != b"." && name_bytes != b".." && !excluded {
                 if !DIRECTORIES_ONLY && matches!(kind, EntryKind::Other) {
                     if sized_in_place < SERIAL_FILE_LIMIT {
                         // Narrow directories size files without retaining their names.
@@ -1105,6 +1139,8 @@ mod tests {
         let names = b"file\0child\0";
         let skipped_entries = AtomicUsize::new(0);
         let mount_boundaries = AtomicUsize::new(0);
+        let exclusions = crate::ScanExclusions::default();
+        let position = super::SummaryScanPosition::root(&exclusions, false);
 
         let file_size = scan_entry_size::<true>(
             root.as_fd(),
@@ -1114,8 +1150,7 @@ mod tests {
                 name_length: 4,
                 kind: EntryKind::Unknown,
             },
-            false,
-            1,
+            position,
             &skipped_entries,
             &mount_boundaries,
         )?;
@@ -1129,8 +1164,7 @@ mod tests {
                 name_length: 5,
                 kind: EntryKind::Unknown,
             },
-            false,
-            1,
+            position,
             &skipped_entries,
             &mount_boundaries,
         )?;
@@ -1165,9 +1199,10 @@ mod tests {
         fs::create_dir(temporary.0.join("second"))?;
         let directory = File::open(&temporary.0)?;
         let skipped_entries = AtomicUsize::new(0);
+        let exclusions = crate::ScanExclusions::default();
         let result = super::read_directory::<true, false>(
             directory.as_fd(),
-            false,
+            super::SummaryScanPosition::root(&exclusions, false),
             &skipped_entries,
         )?;
         assert_eq!(result.entries.len(), 2);
@@ -1188,9 +1223,10 @@ mod tests {
         }
         let directory = File::open(&temporary.0)?;
         let skipped_entries = AtomicUsize::new(0);
+        let exclusions = crate::ScanExclusions::default();
         let result = super::read_directory::<false, false>(
             directory.as_fd(),
-            false,
+            super::SummaryScanPosition::root(&exclusions, false),
             &skipped_entries,
         )?;
         assert_eq!(result.disk_size, expected_allocated);
