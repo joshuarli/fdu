@@ -1,6 +1,8 @@
+use std::borrow::Cow;
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
-use std::path::PathBuf;
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::Arc;
@@ -130,10 +132,27 @@ pub fn open_root(path: &std::path::Path) -> io::Result<RootAnchor> {
 }
 
 /// Like [`open_root`], but fails when the final path component is a symlink
-/// instead of following it. Earlier components, and a trailing slash, still
-/// resolve through symlinks as the kernel always does.
+/// instead of following it. Trailing slashes are removed before opening so
+/// they cannot make the kernel resolve a final symlink as a directory. Earlier
+/// components still resolve through symlinks.
 pub fn open_root_no_follow(path: &std::path::Path) -> io::Result<RootAnchor> {
-    anchor_root(path, fsutil::open_directory_no_follow(path)?)
+    let open_path = without_trailing_slashes(path);
+    anchor_root(path, fsutil::open_directory_no_follow(open_path.as_ref())?)
+}
+
+/// The kernel resolves a trailing slash before applying `O_NOFOLLOW`, so remove
+/// only trailing separators before opening and preserve the caller's root name.
+fn without_trailing_slashes(path: &Path) -> Cow<'_, Path> {
+    let bytes = path.as_os_str().as_bytes();
+    let mut end = bytes.len();
+    while end > 0 && bytes[end - 1] == b'/' {
+        end -= 1;
+    }
+    if end == bytes.len() || end == 0 {
+        Cow::Borrowed(path)
+    } else {
+        Cow::Owned(Path::new(std::ffi::OsStr::from_bytes(&bytes[..end])).to_path_buf())
+    }
 }
 
 fn anchor_root(path: &std::path::Path, fd: OwnedFd) -> io::Result<RootAnchor> {

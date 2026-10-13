@@ -97,6 +97,9 @@ pub fn run(path: PathBuf, assume_yes: bool) -> Result<(), Box<dyn Error>> {
     let mut progress = Progress::new();
     let tree = build_index(&root, &mut progress)?;
     progress.clear();
+    require_complete_scan_root(&tree).map_err(|error| {
+        io::Error::other(format!("refusing to empty {}: {error}", path.display()))
+    })?;
     let selected: Vec<fdu_core::NodeId> = tree.children(tree.root()).collect();
     if selected.is_empty() {
         return Ok(());
@@ -193,13 +196,28 @@ pub fn run(path: PathBuf, assume_yes: bool) -> Result<(), Box<dyn Error>> {
 /// target is almost never what a caller who names a link means. The kernel
 /// reports that refusal as a bare ELOOP or ENOTDIR, so say what happened.
 fn describe_open_failure(path: &Path, error: io::Error) -> io::Error {
-    if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+    if last_path_component_is_symlink(path) {
         return io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("{} is a symlink; name the directory it points to instead", path.display()),
         );
     }
     io::Error::new(error.kind(), format!("{}: {error}", path.display()))
+}
+
+/// `symlink_metadata` follows a final symlink if the path still ends in `/`.
+fn last_path_component_is_symlink(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+
+    let bytes = path.as_os_str().as_bytes();
+    let mut end = bytes.len();
+    while end > 0 && bytes[end - 1] == b'/' {
+        end -= 1;
+    }
+    end > 0
+        && std::fs::symlink_metadata(Path::new(OsStr::from_bytes(&bytes[..end]))).is_ok_and(|metadata| {
+            metadata.file_type().is_symlink()
+        })
 }
 
 /// Why `root` must never be emptied, if it is one of the directories whose
@@ -273,6 +291,14 @@ fn display_name(tree: &Tree, id: fdu_core::NodeId) -> String {
         Some(name) => String::from_utf8_lossy(name).into_owned(),
         None => "<unknown>".to_owned(),
     }
+}
+
+/// The root is outside the deletion plan, so its state must be checked separately.
+fn require_complete_scan_root(tree: &Tree) -> io::Result<()> {
+    if tree.record(tree.root()).expect("root exists").state != NodeState::Complete {
+        return Err(io::Error::other("root scan is incomplete"));
+    }
+    Ok(())
 }
 
 /// Runs the indexed scanner to completion and folds its events into the tree
@@ -470,7 +496,8 @@ fn apply_batch(
 
 #[cfg(test)]
 mod tests {
-    use super::{protected_root_reason, read_confirmation, run};
+    use super::{protected_root_reason, read_confirmation, require_complete_scan_root, run};
+    use fdu_core::{EntryType, FileIdentity, NodeState, Tree};
     use fdu_scan::open_root_no_follow;
     use std::ffi::OsStr;
     use std::fs;
@@ -481,13 +508,16 @@ mod tests {
 
     static TEMP_ID: AtomicUsize = AtomicUsize::new(0);
 
+    /// Keep test-owned filesystem trees inside the repository's ignored scratch directory.
     struct TempDir(PathBuf);
 
     impl TempDir {
         fn new() -> io::Result<Self> {
             loop {
                 let id = TEMP_ID.fetch_add(1, Ordering::Relaxed);
-                let path = std::env::temp_dir().join(format!("fdu-rmrf-{}-{id}", std::process::id()));
+                let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join(".work/tmp");
+                fs::create_dir_all(&scratch)?;
+                let path = scratch.join(format!("fdu-rmrf-{}-{id}", std::process::id()));
                 match fs::create_dir(&path) {
                     Ok(()) => return Ok(Self(path)),
                     Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -555,6 +585,44 @@ mod tests {
         let error = run(link, true).unwrap_err().to_string();
         assert!(error.contains("symlink"), "{error}");
         assert_eq!(fs::read(target.join("keep")).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn trailing_slash_symlink_root_is_refused_and_its_target_left_alone() {
+        let temp = TempDir::new().unwrap();
+        let target = temp.0.join("target");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("keep"), b"keep").unwrap();
+        let link = temp.0.join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let mut trailing_slash = link.as_os_str().to_os_string();
+        trailing_slash.push("/");
+
+        let error = run(PathBuf::from(trailing_slash), true).unwrap_err().to_string();
+        assert!(error.contains("symlink"), "{error}");
+        assert_eq!(fs::read(target.join("keep")).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn incomplete_root_scan_is_refused_before_children_are_selected() {
+        let mut tree = Tree::new(b"root", FileIdentity { device: 1, inode: 1 }, 1).unwrap();
+        let root = tree.root();
+        tree.set_state(root, NodeState::Incomplete);
+        tree.append(
+            root,
+            b"visible",
+            EntryType::RegularFile,
+            FileIdentity { device: 1, inode: 2 },
+            1,
+            1,
+            1,
+            NodeState::Complete,
+        )
+        .unwrap();
+        assert_eq!(tree.children(root).count(), 1, "one indexed child would otherwise be selected");
+
+        let error = require_complete_scan_root(&tree).unwrap_err();
+        assert!(error.to_string().contains("incomplete"), "{error}");
     }
 
     #[test]

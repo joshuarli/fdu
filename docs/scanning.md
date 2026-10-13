@@ -1,0 +1,36 @@
+# Scanning
+
+fdu has a summary scan and an indexed scan. The summary reports one row per
+immediate child directory. The indexed scan builds the tree used by the browser
+and deletion planner.
+
+## Accounting and traversal
+
+- Allocated bytes are the default; apparent mode uses logical file lengths.
+- Directory inode storage is excluded. Hardlinked paths count separately.
+- Hidden and ignored names are included. fdu does not apply ignore-file rules.
+- Discovered symlinks are leaves. Files and directories beyond a filesystem or
+  mount boundary are not traversed.
+- Errors and unsupported directory aliases make affected totals incomplete.
+  Root open or enumeration errors stop the scan.
+- The tree is live rather than an atomic snapshot, so concurrent filesystem or
+  mount changes can be observed during a scan.
+
+Summary output orders immediate child directories by descending size. On Linux
+the summary scanner uses four Rayon workers by default; `RAYON_NUM_THREADS`
+sets another count. The macOS summary scanner is sequential.
+
+## Indexed scan
+
+The shared indexed scanner uses worker-local directory queues and work stealing.
+It batches entries and completion events over the browser's bounded channel.
+Platform code supplies enumeration, metadata, mount identity, and pool limits.
+See [`indexed.rs`](../crates/fdu-scan/src/indexed.rs),
+[`linux.rs`](../crates/fdu-scan/src/linux.rs), and
+[`macos.rs`](../crates/fdu-scan/src/macos.rs).
+
+Linux requires kernel 6.0 or later. Its indexed scan compares device and kernel
+mount IDs; the summary scanner uses `openat2` with `RESOLVE_NO_XDEV` where
+available and a descriptor mount-ID fallback. macOS compares device,
+filesystem ID, and mount point from opened directory descriptors. These checks
+cannot make traversal atomic with concurrent mount or path changes.

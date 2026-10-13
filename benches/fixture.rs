@@ -1,9 +1,9 @@
 //! Benchmarks over the generated layout fixture (see `scripts/generate_layout_fixture.py`).
 //!
 //! Run with `cargo bench --bench fixture`; `FDU_BENCH_FIXTURE` selects another
-//! copy of the fixture. The whole-fixture delete benchmark clones the fixture for
-//! every sample, outside the timed region, so it needs room for a full copy under
-//! `FDU_BENCH_SCRATCH` (default: the system temporary directory).
+//! copy of the fixture (default: `.work/tmp/fdu-layout-fixture`). The whole-fixture
+//! delete benchmark clones the fixture for every sample, outside the timed
+//! region, under `FDU_BENCH_SCRATCH` (default: `.work/tmp`).
 //!
 //! Compare runs with the rustybench `baseline` and `diff` commands.
 
@@ -30,10 +30,13 @@ fn main() {
 fn fixture() -> &'static Path {
     static FIXTURE: OnceLock<PathBuf> = OnceLock::new();
     FIXTURE.get_or_init(|| {
-        let path = PathBuf::from(
-            std::env::var_os("FDU_BENCH_FIXTURE").unwrap_or_else(|| "/tmp/fdu-layout-fixture".into()),
+        let path = std::env::var_os("FDU_BENCH_FIXTURE").map_or_else(
+            || Path::new(env!("CARGO_MANIFEST_DIR")).join(".work/tmp/fdu-layout-fixture"),
+            PathBuf::from,
         );
         if !path.is_dir() {
+            std::fs::create_dir_all(path.parent().expect("fixture has a parent directory"))
+                .expect("fixture scratch directory is created");
             let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/generate_layout_fixture.py");
             let status = Command::new("python3").arg(script).arg(&path).status().expect("python3 runs");
             assert!(status.success(), "fixture generation failed");
@@ -178,7 +181,11 @@ struct Clone {
 impl Clone {
     fn new() -> Self {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let scratch = std::env::var_os("FDU_BENCH_SCRATCH").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+        let scratch = std::env::var_os("FDU_BENCH_SCRATCH").map_or_else(
+            || Path::new(env!("CARGO_MANIFEST_DIR")).join(".work/tmp"),
+            PathBuf::from,
+        );
+        std::fs::create_dir_all(&scratch).expect("benchmark scratch directory is created");
         let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let parent = scratch.join(format!("fdu-bench-{}-{id}", std::process::id()));
         std::fs::create_dir(&parent).expect("scratch directory is created");

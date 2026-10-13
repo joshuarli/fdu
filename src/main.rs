@@ -287,10 +287,14 @@ fn print_help() {
     println!("By default, sizes are allocated bytes; --apparent uses logical lengths.");
     println!("--summary forces output mode; --interactive requires a usable terminal.");
     println!("--read-only disables deletion in interactive mode.");
-    println!("--rmrf deletes every entry below PATH, keeping PATH itself, without a terminal");
-    println!("interface. PATH is required, must not be a symlink, and must not be / , your");
-    println!("home directory, or a parent of the current directory. It asks for confirmation");
-    println!("on a terminal; --yes skips that and is required when stdin is not a terminal.");
+    println!("--rmrf deletes indexed entries below PATH, keeping PATH itself, without a");
+    println!("terminal interface. PATH is required. A symlink root is refused, even");
+    println!("with trailing slashes. /, your home directory, and any parent of");
+    println!("the current directory are refused. Incomplete selected directories and");
+    println!("mount boundaries reject the plan. An incomplete root scan stops before");
+    println!("any entries are removed.");
+    println!("It asks for confirmation on a terminal; --yes skips that and is required");
+    println!("when stdin is not a terminal.");
 }
 
 fn run_rmrf(path: PathBuf, assume_yes: bool) -> Result<(), Box<dyn Error>> {

@@ -12,13 +12,16 @@ use std::time::Duration;
 static TEMP_ID: AtomicUsize = AtomicUsize::new(0);
 pub const STEP: Duration = Duration::from_secs(15);
 
+/// Keep test-owned filesystem trees inside the repository's ignored scratch directory.
 pub struct TempDir(pub PathBuf);
 
 impl TempDir {
     pub fn new() -> io::Result<Self> {
         loop {
             let id = TEMP_ID.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!("fdu-pty-{}-{id}", std::process::id()));
+            let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join(".work/tmp");
+            fs::create_dir_all(&scratch)?;
+            let path = scratch.join(format!("fdu-pty-{}-{id}", std::process::id()));
             match fs::create_dir(&path) {
                 Ok(()) => return Ok(Self(path)),
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -69,7 +72,7 @@ impl Session {
         }
         let scenario = Scenario::new(label)
             .unwrap()
-            .command(command)
+            .command(command.current_dir(env!("CARGO_MANIFEST_DIR")))
             .size(Size::new(columns, rows).unwrap())
             .environment(TestEnv::hermetic().unwrap());
         let terminal = PtyTest::spawn(scenario).unwrap();
@@ -179,10 +182,10 @@ pub fn row_containing(screen: &ScreenSnapshot, needle: &str) -> String {
 }
 
 
-/// Where the generated layout fixture lives. The path is fixed because the root
-/// path appears on screen, and screen snapshots must not depend on the machine.
-pub const LAYOUT_FIXTURE: &str = "/tmp/fdu-layout-fixture";
-const LAYOUT_FIXTURE_MARKER: &str = "/tmp/fdu-layout-fixture.ready";
+/// Keep the displayed fixture path stable while storing generated files in the
+/// repository's ignored scratch directory.
+pub const LAYOUT_FIXTURE: &str = ".work/tmp/fdu-layout-fixture";
+const LAYOUT_FIXTURE_MARKER: &str = ".work/tmp/fdu-layout-fixture.ready";
 /// What a complete generation looks like: the generator's seed and entry count.
 const LAYOUT_FIXTURE_DESCRIPTION: &str = "seed=0 entries=192238";
 
@@ -192,14 +195,28 @@ const LAYOUT_FIXTURE_DESCRIPTION: &str = "seed=0 entries=192238";
 pub fn layout_fixture() -> &'static Path {
     static BUILT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     BUILT.get_or_init(|| {
-        let marker = fs::read_to_string(LAYOUT_FIXTURE_MARKER).unwrap_or_default();
-        if marker.trim() == LAYOUT_FIXTURE_DESCRIPTION && Path::new(LAYOUT_FIXTURE).is_dir() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join(LAYOUT_FIXTURE);
+        let marker_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(LAYOUT_FIXTURE_MARKER);
+        let scratch = fixture.parent().expect("fixture has a parent directory");
+        fs::create_dir_all(scratch).expect("create the fixture scratch directory");
+        let marker = match fs::read_to_string(&marker_path) {
+            Ok(marker) => marker,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+            Err(error) => panic!("read the fixture marker: {error}"),
+        };
+        if marker.trim() == LAYOUT_FIXTURE_DESCRIPTION && fixture.is_dir() {
             return;
         }
-        let _ = fs::remove_file(LAYOUT_FIXTURE_MARKER);
-        let partial = format!("{LAYOUT_FIXTURE}.partial");
-        let _ = fs::remove_dir_all(&partial);
-        let _ = fs::remove_dir_all(LAYOUT_FIXTURE);
+        if marker_path.exists() {
+            fs::remove_file(&marker_path).expect("remove the stale fixture marker");
+        }
+        let partial = fixture.with_file_name("fdu-layout-fixture.partial");
+        if partial.exists() {
+            fs::remove_dir_all(&partial).expect("remove a partial fixture tree");
+        }
+        if fixture.exists() {
+            fs::remove_dir_all(&fixture).expect("remove the stale fixture tree");
+        }
         let output = std::process::Command::new("python3")
             .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/generate_layout_fixture.py"))
             .arg(&partial)
@@ -208,8 +225,8 @@ pub fn layout_fixture() -> &'static Path {
         assert!(output.status.success(), "fixture generation failed: {}", String::from_utf8_lossy(&output.stderr));
         let report = String::from_utf8_lossy(&output.stdout);
         assert!(report.contains("entries=192238"), "unexpected fixture shape: {report}");
-        fs::rename(&partial, LAYOUT_FIXTURE).unwrap();
-        fs::write(LAYOUT_FIXTURE_MARKER, LAYOUT_FIXTURE_DESCRIPTION).unwrap();
+        fs::rename(&partial, &fixture).unwrap();
+        fs::write(&marker_path, LAYOUT_FIXTURE_DESCRIPTION).unwrap();
     });
     Path::new(LAYOUT_FIXTURE)
 }
@@ -222,10 +239,17 @@ pub fn clone_layout_fixture(temp: &TempDir) -> PathBuf {
     let clone_flags: &[&str] = if cfg!(target_os = "macos") { &["-cR"] } else { &["-R", "--reflink=auto"] };
     let status = std::process::Command::new("cp")
         .args(clone_flags)
-        .arg(layout_fixture())
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join(layout_fixture()))
         .arg(&destination)
         .status()
         .expect("cp clones the layout fixture");
     assert!(status.success(), "cloning the layout fixture failed");
     destination
+}
+
+#[test]
+fn layout_fixture_path_uses_workspace_scratch() {
+    let fixture = Path::new(LAYOUT_FIXTURE);
+    assert!(fixture.is_relative());
+    assert!(fixture.starts_with(".work/tmp"));
 }
