@@ -258,6 +258,8 @@ struct BrowserModel {
     visible: Vec<NodeId>,
     cursor: Cursor,
     cursor_index: Option<usize>,
+    /// Remembers selections by entry identity so directory visits survive sort and filter changes.
+    directory_cursors: HashMap<NodeId, Cursor>,
     cursor_moved_during_scan: bool,
     marks: MarkSet,
     marked_cursor: usize,
@@ -422,6 +424,7 @@ impl BrowserModel {
             visible: Vec::new(),
             cursor: Cursor::None,
             cursor_index: None,
+            directory_cursors: HashMap::new(),
             cursor_moved_during_scan: false,
             marks: MarkSet::default(),
             marked_cursor: 0,
@@ -463,6 +466,7 @@ impl BrowserModel {
         self.visible.clear();
         self.cursor = Cursor::None;
         self.cursor_index = None;
+        self.directory_cursors.clear();
         self.cursor_moved_during_scan = false;
         self.marks.clear();
         self.marked_cursor = 0;
@@ -925,6 +929,7 @@ impl BrowserModel {
         };
         let filter_hid_it = !self.filter.is_empty();
         self.filter.clear();
+        self.remember_current_cursor();
         self.current_directory = parent;
         self.range_mode = false;
         self.range_anchor = None;
@@ -1580,6 +1585,7 @@ impl BrowserModel {
 
     /// Marks belong to the whole root, so they stay when the directory changes.
     fn change_directory(&mut self, directory: NodeId) {
+        self.remember_current_cursor();
         self.current_directory = directory;
         self.cursor_moved_during_scan = false;
         self.range_mode = false;
@@ -1591,6 +1597,15 @@ impl BrowserModel {
             )
         });
         self.rebuild_listing(false);
+        let previous = self.directory_cursors.get(&directory).copied().unwrap_or(Cursor::None);
+        let restored = self.valid_cursor(previous);
+        self.cursor = restored.unwrap_or_else(|| self.first_cursor());
+        self.refresh_cursor_index();
+        self.cursor_moved_during_scan = self.scanning && restored.is_some();
+    }
+
+    fn remember_current_cursor(&mut self) {
+        self.directory_cursors.insert(self.current_directory, self.cursor);
     }
 
     fn is_scanning(&self) -> bool {
@@ -2018,6 +2033,32 @@ mod tests {
         assert_eq!(model.current_directory, model.tree.root());
         assert!(model.is_scanning());
         assert!(matches!(model.size_mode, SizeMode::Allocated));
+        Ok(())
+    }
+
+    #[test]
+    fn directory_navigation_restores_cursor_positions() -> io::Result<()> {
+        let temp = TempDir::new()?;
+        let (_, mut model) = make_model(&temp, false)?;
+        let root = model.tree.root();
+        append(&mut model, root, b"alpha", EntryType::Directory, 0, 2);
+        let bravo = append(&mut model, root, b"bravo", EntryType::Directory, 0, 5);
+        append(&mut model, bravo, b"first", EntryType::RegularFile, 2, 3);
+        let selected = append(&mut model, bravo, b"selected", EntryType::RegularFile, 1, 4);
+
+        model.cursor = Cursor::Entry(bravo);
+        model.refresh_cursor_index();
+        assert!(model.enter_cursor());
+        model.cursor = Cursor::Entry(selected);
+        model.refresh_cursor_index();
+
+        assert!(model.go_parent());
+        assert!(matches!(model.cursor, Cursor::Entry(id) if id == bravo));
+        ready(&mut model);
+        assert!(matches!(model.cursor, Cursor::Entry(id) if id == bravo));
+        assert!(model.enter_cursor());
+        assert!(matches!(model.cursor, Cursor::Entry(id) if id == selected));
+        assert_eq!(model.cursor_index(), Some(1));
         Ok(())
     }
 
