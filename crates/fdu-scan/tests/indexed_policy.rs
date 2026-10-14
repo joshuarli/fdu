@@ -210,7 +210,7 @@ fn scan_to_tree_with_exclusions(
     }
     worker
         .join()
-        .map_err(|_| io::Error::new(io::ErrorKind::Other, "scanner worker panicked"))?;
+        .map_err(|_| io::Error::other("scanner worker panicked"))?;
     Ok(IndexedResult {
         tree,
         errors,
@@ -503,7 +503,7 @@ fn indexed_worker_publishes_wide_directory_chunks_before_completion() -> io::Res
     assert!(matches!(second, ScanEvent::Entries(_)));
     cancelled.store(true, Ordering::Relaxed);
     drop(receiver);
-    worker.join().map_err(|_| io::Error::new(io::ErrorKind::Other, "scanner worker panicked"))?;
+    worker.join().map_err(|_| io::Error::other("scanner worker panicked"))?;
     Ok(())
 }
 
@@ -524,7 +524,7 @@ fn dropping_a_full_scan_queue_releases_a_blocked_worker() -> io::Result<()> {
     assert!(matches!(receiver.recv_timeout(Duration::from_secs(5)), Ok(ScanEvent::Started { .. })));
     cancelled.store(true, Ordering::Relaxed);
     drop(receiver);
-    worker.join().map_err(|_| io::Error::new(io::ErrorKind::Other, "scanner worker panicked"))?;
+    worker.join().map_err(|_| io::Error::other("scanner worker panicked"))?;
     Ok(())
 }
 

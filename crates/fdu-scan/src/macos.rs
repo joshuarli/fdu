@@ -330,9 +330,7 @@ pub(super) fn scan(path: &Path, apparent: bool, exclusions: &ScanExclusions) -> 
             &root_mount,
             apparent,
             &mut seen_directories,
-            &mut report.skipped_entries,
-            &mut report.mount_boundaries,
-            &mut report.unsupported_aliases,
+            &mut report,
             exclusion_node.filter(|node| exclusions.has_children(*node)),
             exclusions,
         ) {
@@ -361,9 +359,7 @@ fn scan_subtree(
     root_mount: &MountIdentity,
     apparent: bool,
     seen_directories: &mut HashSet<FileIdentity>,
-    skipped_entries: &mut usize,
-    mount_boundaries: &mut usize,
-    unsupported_aliases: &mut usize,
+    report: &mut ScanReport,
     root_exclusion_node: Option<usize>,
     exclusions: &ScanExclusions,
 ) -> io::Result<u64> {
@@ -382,7 +378,7 @@ fn scan_subtree(
             match open_directory_path(root.as_fd(), root_mount, &paths, path_index) {
                 Ok(directory) => directory,
                 Err(_) => {
-                    mark_skipped(skipped_entries);
+                    mark_skipped(&mut report.skipped_entries);
                     continue;
                 }
             }
@@ -390,7 +386,7 @@ fn scan_subtree(
         let directory = match directory {
             OpenedDirectory::InsideRoot(directory) => directory,
             OpenedDirectory::MountBoundary => {
-                mark_mount_boundary(mount_boundaries);
+                mark_mount_boundary(&mut report.mount_boundaries);
                 continue;
             }
         };
@@ -398,12 +394,12 @@ fn scan_subtree(
             let identity = match fsutil::identity_of(directory.as_fd()) {
                 Ok(identity) => identity,
                 Err(_) => {
-                    mark_skipped(skipped_entries);
+                    mark_skipped(&mut report.skipped_entries);
                     continue;
                 }
             };
             if !seen_directories.insert(identity) {
-                mark_unsupported_alias(unsupported_aliases);
+                mark_unsupported_alias(&mut report.unsupported_aliases);
                 continue;
             }
         }
@@ -412,7 +408,7 @@ fn scan_subtree(
             Ok(entries) => entries,
             Err(error) if path_index == 0 => return Err(error),
             Err(_) => {
-                mark_skipped(skipped_entries);
+                mark_skipped(&mut report.skipped_entries);
                 continue;
             }
         };
@@ -429,8 +425,8 @@ fn scan_subtree(
                     match fsutil::stat_at(directory.as_fd(), &entry.name)
                         .and_then(|stat| fsutil::file_size(&stat, apparent))
                     {
-                        Ok(size) => add_size(&mut disk_size, size, skipped_entries),
-                        Err(_) => mark_skipped(skipped_entries),
+                        Ok(size) => add_size(&mut disk_size, size, &mut report.skipped_entries),
+                        Err(_) => mark_skipped(&mut report.skipped_entries),
                     }
                     continue;
                 }
@@ -439,13 +435,15 @@ fn scan_subtree(
                         Ok(stat) if fsutil::entry_type(&stat) == EntryType::Directory => true,
                         Ok(stat) => {
                             match fsutil::file_size(&stat, apparent) {
-                                Ok(size) => add_size(&mut disk_size, size, skipped_entries),
-                                Err(_) => mark_skipped(skipped_entries),
+                                Ok(size) => {
+                                    add_size(&mut disk_size, size, &mut report.skipped_entries)
+                                }
+                                Err(_) => mark_skipped(&mut report.skipped_entries),
                             }
                             continue;
                         }
                         Err(_) => {
-                            mark_skipped(skipped_entries);
+                            mark_skipped(&mut report.skipped_entries);
                             continue;
                         }
                     }

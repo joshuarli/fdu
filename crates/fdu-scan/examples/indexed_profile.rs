@@ -160,7 +160,7 @@ fn main() -> io::Result<()> {
     }
     worker
         .join()
-        .map_err(|_| io::Error::new(io::ErrorKind::Other, "scanner worker panicked"))?;
+        .map_err(|_| io::Error::other("scanner worker panicked"))?;
 
     let entries = tree.len().saturating_sub(1);
     let arena_bytes = tree.retained_arena_bytes();

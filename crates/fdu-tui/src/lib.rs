@@ -849,8 +849,8 @@ mod tests {
                     EntryType::RegularFile,
                     FileIdentity { device: 1, inode: index + 2 },
                     1,
-                    index as u64,
-                    index as u64,
+                    index,
+                    index,
                     NodeStatus::Complete,
                 )
                 .unwrap();
