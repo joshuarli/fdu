@@ -29,15 +29,6 @@ Next: 11
 - **Fix with:** `lifecycle-concurrency`
 - **Effort:** M
 
-### FDU-7 · P3 · Match help output to summary-only builds
-
-- **Area:** Operability
-- **Where:** `src/main.rs:331`, `src/main.rs:356`
-- **Problem:** Help always advertises `--interactive` and `--rmrf`, but a build without the `interactive` feature returns `Unsupported` for both modes. Users of summary-only binaries receive commands that the binary cannot run.
-- **Recommendation:** Generate feature-aware help text for each build configuration.
-- **Fix with:** `api-surface-and-module-boundaries`
-- **Effort:** S
-
 ### FDU-8 · P3 · Run repository-owned checks on pull requests
 
 - **Area:** Build

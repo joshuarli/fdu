@@ -343,23 +343,42 @@ fn configure_rayon_threads() {
 }
 
 fn print_help() {
+    #[cfg(feature = "interactive")]
     println!("Usage: fdu [--apparent] [-x PATH | --exclude PATH]... [--summary | --interactive] [--read-only] [PATH]");
+    #[cfg(not(feature = "interactive"))]
+    println!("Usage: fdu [--apparent] [-x PATH | --exclude PATH]... [--summary] [PATH]");
+
+    #[cfg(feature = "interactive")]
     println!("       fdu --rmrf [--yes] PATH");
     println!();
+
+    #[cfg(feature = "interactive")]
     println!("Browse a directory in the terminal, or print immediate child-directory totals.");
+    #[cfg(not(feature = "interactive"))]
+    println!("Print immediate child-directory totals.");
     println!("By default, sizes are allocated bytes; --apparent uses logical lengths.");
+
+    #[cfg(feature = "interactive")]
     println!("--summary forces output mode; --interactive requires a usable terminal.");
+    #[cfg(not(feature = "interactive"))]
+    println!("--summary selects summary output explicitly.");
+
+    #[cfg(feature = "interactive")]
     println!("--read-only disables deletion in interactive mode.");
     println!("-x, --exclude PATH omits an exact path relative to the selected root; repeat as needed.");
-    println!("--rmrf deletes indexed entries below PATH, keeping PATH itself, without a");
-    println!("terminal interface. PATH is required. A symlink root is refused, even");
-    println!("with trailing slashes. /, your home directory, and any parent of");
-    println!("the current directory are refused. Incomplete selected directories and");
-    println!("mount boundaries reject the plan. An incomplete root scan stops before");
-    println!("any entries are removed.");
-    println!("It asks for confirmation on a terminal; --yes skips that and is required");
-    println!("when stdin is not a terminal.");
-    println!("Exclusions are not accepted with --rmrf.");
+
+    #[cfg(feature = "interactive")]
+    {
+        println!("--rmrf deletes indexed entries below PATH, keeping PATH itself, without a");
+        println!("terminal interface. PATH is required. A symlink root is refused, even");
+        println!("with trailing slashes. /, your home directory, and any parent of");
+        println!("the current directory are refused. Incomplete selected directories and");
+        println!("mount boundaries reject the plan. An incomplete root scan stops before");
+        println!("any entries are removed.");
+        println!("It asks for confirmation on a terminal; --yes skips that and is required");
+        println!("when stdin is not a terminal.");
+        println!("Exclusions are not accepted with --rmrf.");
+    }
 }
 
 fn run_rmrf(path: PathBuf, assume_yes: bool) -> Result<(), Box<dyn Error>> {
