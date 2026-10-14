@@ -10,6 +10,8 @@ use fdu_tui::{
     TerminalSession, TerminalSize, View,
 };
 use hashbrown::{HashMap, HashSet};
+use signal_hook::consts::signal::{SIGHUP, SIGTERM};
+use signal_hook::iterator::Signals;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError};
@@ -1654,6 +1656,7 @@ pub fn run(
     apparent: bool,
     exclusions: ScanExclusions,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let mut signals = Signals::new([SIGHUP, SIGTERM])?;
     let mut terminal = TerminalSession::enter()?;
     let root = open_root(&path)?;
     let mut model = BrowserModel::new(&root, read_only, apparent, fdu_tui::terminal_size()?)?;
@@ -1664,7 +1667,12 @@ pub fn run(
     let mut last_draw = Instant::now() - SCAN_REDRAW_INTERVAL;
     let mut draw_pending = true;
     let mut first_live_listing_directory = None;
+    let mut termination_signal = None;
     loop {
+        if let Some(signal) = signals.pending().next() {
+            termination_signal = Some(signal);
+            break;
+        }
         let text_input = matches!(&model.dialog, DialogState::Filter(_));
         // The scanner feeds events through a small bounded channel, so a long
         // idle wait here would cap how fast scanning can run. Deletion reports
@@ -1676,7 +1684,17 @@ pub fn run(
             INPUT_POLL_INTERVAL
         };
         let waiting = profile.timer();
-        let intent = fdu_tui::poll_intent(input_poll_interval, text_input)?;
+        let intent = match fdu_tui::poll_intent(input_poll_interval, text_input) {
+            Ok(intent) => intent,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                if let Some(signal) = signals.pending().next() {
+                    termination_signal = Some(signal);
+                    break;
+                }
+                return Err(error.into());
+            }
+            Err(error) => return Err(error.into()),
+        };
         if let Some(started) = waiting {
             profile.busy.waiting_for_input += started.elapsed();
         }
@@ -1885,6 +1903,16 @@ pub fn run(
     }
     drop(phase);
     terminal.restore();
+    if termination_signal.is_none() {
+        termination_signal = signals.pending().next();
+    }
+    if let Some(signal) = termination_signal {
+        drop(signals);
+        if let Err(error) = signal_hook::low_level::emulate_default_handler(signal) {
+            eprintln!("fdu: could not restore default handling for signal {signal}: {error}");
+        }
+        return Err(crate::SignalExit(signal).into());
+    }
     profile.report(&model);
     Ok(())
 }

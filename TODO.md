@@ -29,15 +29,6 @@ Next: 11
 - **Fix with:** `lifecycle-concurrency`
 - **Effort:** M
 
-### FDU-5 · P2 · Restore terminal state on termination signals
-
-- **Area:** Operability
-- **Where:** `crates/fdu-tui/src/terminal.rs:42`, `crates/fdu-tui/src/terminal.rs:63`, `crates/fdu-tui/src/terminal.rs:148`, `tests/interactive_pty.rs:463`
-- **Problem:** The terminal enters raw mode and the alternate screen, but restoration runs only through explicit cleanup, `Drop`, or the panic hook. Default `SIGTERM` and `SIGHUP` termination bypass those paths; the checked-in PTY test covers Ctrl-C as an input key rather than an OS signal. A terminated interactive run can leave the invoking terminal in raw mode or the alternate screen.
-- **Recommendation:** Route supported termination signals through orderly UI shutdown and verify terminal restoration in a PTY test.
-- **Fix with:** `lifecycle-concurrency`
-- **Effort:** M
-
 ### FDU-6 · P3 · Report normal terminal restoration failures
 
 - **Area:** Errors

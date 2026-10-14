@@ -471,6 +471,36 @@ fn cancelling_confirmation_leaves_everything_in_place_and_ctrl_c_restores_the_te
     Ok(())
 }
 
+#[test]
+fn sigterm_restores_terminal_state() -> io::Result<()> {
+    let (_temp, root) = TempDir::standard_tree()?;
+    let mut session = Session::start("sigterm", &root, &[], 100, 24);
+    session.wait_ready();
+    session.terminal.signal(15).unwrap();
+    let deadline = session.terminal.deadline(STEP);
+    let status = session.terminal.wait_for_exit(deadline).unwrap();
+    session.terminal.assert_terminal_restored(&session.baseline).unwrap();
+    assert_eq!(status, ExitStatus::Signal(15));
+    let deadline = session.terminal.deadline(STEP);
+    session.terminal.finish(deadline).unwrap();
+    Ok(())
+}
+
+#[test]
+fn sighup_restores_terminal_state() -> io::Result<()> {
+    let (_temp, root) = TempDir::standard_tree()?;
+    let mut session = Session::start("sighup", &root, &[], 100, 24);
+    session.wait_ready();
+    session.terminal.signal(1).unwrap();
+    let deadline = session.terminal.deadline(STEP);
+    let status = session.terminal.wait_for_exit(deadline).unwrap();
+    session.terminal.assert_terminal_restored(&session.baseline).unwrap();
+    assert_eq!(status, ExitStatus::Signal(1));
+    let deadline = session.terminal.deadline(STEP);
+    session.terminal.finish(deadline).unwrap();
+    Ok(())
+}
+
 /// Opens the marked pane, asks to delete, and confirms.
 fn confirm_delete(session: &mut Session, summary_prefix: &str) {
     session.key(Key::Tab);

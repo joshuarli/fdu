@@ -27,6 +27,17 @@ struct Options {
     assume_yes: bool,
 }
 
+#[derive(Debug)]
+struct SignalExit(i32);
+
+impl std::fmt::Display for SignalExit {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "terminated by signal {}", self.0)
+    }
+}
+
+impl Error for SignalExit {}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum RunMode {
     Automatic,
@@ -39,6 +50,9 @@ fn main() {
     #[cfg(feature = "allocation-profile")]
     allocation_profile::report();
     if let Err(error) = result {
+        if let Some(signal) = error.downcast_ref::<SignalExit>() {
+            process::exit(128 + signal.0);
+        }
         eprintln!("fdu: {error}");
         process::exit(1);
     }
