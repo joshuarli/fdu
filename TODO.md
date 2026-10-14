@@ -20,15 +20,6 @@ Next: 11
 - **Fix with:** `os-boundaries`, `root-cause`
 - **Effort:** S
 
-### FDU-3 · P2 · Reject browser deletion when the root scan is incomplete
-
-- **Area:** Data
-- **Where:** `crates/fdu-delete/src/lib.rs:83`, `src/browser.rs:968`, `src/browser.rs:2510`, `AGENTS.md:11`
-- **Problem:** The shared planner checks the selected entry but not root state. The focused existing browser test proves that a complete file can be planned for deletion while its root is `Incomplete` because an unrelated directory scan failed. `--rmrf` has a separate root-completeness check, but browser deletion does not. This violates the invariant that deletion requires a complete root scan.
-- **Recommendation:** Enforce root completeness at the shared planning boundary and update the browser test to expect rejection.
-- **Fix with:** `api-surface-and-module-boundaries`
-- **Effort:** M
-
 ### FDU-4 · P2 · Bound aggregate directory descriptors across Linux scan workers
 
 - **Area:** Concurrency

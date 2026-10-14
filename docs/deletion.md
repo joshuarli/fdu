@@ -8,9 +8,11 @@ and use the descriptor-relative engine in
 
 A plan may contain several entries, but its roots cannot overlap. A directory
 can be selected only when its indexed subtree is complete and has no traversal
-exclusions or errors. The browser currently allows a complete indexed file or
-symlink to be selected even when an unrelated scan error makes the root
-incomplete. `--rmrf` separately rejects an incomplete root scan.
+exclusions or errors. The shared planner also requires the selected root scan
+to be complete, so a complete indexed file or symlink cannot be selected when
+another part of the scan is incomplete. Browser deletion calls the shared
+planner when Ctrl-R is pressed. `--rmrf` checks for an incomplete root scan
+before planning and rejects the same condition.
 
 The engine opens each parent directory relative to an already-open descriptor
 and checks an entry's expected identity and type before unlinking it. New names

@@ -44,7 +44,7 @@ Use `-x PATH` or `--exclude PATH` to omit an exact path beneath the selected
 root, including its subtree. Exclusion paths are relative to the selected root;
 repeat the option to omit more paths. Path components must match exactly.
 In the browser, directories whose contents include excluded paths are marked
-incomplete and cannot be deleted as a whole.
+incomplete. Any incomplete selected-root scan blocks deletion planning.
 
 By default, sizes are filesystem-allocated bytes; `--apparent` uses logical
 file lengths. Use `--read-only` to disable deletion in the browser. The summary

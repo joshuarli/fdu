@@ -2515,7 +2515,7 @@ mod tests {
     }
 
     #[test]
-    fn indexed_directory_errors_keep_the_subtree_incomplete_but_allow_complete_leaves() -> io::Result<()> {
+    fn incomplete_root_rejects_complete_leaf_in_planner_and_browser() -> io::Result<()> {
         let temp = TempDir::new()?;
         let (_, mut model) = make_model(&temp, false)?;
         let root = model.tree.root();
@@ -2534,12 +2534,15 @@ mod tests {
         assert_eq!(model.tree.record(root).unwrap().state, NodeState::Incomplete);
         assert_eq!(model.tree.record(directory).unwrap().state, NodeState::Incomplete);
         assert_eq!(model.tree.record(file).unwrap().state, NodeState::Complete);
-        assert!(create_plan(Arc::clone(&model.tree), &[file]).is_ok());
-        let rejection = match create_plan(Arc::clone(&model.tree), &[directory]) {
-            Ok(_) => panic!("incomplete directories cannot be planned for deletion"),
+        let rejection = match create_plan(Arc::clone(&model.tree), &[file]) {
+            Ok(_) => panic!("an incomplete root scan cannot be planned for deletion"),
             Err(rejection) => rejection,
         };
-        assert!(rejection.rejected[0].reason.contains("scan is incomplete"));
+        assert!(rejection.rejected.iter().any(|item| item.reason == "root scan is not complete"));
+        assert!(matches!(press_delete_on_marks(&mut model, &[file]), Action::None));
+        assert!(model.pending_delete.is_none());
+        assert!(model.message.as_deref().unwrap().contains("root scan is not complete"));
+        assert_eq!(model.marks.len(), 1, "rejected entries remain marked");
         Ok(())
     }
 

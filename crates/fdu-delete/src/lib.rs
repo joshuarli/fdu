@@ -79,7 +79,7 @@ pub enum DeleteEvent {
 /// Plans the permanent removal of `selected` roots, which may live in different
 /// directories. The whole selection is accepted or rejected; an ineligible root
 /// is never dropped to let the others through. Roots must not overlap, because a
-/// directory root already covers every descendant.
+/// directory root already covers every descendant. The scan root must be complete.
 pub fn create_plan(tree: Arc<Tree>, selected: &[NodeId]) -> Result<DeletionPlan, PlanError> {
     let mut rejected = Vec::new();
     if selected.is_empty() {
@@ -108,6 +108,9 @@ pub fn create_plan(tree: Arc<Tree>, selected: &[NodeId]) -> Result<DeletionPlan,
                 }
             }
         }
+    }
+    if !unique.is_empty() && tree.record(tree.root()).expect("root record exists").state != NodeState::Complete {
+        rejected.push(Rejection { node: None, reason: "root scan is not complete".to_owned() });
     }
     if !rejected.is_empty() {
         return Err(PlanError { rejected });
@@ -838,6 +841,7 @@ mod tests {
         let second = tree
             .append(directory, b"second", EntryType::RegularFile, FileIdentity { device: 1, inode: 4 }, 1, 0, 0, NodeStatus::Complete)
             .unwrap();
+        tree.set_state(tree.root(), NodeStatus::Complete);
         (Arc::new(tree), directory, file, second)
     }
 
@@ -857,6 +861,17 @@ mod tests {
         let tree = Arc::new(mutable);
         assert_eq!(ineligible_reason(&tree, directory, EntryType::Directory), Some("subtree contains scan errors"));
         assert!(create_plan(tree, &[directory]).is_err());
+    }
+
+    #[test]
+    fn incomplete_root_scan_rejects_deletion_plan() {
+        let (tree, _, file, _) = test_tree();
+        let mut mutable = Arc::try_unwrap(tree).ok().unwrap();
+        mutable.set_state(mutable.root(), NodeStatus::Incomplete);
+        let rejection = create_plan(Arc::new(mutable), &[file]).err().expect("incomplete root scan is rejected");
+        assert_eq!(rejection.rejected.len(), 1);
+        assert_eq!(rejection.rejected[0].node, None);
+        assert_eq!(rejection.rejected[0].reason, "root scan is not complete");
     }
 
     #[test]
