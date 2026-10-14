@@ -29,15 +29,6 @@ Next: 11
 - **Fix with:** `lifecycle-concurrency`
 - **Effort:** M
 
-### FDU-8 · P3 · Run repository-owned checks on pull requests
-
-- **Area:** Build
-- **Where:** `.github/workflows/release.yml:4`
-- **Problem:** The only checked-in workflow is triggered by `workflow_dispatch`; its build and test jobs do not run automatically for pull requests or pushes. External repository settings may provide checks, but no workflow in this repository verifies proposed changes before merge.
-- **Recommendation:** Add a least-privilege pull-request workflow for the locked builds and focused test suites, separate from release publishing.
-- **Fix with:** none
-- **Effort:** M
-
 ### FDU-9 · P3 · Pin the Linux release builder inputs
 
 - **Area:** Build

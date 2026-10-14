@@ -53,6 +53,21 @@ fn allocated_size(path: &Path) -> io::Result<u64> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "test size overflow"))
 }
 
+fn displayed_size_bytes(size: &str) -> u64 {
+    let (value, unit) = size.split_at(size.len() - 1);
+    let multiplier = match unit {
+        "B" => 1,
+        "K" => 1024,
+        "M" => 1024 * 1024,
+        "G" => 1024 * 1024 * 1024,
+        "T" => 1024_u64.pow(4),
+        "P" => 1024_u64.pow(5),
+        "E" => 1024_u64.pow(6),
+        _ => panic!("unknown size unit {unit:?}"),
+    };
+    (value.parse::<f64>().unwrap() * multiplier as f64).round() as u64
+}
+
 fn reported_size(report: &ScanReport, name: &str) -> u64 {
     report
         .directories
@@ -307,13 +322,17 @@ fn prints_only_immediate_directory_totals_in_both_size_modes() -> io::Result<()>
 
     let allocated = allocated_size(&alpha.join("small"))?
         + allocated_size(&nested.join("nested-small"))?;
-    let expected_allocated = format!("{allocated}\t\"alpha\"\n0\t\"empty\"\n");
     let output = Command::new(env!("CARGO_BIN_EXE_fdu"))
         .arg(root)
         .output()?;
     assert!(output.status.success());
     assert_expected_diagnostics(&output.stderr);
-    assert_eq!(String::from_utf8_lossy(&output.stdout), expected_allocated);
+    let output = String::from_utf8_lossy(&output.stdout);
+    let mut rows = output.lines();
+    let (displayed_size, directory) = rows.next().unwrap().split_once('\t').unwrap();
+    assert_eq!(displayed_size_bytes(displayed_size), allocated);
+    assert_eq!(directory, "\"alpha\"");
+    assert_eq!(rows.collect::<Vec<_>>(), ["0B\t\"empty\""]);
 
     let output = Command::new(env!("CARGO_BIN_EXE_fdu"))
         .arg("--apparent")
@@ -323,7 +342,7 @@ fn prints_only_immediate_directory_totals_in_both_size_modes() -> io::Result<()>
     assert_expected_diagnostics(&output.stderr);
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "8\t\"alpha\"\n0\t\"empty\"\n"
+        "8B\t\"alpha\"\n0B\t\"empty\"\n"
     );
     Ok(())
 }

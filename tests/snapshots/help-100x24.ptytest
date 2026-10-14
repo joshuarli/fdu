@@ -2,7 +2,7 @@ size: columns=100 rows=24
 cursor: row=0 column=0 visible=false
 modes: alternate-screen=true application-cursor=false application-keypad=false bracketed-paste=false
 00│·fd┌Help────────────────────────────────────────────────────────────────────────────────────────┐···
-01│┌·/│Focus:·list·················································································│──┐
+01│┌·.│Focus:·list·················································································│──┐
 02││··│The·marked-items·pane·opens·when·something·is·marked.·Tab·switches··························│··│
 03││··│··panes.·-·stacks·the·panes·instead·of·placing·them·side·by·side.···························│··│
 04││··│··When·the·terminal·is·too·small·for·both,·only·the·focused·one·shows.······················│··│
