@@ -25,8 +25,6 @@ const DELETE_CHANNEL_CAPACITY: usize = 8;
 /// scan that produces many small events is not paced by the tick rate while input and drawing
 /// still get their turn.
 const SCAN_DRAIN_BUDGET: Duration = Duration::from_millis(4);
-/// The clock is read once per this many events.
-const SCAN_DRAIN_CLOCK_INTERVAL: usize = 32;
 const MAX_DELETE_EVENTS_PER_TICK: usize = 32;
 const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(20);
 /// While scanning, an idle tick waits this long for the next scan event rather than for input,
@@ -310,6 +308,8 @@ struct BrowserProfile {
 struct BusyTime {
     entry_batches: Duration,
     entry_batch_count: u64,
+    max_entry_batch_micros: u64,
+    max_scan_drain_micros: u64,
     other_events: Duration,
     draws: Duration,
     draw_count: u64,
@@ -382,7 +382,7 @@ impl BrowserProfile {
         let entries = model.indexed_entries;
         let arena_bytes = model.tree.retained_arena_bytes();
         eprintln!(
-            "fdu-profile elapsed_ms={} initial_scan_settled_ms={:.3} first_render_ms={:.3} first_usable_listing_ms={:.3} first_entries_ms={:.3} entries={} tree_arena_bytes={} tree_arena_bytes_per_entry={:.2} scan_event_queue_high_water={} input_render_samples={} input_render_p50_us={} input_render_max_us={} delete_worker_ms={:.3} delete_apply_ms={:.3} busy_entry_batches_ms={} entry_batches={} busy_other_events_ms={} busy_draw_ms={} draws={} waiting_for_input_ms={}",
+            "fdu-profile elapsed_ms={} initial_scan_settled_ms={:.3} first_render_ms={:.3} first_usable_listing_ms={:.3} first_entries_ms={:.3} entries={} tree_arena_bytes={} tree_arena_bytes_per_entry={:.2} scan_event_queue_high_water={} input_render_samples={} input_render_p50_us={} input_render_max_us={} delete_worker_ms={:.3} delete_apply_ms={:.3} busy_entry_batches_ms={} entry_batches={} max_entry_batch_us={} max_scan_drain_us={} busy_other_events_ms={} busy_draw_ms={} draws={} waiting_for_input_ms={}",
             self.started.elapsed().as_millis(),
             duration_ms(self.initial_scan_settled),
             duration_ms(self.first_render),
@@ -399,6 +399,8 @@ impl BrowserProfile {
             duration_ms(self.delete_apply),
             self.busy.entry_batches.as_millis(),
             self.busy.entry_batch_count,
+            self.busy.max_entry_batch_micros,
+            self.busy.max_scan_drain_micros,
             self.busy.other_events.as_millis(),
             self.busy.draws.as_millis(),
             self.busy.draw_count,
@@ -1250,11 +1252,8 @@ impl BrowserModel {
             match mode {
                 SortMode::Name => tree.name(*left).unwrap_or_default().cmp(tree.name(*right).unwrap_or_default()),
                 SortMode::Size => {
-                    let left_complete = left_record.state == NodeState::Complete;
-                    let right_complete = right_record.state == NodeState::Complete;
-                    right_complete
-                        .cmp(&left_complete)
-                        .then_with(|| size_for(right_record, size_mode).cmp(&size_for(left_record, size_mode)))
+                    size_for(right_record, size_mode)
+                        .cmp(&size_for(left_record, size_mode))
                         .then_with(|| tree.name(*left).unwrap_or_default().cmp(tree.name(*right).unwrap_or_default()))
                 }
             }
@@ -1724,15 +1723,13 @@ pub fn run(
         if let AppPhase::Scanning(worker) = &mut phase
             && let Some(receiver) = worker.receiver.as_ref() {
             let drain_started = Instant::now();
-            let mut applied = 0usize;
+            let mut first_event = true;
             loop {
-                if applied % SCAN_DRAIN_CLOCK_INTERVAL == SCAN_DRAIN_CLOCK_INTERVAL - 1
-                    && drain_started.elapsed() >= SCAN_DRAIN_BUDGET
-                {
+                if drain_started.elapsed() >= SCAN_DRAIN_BUDGET {
                     break;
                 }
                 // Only an idle tick waits; one that already has work goes straight on to draw.
-                let received = if applied == 0 {
+                let received = if first_event {
                     receiver.recv_timeout(SCAN_EVENT_WAIT).map_err(|error| match error {
                         RecvTimeoutError::Timeout => TryRecvError::Empty,
                         RecvTimeoutError::Disconnected => TryRecvError::Disconnected,
@@ -1740,7 +1737,7 @@ pub fn run(
                 } else {
                     receiver.try_recv()
                 };
-                applied += 1;
+                first_event = false;
                 match received {
                     Ok(event) => {
                         worker.queue_metrics.event_received();
@@ -1756,8 +1753,13 @@ pub fn run(
                                 worker.return_batch(batch);
                                 model_changed = true;
                                 if let Some(started) = applying {
-                                    profile.busy.entry_batches += started.elapsed();
+                                    let elapsed = started.elapsed();
+                                    profile.busy.entry_batches += elapsed;
                                     profile.busy.entry_batch_count += 1;
+                                    profile.busy.max_entry_batch_micros = profile
+                                        .busy
+                                        .max_entry_batch_micros
+                                        .max(elapsed.as_micros().min(u128::from(u64::MAX)) as u64);
                                 }
                                 // Draw the first listing before applying anything further, so a scan that
                                 // finishes within this tick still settles after the listing is on screen.
@@ -1780,6 +1782,12 @@ pub fn run(
                         break;
                     }
                 }
+            }
+            if profile.enabled {
+                profile.busy.max_scan_drain_micros = profile
+                    .busy
+                    .max_scan_drain_micros
+                    .max(drain_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64);
             }
         }
         if scan_finished {
@@ -1983,6 +1991,22 @@ mod tests {
 
         assert!(matches!(model.cursor, Cursor::Entry(id) if id == largest));
         assert_eq!(model.cursor_index(), Some(0));
+        Ok(())
+    }
+
+    #[test]
+    fn size_sort_orders_incomplete_directory_by_its_known_total() -> io::Result<()> {
+        let temp = TempDir::new()?;
+        let (_, mut model) = make_model(&temp, false)?;
+        let root = model.tree.root();
+        let incomplete_directory = append(&mut model, root, b"incomplete", EntryType::Directory, 0, 2);
+        append(&mut model, incomplete_directory, b"known.bin", EntryType::RegularFile, 1000, 3);
+        model.set_state(incomplete_directory, NodeStatus::Incomplete);
+        let complete_file = append(&mut model, root, b"complete.bin", EntryType::RegularFile, 100, 4);
+
+        ready(&mut model);
+
+        assert_eq!(model.listing, [incomplete_directory, complete_file]);
         Ok(())
     }
 

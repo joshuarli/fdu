@@ -16,22 +16,19 @@ mod attributes;
 
 const BULK_RECORD_BUFFER_BYTES: usize = 64 * 1024;
 const INDEXED_SCAN_WORKER_LIMIT: usize = 128;
-const INDEXED_SCAN_WORKER_HEADROOM: usize = 118;
+const STORAGE_WAIT_WORKER_HEADROOM: usize = 118;
+const BASE_WORKER_CORE_RESERVE: usize = 2;
 const INDEXED_TASKS_PER_WORKER: usize = 8;
 
 pub(super) type DirectoryBuffer = attributes::AlignedBuffer<BULK_RECORD_BUFFER_BYTES>;
 
-// Directory reads can block in the filesystem, so bounded worker headroom keeps other
-// independent subtrees moving while a worker waits for a bulk read.
 pub(super) fn indexed_scan_limits() -> IndexedScanLimits {
-    let workers = thread::available_parallelism()
-        .map(usize::from)
-        .unwrap_or(1)
-        .saturating_add(INDEXED_SCAN_WORKER_HEADROOM)
-        .min(INDEXED_SCAN_WORKER_LIMIT);
+    let cores = thread::available_parallelism().map(usize::from).unwrap_or(1);
+    let workers = cores.saturating_add(STORAGE_WAIT_WORKER_HEADROOM).min(INDEXED_SCAN_WORKER_LIMIT);
+    let base_workers = cores.saturating_sub(BASE_WORKER_CORE_RESERVE).max(1);
     IndexedScanLimits {
         workers,
-        base_workers: workers,
+        base_workers: base_workers.min(workers),
         queued_directories: workers.saturating_mul(INDEXED_TASKS_PER_WORKER),
     }
 }

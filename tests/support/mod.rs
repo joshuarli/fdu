@@ -66,7 +66,9 @@ impl Session {
     }
 
     pub fn start_with_env(label: &str, root: &Path, args: &[&str], columns: u16, rows: u16, env: &[(&str, &str)]) -> Self {
-        let mut command = CommandSpec::new(env!("CARGO_BIN_EXE_fdu")).arg("--interactive").arg(root).args(args);
+        let binary = std::env::var_os("FDU_BIN")
+            .map_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_fdu")), PathBuf::from);
+        let mut command = CommandSpec::new(binary).arg("--interactive").arg(root).args(args);
         for (key, value) in env {
             command = command.env(key, value);
         }
@@ -229,6 +231,40 @@ pub fn layout_fixture() -> &'static Path {
         fs::write(&marker_path, LAYOUT_FIXTURE_DESCRIPTION).unwrap();
     });
     Path::new(LAYOUT_FIXTURE)
+}
+
+pub fn navigation_fixture() -> &'static Path {
+    static BUILT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    BUILT.get_or_init(|| {
+        const DIRECTORY_COUNT: usize = 30_000;
+        const FILES_PER_DIRECTORY: usize = 5;
+        let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join(".work/tmp");
+        fs::create_dir_all(&scratch).expect("create the navigation fixture scratch directory");
+        let fixture = scratch.join("fdu-directory-navigation-root");
+        let bulk = fixture.join("bulk");
+        if bulk.join(format!("directory-{:06}", DIRECTORY_COUNT - 1)).join("entry-4").is_file() {
+            return;
+        }
+        if fixture.exists() {
+            fs::remove_dir_all(&fixture).expect("remove an incomplete navigation fixture");
+        }
+        let partial = scratch.join("fdu-directory-navigation-root.partial");
+        if partial.exists() {
+            fs::remove_dir_all(&partial).expect("remove a partial navigation fixture");
+        }
+        let partial_bulk = partial.join("bulk");
+        fs::create_dir_all(&partial_bulk).expect("create the navigation fixture root");
+        for directory_index in 0..DIRECTORY_COUNT {
+            let directory = partial_bulk.join(format!("directory-{directory_index:06}"));
+            fs::create_dir(&directory).expect("create a navigation fixture directory");
+            for file_index in 0..FILES_PER_DIRECTORY {
+                fs::File::create(directory.join(format!("entry-{file_index}")))
+                    .expect("create a navigation fixture entry");
+            }
+        }
+        fs::rename(&partial, &fixture).expect("publish the complete navigation fixture");
+    });
+    Path::new(".work/tmp/fdu-directory-navigation-root")
 }
 
 /// A private copy of the layout fixture inside `temp`, made with copy-on-write

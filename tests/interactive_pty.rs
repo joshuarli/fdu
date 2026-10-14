@@ -12,6 +12,7 @@ use ptytest::{ExitStatus, Key, ScreenSnapshot};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use support::{list_is_dimmed, row_containing, ScreenText, Session, TempDir, STEP};
 
 #[test]
@@ -646,6 +647,166 @@ fn first_listing_is_drawn_before_the_nested_scan_settles() -> io::Result<()> {
         "the root listing should be drawn before its nested scan completes; first listing {first_listing_ms} ms, settled {settled_ms} ms"
     );
     Ok(())
+}
+
+#[test]
+#[ignore = "release PTY navigation latency benchmark; run by name with --ignored --exact"]
+fn navigation_latency_during_indexed_scan() -> io::Result<()> {
+    const ACTION_PAIRS: usize = 16;
+    const INPUT_INTERVAL: Duration = Duration::from_millis(10);
+    const SCAN_STEP: Duration = Duration::from_secs(120);
+    let profile_enabled = std::env::var_os("FDU_PROFILE").is_some();
+    let mut child_env = Vec::new();
+    if profile_enabled {
+        child_env.push(("FDU_PROFILE", "1"));
+    }
+
+    let scan_started = Instant::now();
+    let mut session = Session::start_with_env(
+        "navigation-scan-latency",
+        support::navigation_fixture(),
+        &["--read-only"],
+        100,
+        24,
+        &child_env,
+    );
+    session.step = SCAN_STEP;
+    let initial = session.wait("first live root listing", |screen| {
+        screen.lines().get(1).is_some_and(|line| line.contains("fdu-directory-navigation-root ("))
+            && screen.lines().last().is_some_and(|line| line.contains("entries…"))
+            && selected_row_text(screen).is_some()
+    });
+    let indexed_entries_at_start = indexed_entry_count(&initial);
+    let mut max_indexed_entries = indexed_entries_at_start;
+    assert!(
+        selected_row_text(&initial).is_some_and(|row| row.contains("bulk/")),
+        "selected row: {:?}; screen: {:?}",
+        selected_row_text(&initial),
+        initial.lines()
+    );
+    session.key(Key::Enter);
+    let deadline = session.terminal.deadline(session.step);
+    let bulk = session
+        .terminal
+        .wait_for_screen(deadline, "enter the large directory while scanning", |screen| {
+            screen.lines().get(1).is_some_and(|line| {
+                line.contains("fdu-directory-navigation-root/bulk (")
+                    && !line.contains("fdu-directory-navigation-root/bulk/")
+            }) && screen.lines().last().is_some_and(|line| line.contains("entries…"))
+                && selected_row_text(screen).is_some()
+        })
+        .unwrap();
+    max_indexed_entries = max_indexed_entries.max(indexed_entry_count(&bulk));
+    assert!(selected_row_text(&bulk).is_some_and(|row| row.contains("directory-")));
+    session.key(Key::Enter);
+    let deadline = session.terminal.deadline(session.step);
+    let directory_screen = session
+        .terminal
+        .wait_for_screen(deadline, "enter a nested directory while scanning", |screen| {
+            screen.lines().get(1).is_some_and(|line| line.contains("fdu-directory-navigation-root/bulk/directory-"))
+                && screen.lines().last().is_some_and(|line| line.contains("entries…"))
+                && selected_row_text(screen).is_some()
+        })
+        .unwrap();
+    max_indexed_entries = max_indexed_entries.max(indexed_entry_count(&directory_screen));
+    assert!(max_indexed_entries > 0);
+    session.key(Key::Left);
+    let deadline = session.terminal.deadline(session.step);
+    let parent_screen = session
+        .terminal
+        .wait_for_screen(deadline, "return to the parent directory while scanning", |screen| {
+            screen.lines().get(1).is_some_and(|line| {
+                line.contains("fdu-directory-navigation-root/bulk (")
+                    && !line.contains("fdu-directory-navigation-root/bulk/directory-")
+            }) && screen.lines().last().is_some_and(|line| line.contains("entries…"))
+                && selected_row_text(screen).is_some()
+        })
+        .unwrap();
+    max_indexed_entries = max_indexed_entries.max(indexed_entry_count(&parent_screen));
+
+    let mut samples = Vec::with_capacity(ACTION_PAIRS * 2);
+    for _ in 0..ACTION_PAIRS {
+        std::thread::sleep(INPUT_INTERVAL);
+        let started = Instant::now();
+        session.key(Key::Enter);
+        let deadline = session.terminal.deadline(session.step);
+        let screen = session
+            .terminal
+            .wait_for_screen(deadline, "enter a nested directory while scanning", |screen| {
+                screen.lines().get(1).is_some_and(|line| line.contains("fdu-directory-navigation-root/bulk/directory-"))
+            })
+            .unwrap();
+        max_indexed_entries = max_indexed_entries.max(indexed_entry_count(&screen));
+        samples.push(started.elapsed().as_micros() as u64);
+        assert!(screen.lines().last().is_some_and(|line| line.contains("entries…")));
+
+        std::thread::sleep(INPUT_INTERVAL);
+        let started = Instant::now();
+        session.key(Key::Left);
+        let deadline = session.terminal.deadline(session.step);
+        let screen = session
+            .terminal
+            .wait_for_screen(deadline, "return to root while scanning", |screen| {
+                screen.lines().get(1).is_some_and(|line| {
+                    line.contains("fdu-directory-navigation-root/bulk (")
+                        && !line.contains("fdu-directory-navigation-root/bulk/directory-")
+                })
+            })
+            .unwrap();
+        max_indexed_entries = max_indexed_entries.max(indexed_entry_count(&screen));
+        samples.push(started.elapsed().as_micros() as u64);
+        assert!(screen.lines().last().is_some_and(|line| line.contains("entries…")));
+    }
+    assert!(
+        max_indexed_entries > indexed_entries_at_start,
+        "indexed entry count did not progress during navigation: {indexed_entries_at_start} -> {max_indexed_entries}"
+    );
+
+    samples.sort_unstable();
+    let p50 = samples[samples.len() / 2];
+    let p95 = samples[samples.len() * 95 / 100];
+    let min = samples[0];
+    let max = samples[samples.len() - 1];
+    let ready_screen = session.wait_ready();
+    let scan_ready_ms = scan_started.elapsed().as_secs_f64() * 1000.0;
+    let indexed_entries = indexed_entry_count(&ready_screen);
+    assert_eq!(indexed_entries, 180_001);
+    let output = session.quit_with_output();
+    if profile_enabled {
+        let profile_start = output.find("fdu-profile ").expect("profile output is enabled");
+        let profile = output[profile_start..].lines().next().expect("profile output has a line");
+        let entries = profile
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix("entries="))
+            .expect("profile reports indexed entries")
+            .parse::<usize>()
+            .expect("indexed entry count is an integer");
+        assert_eq!(entries, 180_001);
+        eprintln!("{profile}");
+    }
+    eprintln!(
+        "navigation latency during scan: fixture_entries={indexed_entries} samples={} p50_us={p50} p95_us={p95} range_us={min}..{max} scan_ready_ms={scan_ready_ms:.3}",
+        samples.len(),
+    );
+    Ok(())
+}
+
+fn selected_row_text(screen: &ScreenSnapshot) -> Option<String> {
+    (2..screen.row_count().saturating_sub(2)).find_map(|row| {
+        let selected = (0..usize::from(screen.size().columns())).any(|column| {
+            screen.cell(row, column).is_some_and(|cell| cell.attributes().inverse)
+        });
+        selected.then(|| screen.row(row).unwrap_or_default())
+    })
+}
+
+fn indexed_entry_count(screen: &ScreenSnapshot) -> usize {
+    screen
+        .lines()
+        .last()
+        .and_then(|line| line.split_once(" entries").map(|(count, _)| count.trim()))
+        .and_then(|count| count.parse().ok())
+        .unwrap_or_default()
 }
 
 #[test]
