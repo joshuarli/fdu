@@ -25,6 +25,11 @@ Summary output orders immediate child directories by descending size. On Linux
 the summary scanner uses four Rayon workers by default; `RAYON_NUM_THREADS`
 sets another count. The macOS summary scanner is sequential.
 
+An immediate child that is itself a mount boundary is labeled separately on
+macOS. On Linux it currently appears as a `0B` directory row; the warning still
+reports excluded boundaries. Contents below mount boundaries are omitted on
+both platforms.
+
 ## Indexed scan
 
 The shared indexed scanner uses worker-local directory queues and work stealing.

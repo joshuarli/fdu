@@ -8,18 +8,20 @@ and use the descriptor-relative engine in
 
 A plan may contain several entries, but its roots cannot overlap. A directory
 can be selected only when its indexed subtree is complete and has no traversal
-exclusions or errors. Individual indexed files and symlinks remain eligible
-when an unrelated entry has an error.
+exclusions or errors. The browser currently allows a complete indexed file or
+symlink to be selected even when an unrelated scan error makes the root
+incomplete. `--rmrf` separately rejects an incomplete root scan.
 
 The engine opens each parent directory relative to an already-open descriptor
-and checks an entry's expected identity and type before unlinking it. New
-children that were not indexed are not added to the plan. Each planned entry
-gets one outcome: deleted, already absent, changed, failed, or not attempted.
-In the browser, Esc stops scheduling later removals; completed removals cannot
-be restored.
+and checks an entry's expected identity and type before unlinking it. New names
+that were not indexed are not added to the plan. Each planned entry gets one
+outcome: deleted, already absent, changed, failed, or not attempted. In the
+browser, Esc stops scheduling later removals; completed removals cannot be
+restored.
 
-Validation followed by `unlinkat` cannot atomically compare and remove an
-inode. Concurrent external mutation and inode reuse remain limitations.
+The identity check and `unlinkat` are separate operations. If another process
+replaces a planned name between them, `unlinkat` can remove the replacement and
+report the indexed entry as deleted. This can happen without inode reuse.
 Reported byte totals describe metadata and do not promise how much storage the
 filesystem will release.
 

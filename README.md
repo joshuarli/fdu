@@ -50,9 +50,10 @@ By default, sizes are filesystem-allocated bytes; `--apparent` uses logical
 file lengths. Use `--read-only` to disable deletion in the browser. The summary
 prints each included immediate child directory in descending size order as a
 compact size (such as `5G` or `2.4M`), a tab, and a quoted name. Sizes use
-1024-based units. Root-level files are not listed; mount boundaries are labeled
-separately. Warnings report skipped entries or boundaries. Hidden names are
-included, and fdu does not read `.gitignore`.
+1024-based units. Root-level files are not listed. An immediate child that is a
+mount boundary is labeled separately on macOS; on Linux it currently appears as
+a `0B` directory row, while a warning reports excluded boundaries. Hidden names
+are included, and fdu does not read `.gitignore`.
 
 The supplied root path may resolve through symlinks; the browser shows
 discovered symlinks beneath it as entries and never follows them.
@@ -90,8 +91,9 @@ is unavailable in summary-only builds.
   not a terminal.
 - An incomplete root scan, incomplete selected directory, or nested mount
   rejects the deletion plan before any entry is removed.
-- Only entries found by the scan are attempted. A child created after scanning
-  is left in place; concurrent filesystem changes can affect the result.
+- Only names found by the scan are planned. A child created under a different
+  name after scanning is left in place; if a scanned name is replaced between
+  the identity check and removal, the replacement can be removed.
 
 ### Environment
 
