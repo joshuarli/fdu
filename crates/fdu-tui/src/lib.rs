@@ -184,8 +184,12 @@ impl TerminalSession {
         Ok(())
     }
 
-    pub fn restore(&mut self) {
-        self.terminal.restore();
+    /// Restores terminal modes and screen output, returning the first restoration error.
+    ///
+    /// Each restoration operation is attempted even after an earlier one fails. Later calls
+    /// succeed after the first restoration attempt.
+    pub fn restore(&mut self) -> io::Result<()> {
+        self.terminal.restore()
     }
 }
 

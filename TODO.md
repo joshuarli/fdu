@@ -29,15 +29,6 @@ Next: 11
 - **Fix with:** `lifecycle-concurrency`
 - **Effort:** M
 
-### FDU-6 · P3 · Report normal terminal restoration failures
-
-- **Area:** Errors
-- **Where:** `crates/fdu-tui/src/terminal.rs:63`, `crates/fdu-tui/src/terminal.rs:154`, `src/browser.rs:1879`
-- **Problem:** Explicit browser shutdown calls a restoration method that discards `tcsetattr`, stdout write, and flush errors, then returns success. A user can lose the cleanup failure and receive a successful exit status even though the terminal was not restored.
-- **Recommendation:** Return restoration errors from explicit shutdown while keeping `Drop` and panic cleanup best-effort; preserve an earlier operation error if cleanup also fails.
-- **Fix with:** `error-model`
-- **Effort:** M
-
 ### FDU-7 · P3 · Match help output to summary-only builds
 
 - **Area:** Operability

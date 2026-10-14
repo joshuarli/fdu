@@ -175,6 +175,36 @@ impl Drop for DeleteRun {
     }
 }
 
+#[derive(Debug)]
+struct BrowserShutdownError {
+    operation: Box<dyn std::error::Error>,
+    restoration: io::Error,
+}
+
+impl std::fmt::Display for BrowserShutdownError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}; terminal restoration also failed: {}", self.operation, self.restoration)
+    }
+}
+
+impl std::error::Error for BrowserShutdownError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.operation.as_ref())
+    }
+}
+
+fn combine_shutdown_result<T>(
+    operation: Result<T, Box<dyn std::error::Error>>,
+    restoration: io::Result<()>,
+) -> Result<T, Box<dyn std::error::Error>> {
+    match (operation, restoration) {
+        (Err(operation), Ok(())) => Err(operation),
+        (Err(operation), Err(restoration)) => Err(BrowserShutdownError { operation, restoration }.into()),
+        (Ok(_), Err(restoration)) => Err(restoration.into()),
+        (Ok(value), Ok(())) => Ok(value),
+    }
+}
+
 enum DialogState {
     None,
     Help,
@@ -1658,6 +1688,51 @@ pub fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut signals = Signals::new([SIGHUP, SIGTERM])?;
     let mut terminal = TerminalSession::enter()?;
+    match run_session(path, read_only, apparent, exclusions, &mut terminal, &mut signals) {
+        Err(operation) => {
+            let result = combine_shutdown_result(Err(operation), terminal.restore());
+            if let Some(signal) = signals.pending().next() {
+                if let Err(error) = &result {
+                    eprintln!("fdu: {error}");
+                }
+                drop(signals);
+                if let Err(error) = signal_hook::low_level::emulate_default_handler(signal) {
+                    eprintln!("fdu: could not restore default handling for signal {signal}: {error}");
+                }
+                return Err(crate::SignalExit(signal).into());
+            }
+            result
+        }
+        Ok((mut termination_signal, mut profile, model)) => {
+            let restoration = terminal.restore();
+            if termination_signal.is_none() {
+                termination_signal = signals.pending().next();
+            }
+            if let Some(signal) = termination_signal {
+                if let Err(error) = restoration {
+                    eprintln!("fdu: could not restore terminal: {error}");
+                }
+                drop(signals);
+                if let Err(error) = signal_hook::low_level::emulate_default_handler(signal) {
+                    eprintln!("fdu: could not restore default handling for signal {signal}: {error}");
+                }
+                return Err(crate::SignalExit(signal).into());
+            }
+            combine_shutdown_result(Ok(()), restoration)?;
+            profile.report(&model);
+            Ok(())
+        }
+    }
+}
+
+fn run_session(
+    path: std::path::PathBuf,
+    read_only: bool,
+    apparent: bool,
+    exclusions: ScanExclusions,
+    terminal: &mut TerminalSession,
+    signals: &mut Signals,
+) -> Result<(Option<i32>, BrowserProfile, BrowserModel), Box<dyn std::error::Error>> {
     let root = open_root(&path)?;
     let mut model = BrowserModel::new(&root, read_only, apparent, fdu_tui::terminal_size()?)?;
     let profiling_enabled = std::env::var_os("FDU_PROFILE").is_some();
@@ -1902,24 +1977,12 @@ pub fn run(
         }
     }
     drop(phase);
-    terminal.restore();
-    if termination_signal.is_none() {
-        termination_signal = signals.pending().next();
-    }
-    if let Some(signal) = termination_signal {
-        drop(signals);
-        if let Err(error) = signal_hook::low_level::emulate_default_handler(signal) {
-            eprintln!("fdu: could not restore default handling for signal {signal}: {error}");
-        }
-        return Err(crate::SignalExit(signal).into());
-    }
-    profile.report(&model);
-    Ok(())
+    Ok((termination_signal, profile, model))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{create_plan, Action, BrowserModel, DialogState};
+    use super::{combine_shutdown_result, create_plan, Action, BrowserModel, DialogState};
     use fdu_core::{DirectoryToken, EntryType, FileIdentity, NodeId, NodeState, NodeStatus, ScanEvent};
     use fdu_delete::{DeleteOutcome, OutcomeKind};
     use fdu_scan::{open_root, RootAnchor};
@@ -1931,6 +1994,18 @@ mod tests {
     use std::sync::Arc;
 
     static TEMP_ID: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn shutdown_keeps_operation_error_as_source_and_reports_restore_error() {
+        let operation = io::Error::new(io::ErrorKind::InvalidData, "operation failed");
+        let restoration = io::Error::new(io::ErrorKind::PermissionDenied, "restore failed");
+        let error = combine_shutdown_result::<()>(Err(Box::new(operation)), Err(restoration)).unwrap_err();
+
+        assert!(error.to_string().contains("operation failed"));
+        assert!(error.to_string().contains("restore failed"));
+        let source = std::error::Error::source(error.as_ref()).unwrap();
+        assert_eq!(source.downcast_ref::<io::Error>().unwrap().kind(), io::ErrorKind::InvalidData);
+    }
 
     struct TempDir(PathBuf);
 

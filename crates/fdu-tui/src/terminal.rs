@@ -2,7 +2,7 @@ use crate::{Intent, TerminalSize};
 use rustix::event::{self, FdSetElement, Timespec};
 use rustix::termios::{self, OptionalActions, Termios};
 use std::io::{self, Write};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsFd, AsRawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -45,8 +45,7 @@ impl Terminal {
         drop(original);
         let mut terminal = Self { active: true };
         if let Err(error) = terminal.write(ENTER_SCREEN) {
-            terminal.restore();
-            return Err(error);
+            return Err(combine_terminal_restore_error(error, terminal.restore()));
         }
         Ok(terminal)
     }
@@ -60,17 +59,19 @@ impl Terminal {
         stdout.flush()
     }
 
-    pub(crate) fn restore(&mut self) {
+    pub(crate) fn restore(&mut self) -> io::Result<()> {
         if self.active {
             self.active = false;
-            restore_terminal();
+            restore_terminal()
+        } else {
+            Ok(())
         }
     }
 }
 
 impl Drop for Terminal {
     fn drop(&mut self) {
-        self.restore();
+        let _ = self.restore();
     }
 }
 
@@ -145,24 +146,67 @@ fn input_ready(stdin: &io::Stdin, timeout: Duration) -> io::Result<bool> {
     Ok(ready != 0)
 }
 
-fn restore_terminal() {
+fn restore_terminal() -> io::Result<()> {
     if !TERMINAL_ACTIVE.swap(false, Ordering::SeqCst) {
-        return;
+        return Ok(());
     }
     let saved = ORIGINAL_TERMIOS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
-    if let Some(saved) = saved {
-        let _ = termios::tcsetattr(io::stdin(), OptionalActions::Now, &saved);
-    }
+    let stdin = io::stdin();
     let mut stdout = io::stdout().lock();
-    let _ = stdout.write_all(LEAVE_SCREEN);
-    let _ = stdout.flush();
+    restore_terminal_with(saved, &stdin, &mut stdout)
+}
+
+fn restore_terminal_with(
+    saved: Option<Termios>,
+    stdin: &impl AsFd,
+    stdout: &mut impl Write,
+) -> io::Result<()> {
+    let mut first_error = saved
+        .as_ref()
+        .and_then(|saved| termios::tcsetattr(stdin, OptionalActions::Now, saved).err())
+        .map(Into::into);
+    if let Err(error) = stdout.write_all(LEAVE_SCREEN) {
+        first_error.get_or_insert(error);
+    }
+    if let Err(error) = stdout.flush() {
+        first_error.get_or_insert(error);
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
+#[derive(Debug)]
+struct TerminalEnterError {
+    operation: io::Error,
+    restoration: io::Error,
+}
+
+impl std::fmt::Display for TerminalEnterError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}; terminal restoration also failed: {}", self.operation, self.restoration)
+    }
+}
+
+impl std::error::Error for TerminalEnterError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.operation)
+    }
+}
+
+fn combine_terminal_restore_error(operation: io::Error, restoration: io::Result<()>) -> io::Error {
+    match restoration {
+        Ok(()) => operation,
+        Err(restoration) => io::Error::new(
+            operation.kind(),
+            TerminalEnterError { operation, restoration },
+        ),
+    }
 }
 
 fn install_panic_restore() {
     PANIC_RESTORE_INSTALLED.get_or_init(|| {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |panic| {
-            restore_terminal();
+            let _ = restore_terminal();
             previous(panic);
         }));
     });
@@ -379,6 +423,44 @@ fn map_key(key: Key, text_input: bool) -> Option<Intent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct FailingWriter {
+        flush_attempted: bool,
+    }
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "write failed"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.flush_attempted = true;
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "flush failed"))
+        }
+    }
+
+    #[test]
+    fn restore_reports_output_failure_and_attempts_flush() {
+        let stdin = io::stdin();
+        let mut output = FailingWriter { flush_attempted: false };
+        let error = restore_terminal_with(None, &stdin, &mut output).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+        assert!(output.flush_attempted);
+    }
+
+    #[test]
+    fn terminal_entry_keeps_write_error_and_includes_restore_failure() {
+        let operation = io::Error::new(io::ErrorKind::BrokenPipe, "screen write failed");
+        let restoration = io::Error::new(io::ErrorKind::PermissionDenied, "terminal restore failed");
+        let error = combine_terminal_restore_error(operation, Err(restoration));
+
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+        assert!(error.to_string().contains("screen write failed"));
+        assert!(error.to_string().contains("terminal restore failed"));
+        let source = std::error::Error::source(error.get_ref().unwrap()).unwrap();
+        assert_eq!(source.downcast_ref::<io::Error>().unwrap().kind(), io::ErrorKind::BrokenPipe);
+    }
 
     fn key(bytes: &[u8]) -> Key {
         let mut decoder = Decoder::default();
