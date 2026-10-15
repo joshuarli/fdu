@@ -34,6 +34,7 @@ root in place. See the [README](../README.md#empty-a-directory) for the
 user-facing root safeguards and confirmation. An incomplete root scan or an
 ineligible selected entry rejects the whole operation before deletion starts.
 
-The engine currently uses a fixed 16-thread Rayon pool. Directory removal often
-waits on filesystem work, so deletion can benefit from more workers than the
-number of CPU cores.
+The production engine uses a fixed 16-thread Rayon pool for independent
+selected directories. It walks each selected directory depth first and reopens
+parents as it ascends, so path depth does not increase the number of open
+descriptors.

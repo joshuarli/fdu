@@ -255,7 +255,7 @@ mod posix {
     use rustix::io::Errno;
     use std::collections::BTreeMap;
     use std::os::fd::{AsFd, BorrowedFd};
-    use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize};
+    use std::sync::atomic::{AtomicU64, AtomicUsize};
     use std::sync::Mutex;
     use std::time::Instant;
 
@@ -292,31 +292,25 @@ mod posix {
         mount_id: u64,
     }
 
-    /// An opened directory under the plan, or the directory a selected entry lives in. A child
-    /// holds its parent's context, so a directory's descriptor lives until everything below it has
-    /// finished, and the directory can be removed from the parent's descriptor afterwards.
     struct DirContext {
         fd: OwnedFd,
         node: NodeId,
-        /// The context of the directory above, if this directory is itself being removed. The
-        /// context of a selected entry's parent has none: the parent stays.
-        parent: Option<Arc<DirContext>>,
-        /// Whether this directory is being removed, and so has holds counted for it.
-        removing: bool,
     }
 
-    /// State shared by every thread of one deletion.
+    struct DirectoryWalkFrame {
+        node: NodeId,
+        parent: NodeId,
+        children: Vec<NodeId>,
+        next_child: usize,
+    }
+
     struct Deletion<'a> {
         tree: &'a Tree,
         root_mount: MountIdentity,
         cancelled: &'a AtomicBool,
         sender: &'a SyncSender<DeleteEvent>,
         after_operation: &'a (dyn Fn(usize) + Sync),
-        /// Per node, whether its outcome is decided. Anything left undecided at the end was not
-        /// attempted.
         recorded: Vec<AtomicBool>,
-        /// Per directory being removed: its own hold plus one for each subdirectory not yet removed.
-        holds: Vec<AtomicU32>,
         outcomes: Mutex<Vec<DeleteOutcome>>,
         completed: AtomicUsize,
         total: usize,
@@ -363,7 +357,6 @@ mod posix {
             sender: &sender,
             after_operation: &after_operation,
             recorded: (0..tree.len()).map(|_| AtomicBool::new(false)).collect(),
-            holds: (0..tree.len()).map(|_| AtomicU32::new(0)).collect(),
             outcomes: Mutex::new(Vec::with_capacity(OUTCOME_BATCH_SIZE)),
             completed: AtomicUsize::new(0),
             total: plan.targets.len(),
@@ -383,7 +376,7 @@ mod posix {
             groups.entry(parent.index()).or_default().push(*selected);
         }
         let root_context = match root.try_clone() {
-            Ok(fd) => Arc::new(DirContext { fd, node: tree.root(), parent: None, removing: false }),
+            Ok(fd) => Arc::new(DirContext { fd, node: tree.root() }),
             Err(error) => {
                 send_failure(&sender, &error.to_string());
                 return;
@@ -436,9 +429,10 @@ mod posix {
             self.cancelled.load(Ordering::Relaxed) || self.receiver_gone.load(Ordering::Relaxed)
         }
 
-        /// Decides the outcome of `node`.
         fn record(&self, node: NodeId, kind: OutcomeKind, message: Option<String>) {
-            self.recorded[node.index()].store(true, Ordering::Relaxed);
+            if self.recorded[node.index()].swap(true, Ordering::Relaxed) {
+                return;
+            }
             let completed = self.completed.fetch_add(1, Ordering::Relaxed) + 1;
             (self.after_operation)(completed);
             let batch = {
@@ -493,8 +487,6 @@ mod posix {
         }
     }
 
-    /// Removes the selected entries that live in the directory `parent`, opened below the scan
-    /// root through directories checked against the index.
     fn delete_group<'scope>(
         deletion: &'scope Deletion<'_>,
         root_context: &Arc<DirContext>,
@@ -521,18 +513,14 @@ mod posix {
                 .record(node)
                 .is_some_and(|record| record.entry_type == EntryType::Directory);
             if is_directory {
-                deletion.holds[node.index()].store(1, Ordering::Relaxed);
                 let context = Arc::clone(&context);
-                scope.spawn(move |scope| delete_directory(deletion, context, node, scope));
+                scope.spawn(move |_| delete_directory(deletion, context, node));
             } else {
                 delete_file(deletion, context.fd.as_fd(), node);
             }
         }
     }
 
-    /// The context of `node`, a directory above selected entries: each directory from just below
-    /// the root down is opened relative to its parent and checked against its indexed identity, so
-    /// an ancestor replaced after scanning is never followed.
     fn open_context(
         deletion: &Deletion<'_>,
         root_context: &Arc<DirContext>,
@@ -551,28 +539,26 @@ mod posix {
                 return Err("parent missing from index".to_owned());
             }
         }
-        let mut context = Arc::clone(root_context);
+        let mut fd = root_context.fd.try_clone().map_err(|error| error.to_string())?;
+        let mut current = root_context.node;
         for next in path.into_iter().rev() {
-            let (fd, _) = open_checked(deletion, context.fd.as_fd(), next).map_err(|(_, message)| message)?;
-            context = Arc::new(DirContext { fd, node: next, parent: None, removing: false });
+            fd = open_checked(deletion, fd.as_fd(), next).map_err(|(_, message)| message)?;
+            current = next;
         }
-        Ok(context)
+        Ok(Arc::new(DirContext { fd, node: current }))
     }
 
-    /// Opens the directory `node` inside `parent` and checks it is the directory that was indexed.
-    /// On failure returns what to report for the directory, and why.
     fn open_checked(
         deletion: &Deletion<'_>,
         parent: BorrowedFd<'_>,
         node: NodeId,
-    ) -> Result<(OwnedFd, MountIdentity), (OutcomeKind, String)> {
+    ) -> Result<OwnedFd, (OutcomeKind, String)> {
         let record = deletion.tree.record(node).expect("path node exists");
         let name = deletion.tree.name(node).ok_or((OutcomeKind::Failed, "directory name missing".to_owned()))?;
         let fd = match retry_errno(|| fs::openat(parent, name, DIRECTORY_FLAGS, Mode::empty())) {
             Ok(fd) => fd,
             Err(Errno::NOENT) => return Err((OutcomeKind::AlreadyAbsent, "directory is already gone".to_owned())),
             Err(error) => {
-                // A directory replaced by something else is a change, not a failure to remove it.
                 if let Ok(latest) = stat_at(parent, name) {
                     if identity(&latest).ok() != Some(record.identity) || entry_type(&latest) != record.entry_type {
                         return Err((OutcomeKind::Changed, "directory was replaced during validation".to_owned()));
@@ -588,94 +574,114 @@ mod posix {
         if mount != deletion.root_mount {
             return Err((OutcomeKind::Changed, "directory became a mount boundary".to_owned()));
         }
-        Ok((fd, mount))
+        Ok(fd)
     }
 
-    /// Removes everything below the directory `node`, then the directory itself once the last of
-    /// its subdirectories has been removed, by whichever thread finishes last.
-    fn delete_directory<'scope>(
-        deletion: &'scope Deletion<'_>,
+    fn delete_directory(
+        deletion: &Deletion<'_>,
         parent: Arc<DirContext>,
         node: NodeId,
-        scope: &rayon::Scope<'scope>,
     ) {
         if deletion.stopped() {
             return;
         }
-        let fd = match open_checked(deletion, parent.fd.as_fd(), node) {
-            Ok((fd, _)) => fd,
+        let mut current = match open_checked(deletion, parent.fd.as_fd(), node) {
+            Ok(fd) => fd,
             Err((kind, message)) => {
                 deletion.record(node, kind, Some(message.clone()));
                 let below = if kind == OutcomeKind::AlreadyAbsent { OutcomeKind::AlreadyAbsent } else { OutcomeKind::Failed };
                 deletion.record_below(node, below, &message);
-                // Nothing under it will be removed, so the directory above cannot be emptied either;
-                // its own removal reports that.
-                release(deletion, &parent);
                 return;
             }
         };
-        let context = Arc::new(DirContext { fd, node, parent: Some(parent), removing: true });
+        let mut stack = vec![directory_walk_frame(deletion.tree, node, parent.node)];
 
-        // Entries go in inode order, which the filesystem frees faster than the order they were
-        // listed in.
-        let tree = deletion.tree;
-        let mut files = Vec::new();
-        let mut directories = Vec::new();
-        for child in tree.children(node) {
-            let record = tree.record(child).expect("indexed child");
-            if record.entry_type == EntryType::Directory {
-                directories.push(child);
-            } else {
-                files.push(child);
-            }
-        }
-        files.sort_unstable_by_key(|child| tree.record(*child).map_or(0, |record| record.identity.inode));
-        directories.sort_unstable_by_key(|child| tree.record(*child).map_or(0, |record| record.identity.inode));
-
-        for child in directories {
-            deletion.holds[child.index()].store(1, Ordering::Relaxed);
-            deletion.holds[node.index()].fetch_add(1, Ordering::Relaxed);
-            let context = Arc::clone(&context);
-            scope.spawn(move |scope| delete_directory(deletion, context, child, scope));
-        }
-        for child in files {
-            if deletion.stopped() {
-                break;
-            }
-            delete_file(deletion, context.fd.as_fd(), child);
-        }
-        release(deletion, &context);
-    }
-
-    /// Gives up one hold on a directory being removed and, if it was the last, removes the
-    /// directory and gives up the hold its parent has on it, and so on upward.
-    fn release(deletion: &Deletion<'_>, context: &Arc<DirContext>) {
-        let mut context = Arc::clone(context);
         loop {
-            if !context.removing {
+            if deletion.stopped() {
                 return;
             }
-            if deletion.holds[context.node.index()].fetch_sub(1, Ordering::AcqRel) != 1 {
+
+            let child = {
+                let frame = stack.last_mut().expect("directory frame exists");
+                let child = frame.children.get(frame.next_child).copied();
+                frame.next_child += usize::from(child.is_some());
+                child
+            };
+            if let Some(child) = child {
+                if deletion.tree.record(child).expect("indexed child").entry_type == EntryType::Directory {
+                    match open_checked(deletion, current.as_fd(), child) {
+                        Ok(directory) => {
+                            let parent_node = stack.last().expect("parent directory frame exists").node;
+                            current = directory;
+                            stack.push(directory_walk_frame(deletion.tree, child, parent_node));
+                        }
+                        Err((kind, message)) => {
+                            deletion.record(child, kind, Some(message.clone()));
+                            let below = if kind == OutcomeKind::AlreadyAbsent { OutcomeKind::AlreadyAbsent } else { OutcomeKind::Failed };
+                            deletion.record_below(child, below, &message);
+                        }
+                    }
+                } else {
+                    delete_file(deletion, current.as_fd(), child);
+                }
+                continue;
+            }
+
+            let frame = stack.last().expect("directory frame exists");
+            let finished = frame.node;
+            if stack.len() == 1 {
+                remove_directory(deletion, parent.fd.as_fd(), finished);
                 return;
             }
-            if !deletion.stopped() {
-                remove_directory(deletion, &context);
-            }
-            match context.parent.clone() {
-                Some(parent) => context = parent,
-                None => return,
+
+            let expected_parent = frame.parent;
+            match open_parent_checked(deletion, current.as_fd(), expected_parent) {
+                Ok(parent_fd) => {
+                    remove_directory(deletion, parent_fd.as_fd(), finished);
+                    stack.pop();
+                    current = parent_fd;
+                }
+                Err((kind, message)) => {
+                    let selected = stack[0].node;
+                    deletion.record(finished, kind, Some(message.clone()));
+                    deletion.record(selected, OutcomeKind::Failed, Some(message.clone()));
+                    deletion.record_below(selected, OutcomeKind::Failed, &message);
+                    return;
+                }
             }
         }
     }
 
-    /// Removes the now empty directory of `context` from its parent.
-    fn remove_directory(deletion: &Deletion<'_>, context: &DirContext) {
-        let node = context.node;
-        let parent = context.parent.as_ref().expect("a directory being removed has a parent");
+    fn directory_walk_frame(tree: &Tree, node: NodeId, parent: NodeId) -> DirectoryWalkFrame {
+        let mut children: Vec<_> = tree.children(node).collect();
+        children.sort_unstable_by_key(|child| {
+            let record = tree.record(*child).expect("indexed child");
+            (record.entry_type == EntryType::Directory, record.identity.inode)
+        });
+        DirectoryWalkFrame { node, parent, children, next_child: 0 }
+    }
+
+    fn open_parent_checked(
+        deletion: &Deletion<'_>,
+        child: BorrowedFd<'_>,
+        parent: NodeId,
+    ) -> Result<OwnedFd, (OutcomeKind, String)> {
+        let fd = retry_errno(|| fs::openat(child, c"..", DIRECTORY_FLAGS, Mode::empty()))
+            .map_err(|error| (OutcomeKind::Failed, io::Error::from(error).to_string()))?;
+        let (found, mount) = directory_state(fd.as_fd()).map_err(|error| (OutcomeKind::Failed, error.to_string()))?;
+        let expected = deletion.tree.record(parent).expect("parent directory is indexed");
+        if found != expected.identity {
+            return Err((OutcomeKind::Changed, "parent directory changed during deletion".to_owned()));
+        }
+        if mount != deletion.root_mount {
+            return Err((OutcomeKind::Changed, "parent became a mount boundary".to_owned()));
+        }
+        Ok(fd)
+    }
+
+    fn remove_directory(deletion: &Deletion<'_>, parent_fd: BorrowedFd<'_>, node: NodeId) {
         let record = deletion.tree.record(node).expect("deletion target exists");
         let name = deletion.tree.name(node).expect("indexed entry has name");
-        let parent_fd = parent.fd.as_fd();
-        // Entries were checked when the directory was opened; check once more what is there now.
         let latest = match stat_at(parent_fd, name) {
             Ok(stat) => stat,
             Err(Errno::NOENT) => return deletion.record(node, OutcomeKind::AlreadyAbsent, None),
@@ -1052,6 +1058,78 @@ mod tests {
             )?)
         }
 
+        fn append_directory_at(
+            tree: &mut Tree,
+            parent_node: NodeId,
+            parent_fd: &OwnedFd,
+            name: &[u8],
+        ) -> io::Result<(NodeId, OwnedFd)> {
+            rustix::fs::mkdirat(parent_fd, name, Mode::RWXU)?;
+            let directory = rustix::fs::openat(
+                parent_fd,
+                name,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )?;
+            let metadata = fs::File::from(directory.try_clone()?).metadata()?;
+            let id = tree
+                .append(
+                    parent_node,
+                    name,
+                    EntryType::Directory,
+                    FileIdentity { device: metadata.dev(), inode: metadata.ino() },
+                    metadata.nlink(),
+                    0,
+                    0,
+                    NodeStatus::Complete,
+                )
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "tree index exhausted"))?;
+            Ok((id, directory))
+        }
+
+        struct DeepFixtureCleanup(PathBuf);
+
+        impl Drop for DeepFixtureCleanup {
+            fn drop(&mut self) {
+                if let Err(error) = clear_deep_fixture(&self.0) {
+                    eprintln!("could not clean deep deletion fixture: {error}");
+                }
+            }
+        }
+
+        fn clear_deep_fixture(root: &Path) -> io::Result<()> {
+            let root_fd = root_fd(root)?;
+            let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+            let mut current = match rustix::fs::openat(&root_fd, "deep", flags, Mode::empty()) {
+                Ok(fd) => fd,
+                Err(rustix::io::Errno::NOENT) => return Ok(()),
+                Err(error) => return Err(error.into()),
+            };
+            let mut depth = 0usize;
+            loop {
+                match rustix::fs::openat(&current, "a", flags, Mode::empty()) {
+                    Ok(child) => {
+                        current = child;
+                        depth += 1;
+                    }
+                    Err(rustix::io::Errno::NOENT) => break,
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            match rustix::fs::unlinkat(&current, "leaf", rustix::fs::AtFlags::empty()) {
+                Ok(()) | Err(rustix::io::Errno::NOENT) => {}
+                Err(error) => return Err(error.into()),
+            }
+            while depth != 0 {
+                let parent = rustix::fs::openat(&current, c"..", flags, Mode::empty())?;
+                rustix::fs::unlinkat(&parent, "a", rustix::fs::AtFlags::REMOVEDIR)?;
+                current = parent;
+                depth -= 1;
+            }
+            rustix::fs::unlinkat(&root_fd, "deep", rustix::fs::AtFlags::REMOVEDIR)?;
+            Ok(())
+        }
+
         fn execute_plan(
             root: &Path,
             plan: DeletionPlan,
@@ -1188,7 +1266,7 @@ mod tests {
         }
 
         #[test]
-        fn deep_trees_are_removed_while_reusing_the_open_ancestor_chain() -> io::Result<()> {
+        fn nested_directories_and_siblings_are_removed() -> io::Result<()> {
             let temp = TempRoot::new()?;
             let deep = temp.root.join("a/b/c/d");
             fs::create_dir_all(&deep)?;
@@ -1205,6 +1283,68 @@ mod tests {
             assert_eq!(outcomes.len(), 15);
             assert!(outcomes.iter().all(|item| item.kind == OutcomeKind::Deleted), "{outcomes:?}");
             assert!(!temp.root.join("a").exists());
+            Ok(())
+        }
+
+        #[test]
+        fn deep_paths_can_be_selected_and_their_directories_removed() -> io::Result<()> {
+            const DEPTH: usize = 5000;
+
+            let temp = TempRoot::new()?;
+            let _cleanup = DeepFixtureCleanup(temp.root.clone());
+            let root_metadata = fs::symlink_metadata(&temp.root)?;
+            let mut tree = Tree::new(
+                temp.root.as_os_str().as_bytes(),
+                FileIdentity { device: root_metadata.dev(), inode: root_metadata.ino() },
+                root_metadata.nlink(),
+            )
+            .unwrap();
+            let mut parent_node = tree.root();
+            let mut parent_fd = root_fd(&temp.root)?;
+            let (selected, directory) = append_directory_at(&mut tree, parent_node, &parent_fd, b"deep")?;
+            parent_node = selected;
+            parent_fd = directory;
+
+            for _ in 0..DEPTH {
+                let (child, directory) = append_directory_at(&mut tree, parent_node, &parent_fd, b"a")?;
+                parent_node = child;
+                parent_fd = directory;
+            }
+            let leaf = rustix::fs::openat(
+                &parent_fd,
+                "leaf",
+                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC,
+                Mode::RUSR | Mode::WUSR,
+            )?;
+            let metadata = fs::File::from(leaf.try_clone()?).metadata()?;
+            let leaf = tree
+                .append(
+                    parent_node,
+                    b"leaf",
+                    EntryType::RegularFile,
+                    FileIdentity { device: metadata.dev(), inode: metadata.ino() },
+                    metadata.nlink(),
+                    metadata.len(),
+                    metadata.blocks() * 512,
+                    NodeStatus::Complete,
+                )
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "tree index exhausted"))?;
+            tree.set_state(tree.root(), NodeStatus::Complete);
+
+            let tree = Arc::new(tree);
+            let leaf_plan = create_plan(Arc::clone(&tree), &[leaf]).unwrap();
+            let leaf_outcomes = execute_plan(&temp.root, leaf_plan, None);
+            assert_eq!(outcome(&leaf_outcomes, leaf), OutcomeKind::Deleted);
+
+            let plan = create_plan(Arc::clone(&tree), &[selected]).unwrap();
+            assert_eq!(plan.operation_count(), DEPTH + 2);
+            let outcomes = execute_plan(&temp.root, plan, None);
+
+            assert_eq!(outcomes.len(), DEPTH + 2);
+            assert_eq!(outcome(&outcomes, leaf), OutcomeKind::AlreadyAbsent);
+            let failure = outcomes.iter().find(|item| item.node != leaf && item.kind != OutcomeKind::Deleted);
+            assert!(failure.is_none(), "first non-deleted directory outcome: {failure:?}");
+            assert!(fs::read_dir(&temp.root)?.next().is_none());
             Ok(())
         }
 
