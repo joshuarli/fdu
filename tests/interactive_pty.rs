@@ -164,7 +164,7 @@ fn space_no_longer_marks() -> io::Result<()> {
 }
 
 #[test]
-fn s_toggles_between_size_and_name_order() -> io::Result<()> {
+fn s_cycles_between_size_name_and_date_order() -> io::Result<()> {
     let (_temp, root) = TempDir::standard_tree()?;
     let mut session = Session::start("sort-toggle", &root, &[], 100, 24);
     session.wait_ready();
@@ -172,6 +172,8 @@ fn s_toggles_between_size_and_name_order() -> io::Result<()> {
     session.wait("size order", |screen| screen.lines()[2].contains("beta/"));
     session.text("s");
     session.wait("name order", |screen| screen.lines()[2].contains("alpha/"));
+    session.text("s");
+    session.wait_for("Sorted by date");
     session.text("s");
     session.wait("size order again", |screen| screen.lines()[2].contains("beta/"));
     session.quit();

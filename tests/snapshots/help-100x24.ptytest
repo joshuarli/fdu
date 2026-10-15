@@ -9,7 +9,7 @@ modes: alternate-screen=true application-cursor=false application-keypad=false b
 05││··│····························································································│··│
 06││··│List:·j/k·or·arrows·move,·Enter/l·opens,·h/Backspace·goes·up································│··│
 07││··│··(never·above·the·root).·d·marks,·v·marks·a·range,·*·marks·································│··│
-08││··│··matches,·c·clears·marks,·/·filters,·s·sorts·by·size·or·name,······························│··│
+08││··│··matches,·c·clears·marks,·/·filters,·s·sorts·by·size,·name,·or·modified·date,··············│··│
 09││··│··a·switches·allocated/apparent·sizes,·r·rescans·(clears·marks).····························│··│
 10││··│Marked·items:·arrows·move,·d·unmarks,·Enter·shows·it·in·the·list,···························│··│
 11││··│··Ctrl-R·deletes·them·all·after·you·press·Enter·to·confirm.·································│··│

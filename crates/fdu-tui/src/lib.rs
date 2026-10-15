@@ -94,6 +94,7 @@ pub enum SizeMode {
 pub enum SortMode {
     Size,
     Name,
+    Date,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -112,7 +113,7 @@ pub enum Pane {
 /// Deletion state shown in the key-hint and status strips. Deletion is
 /// confirmed and tracked there rather than in a modal so the marked-items pane
 /// stays visible as the review of what will be removed.
-pub enum Operation<'a> {
+pub enum Operation {
     Idle,
     ConfirmDelete {
         roots: usize,
@@ -123,7 +124,6 @@ pub enum Operation<'a> {
     Deleting {
         completed: usize,
         total: usize,
-        current: &'a str,
         stopping: bool,
     },
 }
@@ -162,7 +162,7 @@ pub struct View<'a> {
     pub message: Option<&'a str>,
     pub detail_message: Option<&'a str>,
     pub modal: Modal<'a>,
-    pub operation: Operation<'a>,
+    pub operation: Operation,
     pub ls_colors: &'a LsColors,
 }
 
@@ -581,12 +581,12 @@ fn render_status(frame: &mut Screen, area: Rect, view: &View<'_>) {
         if view.phase == Phase::Scanning { "…" } else { "" }
     );
     let (text, style) = match &view.operation {
-        Operation::Deleting { completed, total, current, stopping } => (
+        Operation::Deleting { completed, total, stopping } => (
             format!(
-                " Deleting {completed} of {total} · {current} · {} · {count}",
+                " Deleting {completed} of {total} · {} · {count}",
                 if *stopping { "stopping; removed entries cannot be restored" } else { "Esc stops; removed entries cannot be restored" }
             ),
-            Style::Red,
+            Style::Plain,
         ),
         Operation::ConfirmDelete { roots, entries, allocated_bytes, .. } => (
             format!(
@@ -635,7 +635,7 @@ fn help_lines(focus: Pane) -> (String, Vec<String>) {
         "",
         "List: j/k or arrows move, Enter/l opens, h/Backspace goes up",
         "  (never above the root). d marks, v marks a range, * marks",
-        "  matches, c clears marks, / filters, s sorts by size or name,",
+        "  matches, c clears marks, / filters, s sorts by size, name, or modified date,",
         "  a switches allocated/apparent sizes, r rescans (clears marks).",
         "Marked items: arrows move, d unmarks, Enter shows it in the list,",
         "  Ctrl-R deletes them all after you press Enter to confirm.",
@@ -1095,7 +1095,7 @@ mod tests {
     }
 
     #[test]
-    fn marked_pane_and_delete_status_are_red() {
+    fn marked_pane_and_delete_confirmation_are_red() {
         let fixture = fixture();
         let rows = [fixture.directory, fixture.top];
         let marks = HashSet::from([fixture.top]);
@@ -1112,9 +1112,9 @@ mod tests {
         view.operation = Operation::ConfirmDelete { roots: 1, entries: 1, allocated_bytes: 1, apparent_bytes: 1 };
         let confirming = buffer(&view, 100, 24);
         assert!(confirming[(1, 23)].style == Style::Red);
-        view.operation = Operation::Deleting { completed: 0, total: 1, current: "x", stopping: false };
+        view.operation = Operation::Deleting { completed: 0, total: 1, stopping: false };
         let deleting = buffer(&view, 100, 24);
-        assert!(deleting[(1, 23)].style == Style::Red);
+        assert!(deleting[(1, 23)].style == Style::Plain);
     }
 
     #[test]
@@ -1134,9 +1134,9 @@ mod tests {
         assert!(!output.contains("┌Confirm"), "no modal: {output}");
 
         view.phase = Phase::Deleting;
-        view.operation = Operation::Deleting { completed: 1, total: 3, current: "top.log", stopping: false };
+        view.operation = Operation::Deleting { completed: 1, total: 3, stopping: false };
         let output = draw(&view, 100, 24);
-        assert!(output.contains("Deleting 1 of 3 · top.log"), "{output}");
+        assert!(output.contains("Deleting 1 of 3 · Esc stops"), "{output}");
         assert!(output.contains("removed entries cannot be restored"), "{output}");
     }
 
@@ -1179,7 +1179,7 @@ mod tests {
                         1 => view.modal = Modal::Help { focus: Pane::Browser },
                         2 => view.modal = Modal::Filter { value: "abc" },
                         3 => view.operation = Operation::ConfirmDelete { roots: 1, entries: 1, allocated_bytes: 1, apparent_bytes: 1 },
-                        4 => view.operation = Operation::Deleting { completed: 0, total: 1, current: "x", stopping: true },
+                        4 => view.operation = Operation::Deleting { completed: 0, total: 1, stopping: true },
                         _ => view.phase = Phase::Scanning,
                     }
                     draw(&view, columns, height);

@@ -124,7 +124,6 @@ struct DeleteRun {
     failure: Option<String>,
     completed: usize,
     total: usize,
-    current: String,
     started: Instant,
 }
 
@@ -145,7 +144,6 @@ impl DeleteRun {
             failure: None,
             completed: 0,
             total,
-            current: String::new(),
             started: Instant::now(),
         }
     }
@@ -856,7 +854,8 @@ impl BrowserModel {
             Intent::ToggleSort => {
                 let next = match self.sort_mode {
                     SortMode::Size => SortMode::Name,
-                    SortMode::Name => SortMode::Size,
+                    SortMode::Name => SortMode::Date,
+                    SortMode::Date => SortMode::Size,
                 };
                 return (Action::None, self.set_sort(next, phase));
             }
@@ -1033,7 +1032,6 @@ impl BrowserModel {
             (_, AppPhase::Deleting(worker)) => Operation::Deleting {
                 completed: worker.completed,
                 total: worker.total,
-                current: &worker.current,
                 stopping: worker.cancelled.load(Ordering::Relaxed),
             },
             (Some(plan), _) => Operation::ConfirmDelete {
@@ -1291,6 +1289,11 @@ impl BrowserModel {
                         .cmp(&size_for(left_record, size_mode))
                         .then_with(|| tree.name(*left).unwrap_or_default().cmp(tree.name(*right).unwrap_or_default()))
                 }
+                SortMode::Date => right_record
+                    .modified_time()
+                    .unix_seconds()
+                    .cmp(&left_record.modified_time().unix_seconds())
+                    .then_with(|| tree.name(*left).unwrap_or_default().cmp(tree.name(*right).unwrap_or_default())),
             }
         });
     }
@@ -1663,6 +1666,7 @@ fn sort_name(sort: SortMode) -> &'static str {
     match sort {
         SortMode::Size => "size",
         SortMode::Name => "name",
+        SortMode::Date => "date",
     }
 }
 
@@ -1902,14 +1906,9 @@ fn run_session(
             && let Some(receiver) = worker.receiver.as_ref() {
             for _ in 0..MAX_DELETE_EVENTS_PER_TICK {
                 match receiver.try_recv() {
-                    Ok(DeleteEvent::Progress { completed, total, current }) => {
+                    Ok(DeleteEvent::Progress { completed, total, .. }) => {
                         worker.completed = completed;
                         worker.total = total;
-                        worker.current = model
-                            .tree
-                            .name(current)
-                            .map(fdu_tui::escape_name)
-                            .unwrap_or_else(|| "entry".to_owned());
                         model_changed = true;
                     }
                     Ok(DeleteEvent::Outcomes(outcomes)) => {
