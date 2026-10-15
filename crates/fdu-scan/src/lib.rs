@@ -8,7 +8,7 @@ use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
-pub use fdu_core::{DirectoryToken, EntryBatch, FileIdentity, ScanEvent};
+pub use fdu_core::{DirectoryToken, EntryBatch, FileIdentity, ModifiedTime, ScanEvent};
 pub use exclusions::ScanExclusions;
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -48,6 +48,7 @@ pub struct RootAnchor {
     fd: Arc<OwnedFd>,
     pub name: Vec<u8>,
     pub identity: FileIdentity,
+    modified_time: ModifiedTime,
     pub link_count: u64,
 }
 
@@ -58,6 +59,10 @@ impl RootAnchor {
 
     pub fn try_clone_fd(&self) -> io::Result<OwnedFd> {
         self.fd.try_clone()
+    }
+
+    pub fn modified_time(&self) -> ModifiedTime {
+        self.modified_time
     }
 }
 
@@ -159,11 +164,12 @@ fn without_trailing_slashes(path: &Path) -> Cow<'_, Path> {
 
 fn anchor_root(path: &std::path::Path, fd: OwnedFd) -> io::Result<RootAnchor> {
     use std::os::unix::ffi::OsStrExt;
-    let (identity, link_count) = fsutil::identity_and_link_count(fd.as_fd())?;
+    let (identity, link_count, modified_time) = fsutil::identity_link_count_and_modified_time(fd.as_fd())?;
     Ok(RootAnchor {
         fd: Arc::new(fd),
         name: path.as_os_str().as_bytes().to_vec(),
         identity,
+        modified_time,
         link_count,
     })
 }

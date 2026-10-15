@@ -3,7 +3,7 @@
 //! directory enumeration, mount identity, and worker sizing.
 use crate::fsutil::{open_directory_at, stat_entry_at};
 use crate::{DirectoryToken, EntryBatch, RootAnchor, ScanExclusions, ScanQueueMetrics};
-use fdu_core::{EntryType, ExclusionReason, FileIdentity, NodeStatus, ScanEntry, ScanEvent};
+use fdu_core::{EntryType, ExclusionReason, FileIdentity, ModifiedTime, NodeStatus, ScanEntry, ScanEvent};
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 use std::cell::RefCell;
 use std::io;
@@ -35,12 +35,11 @@ const HELD_OPEN_DIRECTORIES: usize = 64;
 const DIRECTORY_FINISH_BATCH_SIZE: usize = 256;
 const SEEN_DIRECTORY_SHARDS: usize = 64;
 
-/// Metadata that a platform's directory enumeration returns together with a
-/// name, sparing a separate stat call. Directories report only identity and type.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(target_os = "linux", allow(dead_code))]
 pub(crate) struct BulkMetadata {
     pub(crate) identity: FileIdentity,
+    pub(crate) modified_time: ModifiedTime,
     pub(crate) entry_type: EntryType,
     pub(crate) link_count: u64,
     pub(crate) apparent_bytes: u64,
@@ -58,6 +57,7 @@ pub(crate) enum EntryHint {
 /// An opened directory's identity and whether it is on the scan root's mount.
 pub(crate) struct DirectoryFacts {
     pub(crate) identity: FileIdentity,
+    pub(crate) modified_time: ModifiedTime,
     pub(crate) link_count: u64,
     pub(crate) same_mount: bool,
 }
@@ -86,7 +86,7 @@ impl ScanEventSender<'_> {
 }
 
 enum IndexedDirectorySource {
-    Opened(RootAnchor),
+    Opened(Arc<OwnedFd>),
     ReopenFromParent(Arc<OwnedFd>),
 }
 
@@ -650,12 +650,7 @@ pub(crate) fn scan_indexed(
         // The root is scanned like any other directory, on this thread, which then shares the
         // work its own subtree holds with the workers.
         let root_task = IndexedDirectoryTask {
-            source: IndexedDirectorySource::Opened(RootAnchor {
-                fd: Arc::new(root_scan_fd),
-                name: anchor.name.clone(),
-                identity: root_identity,
-                link_count: anchor.link_count,
-            }),
+            source: IndexedDirectorySource::Opened(Arc::new(root_scan_fd)),
             name: Vec::new(),
             identity: root_identity,
             token: DirectoryToken(0),
@@ -717,7 +712,7 @@ fn scan_indexed_task(
     outbox: &mut Outbox,
 ) -> bool {
     let directory = match task.source {
-        IndexedDirectorySource::Opened(anchor) => anchor.fd,
+        IndexedDirectorySource::Opened(directory) => directory,
         IndexedDirectorySource::ReopenFromParent(parent) => {
             let child = match open_directory_at(parent.as_fd(), task.name.as_slice()) {
                 Ok(child) => child,
@@ -782,6 +777,7 @@ fn scan_indexed_directory(
 struct ClassifiedEntry {
     entry_type: EntryType,
     identity: FileIdentity,
+    modified_time: ModifiedTime,
     link_count: u64,
     apparent_bytes: u64,
     allocated_bytes: u64,
@@ -810,6 +806,7 @@ fn classify_entry(
     let mut found = ClassifiedEntry {
         entry_type: EntryType::Other,
         identity: FileIdentity { device: 0, inode: 0 },
+        modified_time: ModifiedTime::default(),
         link_count: 0,
         apparent_bytes: 0,
         allocated_bytes: 0,
@@ -822,6 +819,7 @@ fn classify_entry(
     match (entry.bulk(), entry.hint()) {
         (Some(bulk), _) => {
             found.identity = bulk.identity;
+            found.modified_time = bulk.modified_time;
             found.link_count = bulk.link_count;
             found.entry_type = bulk.entry_type;
             expected_identity = Some(bulk.identity);
@@ -835,6 +833,7 @@ fn classify_entry(
         (None, _) => match stat_entry_at(directory_fd, entry.name()) {
             Ok(stat) => {
                 found.identity = stat.identity;
+                found.modified_time = stat.modified_time;
                 found.link_count = stat.link_count;
                 found.entry_type = stat.entry_type;
                 expected_identity = Some(stat.identity);
@@ -873,6 +872,7 @@ fn classify_entry(
         }
     };
     found.link_count = facts.link_count;
+    found.modified_time = facts.modified_time;
     if expected_identity.is_some_and(|expected| expected != facts.identity) {
         found.incomplete("directory identity changed during scan");
         return found;
@@ -894,12 +894,7 @@ fn classify_entry(
         found.child_token = Some(child_token);
         outbox.held.push(HeldTask {
             task: IndexedDirectoryTask {
-                source: IndexedDirectorySource::Opened(RootAnchor {
-                    fd: Arc::new(child),
-                    name: Vec::new(),
-                    identity: facts.identity,
-                    link_count: facts.link_count,
-                }),
+                source: IndexedDirectorySource::Opened(Arc::new(child)),
                 name: entry.name().to_bytes().to_vec(),
                 identity: facts.identity,
                 token: child_token,
@@ -994,6 +989,7 @@ fn scan_indexed_directory_with_buffer(
             directory_token: found.child_token,
             entry_type: found.entry_type,
             identity: found.identity,
+            modified_time: found.modified_time,
             link_count: found.link_count,
             apparent_bytes: found.apparent_bytes,
             allocated_bytes: found.allocated_bytes,

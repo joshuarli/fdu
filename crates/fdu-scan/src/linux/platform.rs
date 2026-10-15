@@ -9,7 +9,7 @@
 use super::reports;
 use crate::fsutil::{self, retry};
 use crate::indexed::{DirectoryFacts, EntryHint, IndexedScanLimits};
-use fdu_core::FileIdentity;
+use fdu_core::{FileIdentity, ModifiedTime};
 use rustix::fs::{self, AtFlags, FileType, RawDir, RawDirEntry, StatxFlags};
 use std::ffi::CStr;
 use rustix::io::Errno;
@@ -153,8 +153,8 @@ pub(crate) struct MountIdentity {
     mount_id: u64,
 }
 
-fn describe(fd: BorrowedFd<'_>) -> io::Result<(FileIdentity, u64, u64)> {
-    let mask = StatxFlags::INO | StatxFlags::NLINK | StatxFlags::MNT_ID;
+fn describe(fd: BorrowedFd<'_>) -> io::Result<(FileIdentity, ModifiedTime, u64, u64)> {
+    let mask = StatxFlags::INO | StatxFlags::NLINK | StatxFlags::MNT_ID | StatxFlags::MTIME;
     let stat = retry(|| fs::statx(fd, c"", AtFlags::EMPTY_PATH, mask))?;
     if !reports(&stat, mask) {
         return Err(io::Error::new(
@@ -166,11 +166,12 @@ fn describe(fd: BorrowedFd<'_>) -> io::Result<(FileIdentity, u64, u64)> {
         device: fs::makedev(stat.stx_dev_major, stat.stx_dev_minor),
         inode: stat.stx_ino,
     };
-    Ok((identity, u64::from(stat.stx_nlink), stat.stx_mnt_id))
+    let modified_time = ModifiedTime::from_unix_seconds(stat.stx_mtime.tv_sec).unwrap_or_default();
+    Ok((identity, modified_time, u64::from(stat.stx_nlink), stat.stx_mnt_id))
 }
 
 pub(crate) fn mount_identity(fd: BorrowedFd<'_>) -> io::Result<MountIdentity> {
-    let (identity, _, mount_id) = describe(fd)?;
+    let (identity, _, _, mount_id) = describe(fd)?;
     Ok(MountIdentity { device: identity.device, mount_id })
 }
 
@@ -179,9 +180,10 @@ pub(crate) fn describe_directory(
     fd: BorrowedFd<'_>,
     root_mount: &MountIdentity,
 ) -> io::Result<DirectoryFacts> {
-    let (identity, link_count, mount_id) = describe(fd)?;
+    let (identity, modified_time, link_count, mount_id) = describe(fd)?;
     Ok(DirectoryFacts {
         identity,
+        modified_time,
         link_count,
         same_mount: identity.device == root_mount.device && mount_id == root_mount.mount_id,
     })

@@ -1,6 +1,6 @@
 //! Platform-neutral filesystem helpers shared by the scanners, built on rustix.
 
-use fdu_core::{EntryType, FileIdentity};
+use fdu_core::{EntryType, FileIdentity, ModifiedTime};
 use rustix::fs::{self, AtFlags, FileType, Mode, OFlags, Stat};
 use rustix::io::Errno;
 use rustix::process::{getrlimit, setrlimit, Resource, Rlimit};
@@ -67,10 +67,17 @@ pub(crate) fn file_size(stat: &Stat, apparent: bool) -> io::Result<u64> {
     }
 }
 
+#[allow(clippy::useless_conversion)]
+fn modified_time(stat: &Stat) -> io::Result<ModifiedTime> {
+    let seconds = i64::try_from(stat.st_mtime).map_err(|_| invalid("modification time is outside the supported range"))?;
+    Ok(ModifiedTime::from_unix_seconds(seconds).unwrap_or_default())
+}
+
 /// What one `fstatat` of a directory entry reports. Sizes are results so a bad size can mark
 /// the entry incomplete without hiding its identity and type.
 pub(crate) struct EntryStat {
     pub(crate) identity: FileIdentity,
+    pub(crate) modified_time: ModifiedTime,
     pub(crate) link_count: u64,
     pub(crate) entry_type: EntryType,
     pub(crate) apparent_bytes: io::Result<u64>,
@@ -85,6 +92,7 @@ pub(crate) fn stat_entry_at(parent: BorrowedFd<'_>, name: &CStr) -> io::Result<E
     let stat = stat_at(parent, name)?;
     Ok(EntryStat {
         identity: identity(&stat)?,
+        modified_time: modified_time(&stat)?,
         link_count: link_count(&stat)?,
         entry_type: entry_type(&stat),
         apparent_bytes: file_size(&stat, true),
@@ -95,6 +103,13 @@ pub(crate) fn stat_entry_at(parent: BorrowedFd<'_>, name: &CStr) -> io::Result<E
 pub(crate) fn identity_and_link_count(fd: BorrowedFd<'_>) -> io::Result<(FileIdentity, u64)> {
     let stat = retry(|| fs::fstat(fd))?;
     Ok((identity(&stat)?, link_count(&stat)?))
+}
+
+pub(crate) fn identity_link_count_and_modified_time(
+    fd: BorrowedFd<'_>,
+) -> io::Result<(FileIdentity, u64, ModifiedTime)> {
+    let stat = retry(|| fs::fstat(fd))?;
+    Ok((identity(&stat)?, link_count(&stat)?, modified_time(&stat)?))
 }
 
 pub(crate) fn identity_of(fd: BorrowedFd<'_>) -> io::Result<FileIdentity> {

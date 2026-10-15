@@ -1,5 +1,5 @@
 use crate::indexed::BulkMetadata;
-use fdu_core::{EntryType, FileIdentity};
+use fdu_core::{EntryType, FileIdentity, ModifiedTime};
 use std::ffi::CStr;
 use std::io;
 
@@ -13,6 +13,7 @@ const COMMON_ATTRIBUTES: libc::attrgroup_t = libc::ATTR_CMN_RETURNED_ATTRS
     | libc::ATTR_CMN_NAME
     | libc::ATTR_CMN_DEVID
     | libc::ATTR_CMN_OBJTYPE
+    | libc::ATTR_CMN_MODTIME
     | libc::ATTR_CMN_FLAGS
     | libc::ATTR_CMN_FILEID;
 const FILE_ATTRIBUTES: libc::attrgroup_t =
@@ -104,6 +105,8 @@ pub(super) fn parse_record(bytes: &[u8]) -> io::Result<BulkEntry<'_>> {
     // marks one unavailable, so the parser can advance through a fixed common-attribute layout.
     let raw_device = cursor.take_i32()?;
     let raw_entry_type = cursor.take_u32()?;
+    let modified_seconds = cursor.take_i64()?;
+    let _modified_nanoseconds = cursor.take_i64()?;
     let flags = cursor.take_u32()?;
     let inode = cursor.take_u64()?;
     let entry_type = entry_type_for_vnode(raw_entry_type);
@@ -120,6 +123,7 @@ pub(super) fn parse_record(bytes: &[u8]) -> io::Result<BulkEntry<'_>> {
     let required_common = libc::ATTR_CMN_NAME
         | libc::ATTR_CMN_DEVID
         | libc::ATTR_CMN_OBJTYPE
+        | libc::ATTR_CMN_MODTIME
         | libc::ATTR_CMN_FLAGS
         | libc::ATTR_CMN_FILEID;
     let metadata = if returned_common & required_common == required_common && flags & SF_FIRMLINK == 0 {
@@ -127,6 +131,7 @@ pub(super) fn parse_record(bytes: &[u8]) -> io::Result<BulkEntry<'_>> {
         match (device, entry_type) {
             (Some(device), EntryType::Directory) => Some(BulkMetadata {
                 identity: FileIdentity { device, inode },
+                modified_time: ModifiedTime::from_unix_seconds(modified_seconds).unwrap_or_default(),
                 entry_type,
                 link_count: 0,
                 apparent_bytes: 0,
@@ -140,6 +145,7 @@ pub(super) fn parse_record(bytes: &[u8]) -> io::Result<BulkEntry<'_>> {
                 match (apparent_bytes, allocated_bytes) {
                     (Some(apparent_bytes), Some(allocated_bytes)) => Some(BulkMetadata {
                         identity: FileIdentity { device, inode },
+                        modified_time: ModifiedTime::from_unix_seconds(modified_seconds).unwrap_or_default(),
                         entry_type,
                         link_count: u64::from(raw_link_count),
                         apparent_bytes,
@@ -225,24 +231,27 @@ mod tests {
         | libc::ATTR_CMN_NAME
         | libc::ATTR_CMN_DEVID
         | libc::ATTR_CMN_OBJTYPE
+        | libc::ATTR_CMN_MODTIME
         | libc::ATTR_CMN_FLAGS
         | libc::ATTR_CMN_FILEID;
 
     fn file_record(returned_common: u32, returned_file: u32, flags: u32) -> Vec<u8> {
-        let mut bytes = vec![0; 80];
-        put_u32(&mut bytes, 0, 80);
+        let mut bytes = vec![0; 96];
+        put_u32(&mut bytes, 0, 96);
         put_u32(&mut bytes, 4, returned_common);
         put_u32(&mut bytes, 16, returned_file);
-        put_i32(&mut bytes, 24, 48);
+        put_i32(&mut bytes, 24, 64);
         put_u32(&mut bytes, 28, 6);
         put_i32(&mut bytes, 32, 17);
         put_u32(&mut bytes, 36, VREG);
-        put_u32(&mut bytes, 40, flags);
-        put_u64(&mut bytes, 44, 29);
-        put_u32(&mut bytes, 52, 2);
-        put_i64(&mut bytes, 56, 513);
-        put_i64(&mut bytes, 64, 91);
-        bytes[72..78].copy_from_slice(b"entry\0");
+        put_i64(&mut bytes, 40, 1_700_000_000);
+        put_i64(&mut bytes, 48, 0);
+        put_u32(&mut bytes, 56, flags);
+        put_u64(&mut bytes, 60, 29);
+        put_u32(&mut bytes, 68, 2);
+        put_i64(&mut bytes, 72, 513);
+        put_i64(&mut bytes, 80, 91);
+        bytes[88..94].copy_from_slice(b"entry\0");
         bytes
     }
 
@@ -275,6 +284,7 @@ mod tests {
                     device: 17,
                     inode: 29,
                 },
+                modified_time: ModifiedTime::from_unix_seconds(1_700_000_000).unwrap(),
                 entry_type: EntryType::RegularFile,
                 link_count: 2,
                 apparent_bytes: 91,
@@ -296,6 +306,7 @@ mod tests {
                     device: 17,
                     inode: 29,
                 },
+                modified_time: ModifiedTime::from_unix_seconds(1_700_000_000).unwrap(),
                 entry_type: EntryType::Directory,
                 link_count: 0,
                 apparent_bytes: 0,

@@ -2,11 +2,12 @@ mod lscolors;
 mod screen;
 mod terminal;
 
-use fdu_core::{EntryType, NodeId, NodeRecord, NodeState, Tree};
+use fdu_core::{EntryType, ModifiedTime, NodeId, NodeRecord, NodeState, Tree};
 pub use lscolors::LsColors;
 use screen::{Rect, Screen, Style};
 use hashbrown::HashSet;
 use std::io;
+use std::time::{SystemTime, UNIX_EPOCH};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub use terminal::{poll_intent, terminal_size};
@@ -196,11 +197,13 @@ impl TerminalSession {
 const BAR_CELLS_WIDE: usize = 10;
 const BAR_CELLS_NARROW: usize = 5;
 const SIZE_COLUMN_WIDTH: usize = 11;
+const AGE_COLUMN_WIDTH: usize = 5;
 /// Wide enough that every modal line fits an 80-column terminal.
 const MODAL_WIDTH_PERCENT: u16 = 94;
 
 fn render(frame: &mut Screen, view: &View<'_>) {
     let area = frame.area();
+    let now = SystemTime::now();
     // Short terminals give up the title strip before the panes.
     let title_height = u16::from(area.height >= 8);
     let status_height = u16::from(area.height >= 3);
@@ -212,7 +215,7 @@ fn render(frame: &mut Screen, view: &View<'_>) {
     if title_height > 0 {
         render_title(frame, chunks[0], view);
     }
-    render_panes(frame, chunks[1], view);
+    render_panes(frame, chunks[1], view, now);
     if status_height > 0 {
         render_status(frame, chunks[2], view);
     }
@@ -235,21 +238,21 @@ fn render_title(frame: &mut Screen, area: Rect, view: &View<'_>) {
     frame.text(area, &text, Style::Reversed);
 }
 
-fn render_panes(frame: &mut Screen, area: Rect, view: &View<'_>) {
+fn render_panes(frame: &mut Screen, area: Rect, view: &View<'_>, now: SystemTime) {
     let size = TerminalSize { columns: frame.area().width, rows: frame.area().height };
     if !view.side_visible {
-        render_browser(frame, area, view);
+        render_browser(frame, area, view, now);
     } else if fits_two_panes(view.split, size) {
         let parts = match view.split {
             Split::Vertical => area.split_columns(55),
             Split::Horizontal => area.split_rows(60),
         };
-        render_browser(frame, parts[0], view);
-        render_marked(frame, parts[1], view);
+        render_browser(frame, parts[0], view, now);
+        render_marked(frame, parts[1], view, now);
     } else if view.focus == Pane::Marked {
-        render_marked(frame, area, view);
+        render_marked(frame, area, view, now);
     } else {
-        render_browser(frame, area, view);
+        render_browser(frame, area, view, now);
     }
 }
 
@@ -273,7 +276,7 @@ fn relative_path(view: &View<'_>, node: NodeId) -> String {
         .join("/")
 }
 
-fn render_browser(frame: &mut Screen, area: Rect, view: &View<'_>) {
+fn render_browser(frame: &mut Screen, area: Rect, view: &View<'_>, now: SystemTime) {
     let focused = view.focus == Pane::Browser;
     let current = view.tree.record(view.current_directory);
     let total = current.map_or(0, |record| size_of(record, view.size_mode));
@@ -290,10 +293,10 @@ fn render_browser(frame: &mut Screen, area: Rect, view: &View<'_>) {
     let budget = inner_width.saturating_sub(cell_width(&counts) + 1);
     let title = format!(" {}{counts}", clip_start(&location, budget));
     let inner = pane_border(frame, area, &title, focused);
-    render_rows(frame, inner, view, total);
+    render_rows(frame, inner, view, total, now);
 }
 
-fn render_rows(frame: &mut Screen, area: Rect, view: &View<'_>, directory_total: u64) {
+fn render_rows(frame: &mut Screen, area: Rect, view: &View<'_>, directory_total: u64, now: SystemTime) {
     let focused = view.focus == Pane::Browser;
     let cursor_index = view.cursor_index;
     let available_rows = usize::from(area.height);
@@ -303,10 +306,10 @@ fn render_rows(frame: &mut Screen, area: Rect, view: &View<'_>, directory_total:
     let width = usize::from(area.width);
     // The name is the most useful column, so the percentage and bar are dropped
     // before the name loses room.
-    let show_percent = width >= 46;
-    let bar_cells = if width >= 57 {
+    let show_percent = width >= 52;
+    let bar_cells = if width >= 63 {
         BAR_CELLS_WIDE
-    } else if width >= 52 {
+    } else if width >= 58 {
         BAR_CELLS_NARROW
     } else {
         0
@@ -340,6 +343,7 @@ fn render_rows(frame: &mut Screen, area: Rect, view: &View<'_>, directory_total:
             String::new()
         };
         let bar = bar_column(record, view.size_mode, directory_total, bar_cells);
+        let age = format_age(record.modified_time(), now);
         let link = if record.link_count > 1 && record.entry_type != EntryType::Directory { "*" } else { " " };
         let suffix = match record.entry_type {
             EntryType::Directory => "/",
@@ -347,8 +351,9 @@ fn render_rows(frame: &mut Screen, area: Rect, view: &View<'_>, directory_total:
             _ => "",
         };
         let prefix = format!(
-            "{mark} {marker}{size_text:>size_width$} {percent}{bar}{link}",
+            "{mark} {marker}{size_text:>size_width$} {percent}{bar}{link}{age:>age_width$} ",
             size_width = SIZE_COLUMN_WIDTH,
+            age_width = AGE_COLUMN_WIDTH,
         );
         let raw_name = view.tree.name(id).unwrap_or_default();
         let name = escape_name(raw_name);
@@ -374,7 +379,7 @@ fn row_style(view: &View<'_>, id: NodeId, record: &NodeRecord, name: &[u8]) -> S
     }
 }
 
-fn render_marked(frame: &mut Screen, area: Rect, view: &View<'_>) {
+fn render_marked(frame: &mut Screen, area: Rect, view: &View<'_>, now: SystemTime) {
     let focused = view.focus == Pane::Marked;
     let mut total = 0u64;
     for id in view.marked {
@@ -411,6 +416,7 @@ fn render_marked(frame: &mut Screen, area: Rect, view: &View<'_>) {
         };
         let is_selected = view.marked_cursor == Some(index);
         let (marker, size_text) = state_columns(record, view.size_mode);
+        let age = format_age(record.modified_time(), now);
         let suffix = match record.entry_type {
             EntryType::Directory => "/",
             EntryType::Symlink => "@",
@@ -419,8 +425,9 @@ fn render_marked(frame: &mut Screen, area: Rect, view: &View<'_>) {
         // Size and state come first so a long path is clipped at its start,
         // which keeps the entry's own name and the size readable.
         let prefix = format!(
-            " {marker}{size_text:>size_width$}  ",
+            " {marker}{size_text:>size_width$} {age:>age_width$}  ",
             size_width = SIZE_COLUMN_WIDTH,
+            age_width = AGE_COLUMN_WIDTH,
         );
         let path = relative_path(view, id);
         let budget = width.saturating_sub(cell_width(&prefix) + cell_width(suffix));
@@ -440,6 +447,55 @@ fn window_start(cursor: Option<usize>, row_count: usize, available_rows: usize) 
         .map(|index| index.saturating_sub(available_rows.saturating_sub(1)))
         .unwrap_or(0)
         .min(row_count.saturating_sub(available_rows))
+}
+
+fn format_age(modified_time: ModifiedTime, now: SystemTime) -> String {
+    let Some(modified_seconds) = modified_time.unix_seconds() else {
+        return "—".to_owned();
+    };
+    let elapsed = (unix_seconds(now) - i128::from(modified_seconds)).max(0);
+    format_age_seconds(u64::try_from(elapsed).unwrap_or(u64::MAX))
+}
+
+fn unix_seconds(time: SystemTime) -> i128 {
+    match time.duration_since(UNIX_EPOCH) {
+        Ok(duration) => i128::from(duration.as_secs()),
+        Err(error) => {
+            let duration = error.duration();
+            -i128::from(duration.as_secs()) - i128::from(duration.subsec_nanos() != 0)
+        }
+    }
+}
+
+fn format_age_seconds(seconds: u64) -> String {
+    const YEAR_SECONDS: u64 = 365 * 24 * 60 * 60;
+    if seconds / YEAR_SECONDS > 999 {
+        return "999y+".to_owned();
+    }
+    let units = [
+        (YEAR_SECONDS, "y"),
+        (7 * 24 * 60 * 60, "w"),
+        (24 * 60 * 60, "d"),
+        (60 * 60, "h"),
+        (60, "m"),
+        (1, "s"),
+    ];
+    for (index, (unit_seconds, suffix)) in units.iter().enumerate() {
+        if seconds >= *unit_seconds || index + 1 == units.len() {
+            let value = seconds / unit_seconds;
+            let Some((next_unit_seconds, next_suffix)) = units.get(index + 1) else {
+                return format!("{value}{suffix}");
+            };
+            let remainder = seconds % unit_seconds;
+            let next_value = remainder / next_unit_seconds;
+            return if next_value == 0 {
+                format!("{value}{suffix}")
+            } else {
+                format!("{value}{suffix}{next_value}{next_suffix}")
+            };
+        }
+    }
+    unreachable!()
 }
 
 fn state_columns(record: &NodeRecord, mode: SizeMode) -> (&'static str, String) {
@@ -741,12 +797,13 @@ fn format_size(size: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        clip_end, clip_start, escape_name, render, LsColors, Modal, Operation, Pane, Phase,
-        SizeMode, SortMode, Split, View,
+        clip_end, clip_start, escape_name, format_age, render, LsColors, Modal, Operation, Pane,
+        Phase, SizeMode, SortMode, Split, View,
     };
-    use fdu_core::{EntryType, FileIdentity, NodeId, NodeStatus, Tree};
+    use fdu_core::{EntryType, FileIdentity, ModifiedTime, NodeId, NodeStatus, Tree};
     use super::screen::{Screen, Style};
     use hashbrown::HashSet;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     #[test]
     fn display_names_escape_controls_and_preserve_invalid_bytes() {
@@ -754,6 +811,46 @@ mod tests {
             escape_name(b"safe\n\x1b-\xff\xc3\xa9"),
             "safe\\u{a}\\u{1b}-\\xffé"
         );
+    }
+
+    #[test]
+    fn ages_use_compact_adjacent_units_and_handle_unknown_or_future_times() {
+        let now_seconds = 2_000_000_000_i64;
+        let now = UNIX_EPOCH + Duration::from_secs(u64::try_from(now_seconds).unwrap());
+        let cases = [
+            (365 * 24 * 60 * 60, "1y"),
+            (2 * 7 * 24 * 60 * 60, "2w"),
+            (4 * 24 * 60 * 60, "4d"),
+            (5 * 60, "5m"),
+            (60 * 60 + 2 * 60, "1h2m"),
+            (6 * 60 + 2, "6m2s"),
+        ];
+        for (age, expected) in cases {
+            let modified = ModifiedTime::from_unix_seconds(now_seconds - age).unwrap();
+            assert_eq!(format_age(modified, now), expected);
+        }
+        assert_eq!(format_age(ModifiedTime::default(), now), "—");
+        assert_eq!(
+            format_age(ModifiedTime::from_unix_seconds(now_seconds + 30).unwrap(), now),
+            "0s"
+        );
+    }
+
+    #[test]
+    fn browser_rows_show_age_next_to_the_size() {
+        let mut fixture = fixture();
+        let now_seconds = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()).unwrap();
+        let modified_time = ModifiedTime::from_unix_seconds(now_seconds - 60 * 60 - 2 * 60).unwrap();
+        assert!(fixture.tree.set_modified_time(fixture.top, modified_time));
+        let rows = [fixture.top];
+        let marks = HashSet::new();
+        let colors = LsColors::default();
+        let view = base_view(&fixture, &rows, &marks, &[], &colors);
+
+        let output = draw(&view, 80, 12);
+
+        assert!(output.contains("1h2m"), "{output}");
+        assert!(output.contains("top.log"), "{output}");
     }
 
     #[test]

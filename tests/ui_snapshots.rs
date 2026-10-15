@@ -10,6 +10,7 @@
 mod support;
 
 use ptytest::{Key, SnapshotOptions};
+use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 use support::{layout_fixture, ScreenText, Session};
@@ -30,11 +31,98 @@ fn open(label: &str, columns: u16, rows: u16) -> Session {
 }
 
 fn freeze(session: &mut Session, name: &str) {
-    session
-        .terminal
-        .assert_snapshot_with(golden(name), SnapshotOptions::default().with_attributes())
-        .unwrap();
+    let snapshot = normalize_age_values(
+        &session
+            .terminal
+            .screen()
+            .to_text(SnapshotOptions::default().with_attributes()),
+    );
+    let path = golden(name);
+    if std::env::var("PTYTEST_UPDATE_SNAPSHOTS").is_ok_and(|value| value == "1") {
+        fs::write(path, snapshot).unwrap();
+    } else {
+        assert_eq!(fs::read_to_string(&path).unwrap(), snapshot, "snapshot {name} differs");
+    }
 }
+
+fn normalize_age_values(snapshot: &str) -> String {
+    let mut normalized = String::with_capacity(snapshot.len());
+    for line in snapshot.lines() {
+        let bytes = line.as_bytes();
+        let is_screen_row = bytes.get(0..2).is_some_and(|prefix| prefix.iter().all(u8::is_ascii_digit))
+            && line.contains('│');
+        if is_screen_row {
+            normalized.push_str(&normalize_age_row(line));
+        } else {
+            normalized.push_str(line);
+        }
+        normalized.push('\n');
+    }
+    normalized
+}
+
+fn normalize_age_row(line: &str) -> String {
+    let characters: Vec<char> = line.chars().collect();
+    let mut normalized = String::with_capacity(line.len());
+    let mut copied_through = 0;
+    let mut index = 0;
+    while index < characters.len() {
+        let Some(end) = age_value_end(&characters, index) else {
+            index += 1;
+            continue;
+        };
+        let age_width = end - index;
+        let padding = AGE_COLUMN_WIDTH.saturating_sub(age_width);
+        let mut start = index;
+        for _ in 0..padding {
+            if start == 0 || characters[start - 1] != '·' {
+                break;
+            }
+            start -= 1;
+        }
+        if start > 0 && characters[start - 1] == '·' && end < characters.len() && characters[end] == '·' {
+            normalized.extend(characters[copied_through..start].iter());
+            normalized.push_str("<age>");
+            copied_through = end;
+            index = end;
+        } else {
+            index = end;
+        }
+    }
+    normalized.extend(characters[copied_through..].iter());
+    normalized
+}
+
+fn age_value_end(characters: &[char], start: usize) -> Option<usize> {
+    if start > 0 && characters[start - 1].is_ascii_alphanumeric() {
+        return None;
+    }
+    if characters.get(start) == Some(&'—') {
+        return Some(start + 1);
+    }
+    let mut index = start;
+    let mut units = 0;
+    loop {
+        let digits_start = index;
+        while characters.get(index).is_some_and(char::is_ascii_digit) {
+            index += 1;
+        }
+        if digits_start == index || !characters.get(index).is_some_and(|unit| "ywdhms".contains(*unit)) {
+            return None;
+        }
+        units += 1;
+        index += 1;
+        if units == 2 || !characters.get(index).is_some_and(char::is_ascii_digit) {
+            break;
+        }
+    }
+    if characters.get(index) == Some(&'+') {
+        index += 1;
+    }
+    Some(index)
+}
+
+const AGE_COLUMN_WIDTH: usize = 5;
 
 #[test]
 fn ready_listing() {

@@ -558,9 +558,10 @@ pub(super) fn describe_directory(
     fd: BorrowedFd<'_>,
     root_mount: &MountIdentity,
 ) -> io::Result<DirectoryFacts> {
-    let (identity, link_count) = fsutil::identity_and_link_count(fd)?;
+    let (identity, link_count, modified_time) = fsutil::identity_link_count_and_modified_time(fd)?;
     Ok(DirectoryFacts {
         identity,
+        modified_time,
         link_count,
         same_mount: same_mount_on_fd(fd, root_mount, identity.device)?,
     })

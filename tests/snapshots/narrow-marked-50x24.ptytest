@@ -3,8 +3,8 @@ cursor: row=0 column=0 visible=false
 modes: alternate-screen=true application-cursor=false application-keypad=false bracketed-paste=false
 00│·fdu···read·only···apparent·sizes·················
 01│┌·Marked·2·items·(25.8·KiB,·49.7%·of·51.9·KiB)───┐
-02││·····17.5·KiB··directory-000030/················│
-03││······8.3·KiB··directory-000006/················│
+02││·····17.5·KiB·<age>··directory-000030/··········│
+03││······8.3·KiB·<age>··directory-000006/··········│
 04││················································│
 05││················································│
 06││················································│

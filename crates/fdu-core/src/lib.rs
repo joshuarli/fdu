@@ -1,5 +1,24 @@
 use std::ops::Range;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ModifiedTime(i64);
+
+impl ModifiedTime {
+    pub const fn from_unix_seconds(seconds: i64) -> Option<Self> {
+        if seconds == i64::MIN { None } else { Some(Self(seconds)) }
+    }
+
+    pub const fn unix_seconds(self) -> Option<i64> {
+        if self.0 == i64::MIN { None } else { Some(self.0) }
+    }
+}
+
+impl Default for ModifiedTime {
+    fn default() -> Self {
+        Self(i64::MIN)
+    }
+}
+
 /// An index into the tree, stored plus one so that `Option<NodeId>` is four bytes: every record
 /// holds four of them.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -81,6 +100,7 @@ pub struct ScanEntry {
     pub directory_token: Option<DirectoryToken>,
     pub entry_type: EntryType,
     pub identity: FileIdentity,
+    pub modified_time: ModifiedTime,
     pub link_count: u64,
     pub apparent_bytes: u64,
     pub allocated_bytes: u64,
@@ -148,6 +168,7 @@ pub struct NodeRecord {
     name: Range<u32>,
     pub entry_type: EntryType,
     pub identity: FileIdentity,
+    modified_time: ModifiedTime,
     pub link_count: u64,
     pub apparent_bytes: u64,
     pub allocated_bytes: u64,
@@ -169,6 +190,10 @@ impl NodeRecord {
 
     pub fn name_range(&self) -> Range<u32> {
         self.name.clone()
+    }
+
+    pub fn modified_time(&self) -> ModifiedTime {
+        self.modified_time
     }
 }
 
@@ -197,6 +222,7 @@ impl Tree {
                 name: 0..name_end,
                 entry_type: EntryType::Root,
                 identity,
+                modified_time: ModifiedTime::default(),
                 link_count,
                 apparent_bytes: 0,
                 allocated_bytes: 0,
@@ -275,6 +301,7 @@ impl Tree {
             name: name_start..name_end,
             entry_type,
             identity,
+            modified_time: ModifiedTime::default(),
             link_count,
             apparent_bytes,
             allocated_bytes,
@@ -294,6 +321,14 @@ impl Tree {
             return false;
         };
         record.state = state.into();
+        true
+    }
+
+    pub fn set_modified_time(&mut self, id: NodeId, modified_time: ModifiedTime) -> bool {
+        let Some(record) = self.nodes.get_mut(id.index()) else {
+            return false;
+        };
+        record.modified_time = modified_time;
         true
     }
 

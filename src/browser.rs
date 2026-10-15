@@ -449,10 +449,11 @@ fn duration_ms(duration: Option<Duration>) -> f64 {
 
 impl BrowserModel {
     fn new(root: &RootAnchor, read_only: bool, apparent: bool, terminal: TerminalSize) -> io::Result<Self> {
-        let tree = Tree::new(&root.name, root.identity, root.link_count).ok_or_else(|| {
+        let mut tree = Tree::new(&root.name, root.identity, root.link_count).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "root path exceeds index limits")
         })?;
         let current_directory = tree.root();
+        assert!(tree.set_modified_time(current_directory, root.modified_time()));
         let mut model = Self {
             tree: Arc::new(tree),
             token_nodes: vec![Some(current_directory)],
@@ -492,9 +493,10 @@ impl BrowserModel {
     }
 
     fn reset_for_rescan(&mut self, root: &RootAnchor) -> io::Result<()> {
-        let tree = Tree::new(&root.name, root.identity, root.link_count).ok_or_else(|| {
+        let mut tree = Tree::new(&root.name, root.identity, root.link_count).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "root path exceeds index limits")
         })?;
+        assert!(tree.set_modified_time(tree.root(), root.modified_time()));
         self.current_directory = tree.root();
         self.tree = Arc::new(tree);
         self.token_nodes.clear();
@@ -655,6 +657,7 @@ impl BrowserModel {
                         run.problem = true;
                         break;
                     };
+                    assert!(tree.set_modified_time(id, entry.modified_time));
                     if run.parent == current_directory {
                         new_ids.push(id);
                     }

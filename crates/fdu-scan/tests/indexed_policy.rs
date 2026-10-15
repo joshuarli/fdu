@@ -95,6 +95,7 @@ fn scan_to_tree_with_exclusions(
 ) -> io::Result<IndexedResult> {
     let mut tree = Tree::new(&root.name, root.identity, root.link_count)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "root index name too long"))?;
+    assert!(tree.set_modified_time(tree.root(), root.modified_time()));
     let mut tokens = vec![Some(tree.root())];
     let mut finished = HashSet::new();
     let (sender, receiver) = mpsc::sync_channel(capacity);
@@ -153,6 +154,7 @@ fn scan_to_tree_with_exclusions(
                             entry.state,
                         )
                         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "index exhausted"))?;
+                    assert!(tree.set_modified_time(id, entry.modified_time));
                     if let Some(token) = entry.directory_token {
                         if tokens.len() <= token.0 as usize {
                             tokens.resize(token.0 as usize + 1, None);
@@ -235,6 +237,29 @@ fn repeated_indexed_scans_on_one_anchor_start_at_the_root_directory_beginning() 
         assert_eq!(result.tree.len(), 4);
         assert_eq!(result.tree.record(result.tree.root()).unwrap().state, NodeState::Complete);
     }
+    Ok(())
+}
+
+#[test]
+fn indexed_scan_preserves_modification_times_for_root_files_and_directories() -> io::Result<()> {
+    let temp = TempDir::new()?;
+    fs::create_dir(temp.0.join("directory"))?;
+    fs::write(temp.0.join("file"), b"contents")?;
+    let root = open_root(&temp.0)?;
+    let expected_root_time = fs::metadata(&temp.0)?.mtime();
+    let expected_directory_time = fs::metadata(temp.0.join("directory"))?.mtime();
+    let expected_file_time = fs::metadata(temp.0.join("file"))?.mtime();
+
+    let result = scan_to_tree(root, 4)?;
+
+    let root_record = result.tree.record(result.tree.root()).unwrap();
+    assert_eq!(root_record.modified_time().unix_seconds(), Some(expected_root_time));
+    let directory = child_named(&result.tree, result.tree.root(), b"directory").unwrap();
+    let directory_record = result.tree.record(directory).unwrap();
+    assert_eq!(directory_record.modified_time().unix_seconds(), Some(expected_directory_time));
+    let file = child_named(&result.tree, result.tree.root(), b"file").unwrap();
+    let file_record = result.tree.record(file).unwrap();
+    assert_eq!(file_record.modified_time().unix_seconds(), Some(expected_file_time));
     Ok(())
 }
 
