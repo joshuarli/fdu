@@ -33,6 +33,7 @@ const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(20);
 /// so the scanner is never left blocked on a full channel while the interface sleeps.
 const SCAN_EVENT_WAIT: Duration = Duration::from_millis(1);
 const SCAN_REDRAW_INTERVAL: Duration = Duration::from_millis(100);
+const SCAN_RESORT_COST_FACTOR: u32 = 10;
 
 enum AppPhase {
     Scanning(ScanRun),
@@ -1298,6 +1299,14 @@ impl BrowserModel {
         });
     }
 
+    fn resort_during_scan(&mut self) {
+        if !self.scanning || self.range_mode {
+            return;
+        }
+        self.sort_listing();
+        self.rebuild_visible(self.cursor_moved_during_scan);
+    }
+
     fn sort_visible_if_needed(&mut self) -> bool {
         if self.range_mode {
             self.message = Some("Finish range marking before changing row order.".to_owned());
@@ -1748,6 +1757,7 @@ fn run_session(
     let mut phase = AppPhase::Scanning(ScanRun::start(root.clone(), exclusions.clone(), scan_metrics));
     let mut last_draw = Instant::now() - SCAN_REDRAW_INTERVAL;
     let mut draw_pending = true;
+    let mut next_resort_at = Instant::now();
     let mut first_live_listing_directory = None;
     let mut termination_signal = None;
     loop {
@@ -1963,6 +1973,11 @@ fn run_session(
             AppPhase::Ready => draw_pending,
         };
         if draw_now {
+            if matches!(&phase, AppPhase::Scanning(_)) && Instant::now() >= next_resort_at {
+                let sorting = Instant::now();
+                model.resort_during_scan();
+                next_resort_at = Instant::now() + sorting.elapsed() * SCAN_RESORT_COST_FACTOR;
+            }
             let drawing = profile.timer();
             let view = model.view(&phase);
             terminal.draw(&view)?;
@@ -2130,6 +2145,31 @@ mod tests {
 
         assert!(matches!(model.cursor, Cursor::Entry(id) if id == selected));
         assert_eq!(model.cursor_index(), Some(1));
+        Ok(())
+    }
+
+    #[test]
+    fn live_resort_orders_rows_by_size_and_keeps_the_cursor_entry() -> io::Result<()> {
+        let temp = TempDir::new()?;
+        let (_, mut model) = make_model(&temp, false)?;
+        let root = model.tree.root();
+        append(&mut model, root, b"small", EntryType::RegularFile, 1, 2);
+        let selected = append(&mut model, root, b"selected", EntryType::RegularFile, 10, 3);
+        let largest = append(&mut model, root, b"largest", EntryType::RegularFile, 100, 4);
+
+        model.resort_during_scan();
+        assert_eq!(model.visible[0], largest);
+        assert!(matches!(model.cursor, Cursor::Entry(id) if id == largest), "untouched cursor stays on the first row");
+
+        let (_, changed) = model.handle_intent(Intent::MoveDown, Phase::Scanning);
+        assert!(changed);
+        assert!(matches!(model.cursor, Cursor::Entry(id) if id == selected));
+        let bigger = append(&mut model, root, b"bigger", EntryType::RegularFile, 1000, 5);
+        model.resort_during_scan();
+
+        assert_eq!(model.visible[0], bigger);
+        assert!(matches!(model.cursor, Cursor::Entry(id) if id == selected));
+        assert_eq!(model.cursor_index(), Some(2));
         Ok(())
     }
 

@@ -169,17 +169,24 @@ pub struct View<'a> {
 pub struct TerminalSession {
     terminal: terminal::Terminal,
     screen: Screen,
+    scroll: Scroll,
+}
+
+#[derive(Default)]
+struct Scroll {
+    browser: usize,
+    marked: usize,
 }
 
 impl TerminalSession {
     pub fn enter() -> io::Result<Self> {
-        Ok(Self { terminal: terminal::Terminal::enter()?, screen: Screen::new(0, 0) })
+        Ok(Self { terminal: terminal::Terminal::enter()?, screen: Screen::new(0, 0), scroll: Scroll::default() })
     }
 
     pub fn draw(&mut self, view: &View<'_>) -> io::Result<()> {
         let size = terminal_size()?;
         let mut next = Screen::new(size.columns, size.rows);
-        render(&mut next, view);
+        render(&mut next, view, &mut self.scroll);
         self.terminal.write(&next.diff(&self.screen))?;
         self.screen = next;
         Ok(())
@@ -201,7 +208,7 @@ const AGE_COLUMN_WIDTH: usize = 5;
 /// Wide enough that every modal line fits an 80-column terminal.
 const MODAL_WIDTH_PERCENT: u16 = 94;
 
-fn render(frame: &mut Screen, view: &View<'_>) {
+fn render(frame: &mut Screen, view: &View<'_>, scroll: &mut Scroll) {
     let area = frame.area();
     let now = SystemTime::now();
     // Short terminals give up the title strip before the panes.
@@ -215,7 +222,7 @@ fn render(frame: &mut Screen, view: &View<'_>) {
     if title_height > 0 {
         render_title(frame, chunks[0], view);
     }
-    render_panes(frame, chunks[1], view, now);
+    render_panes(frame, chunks[1], view, scroll, now);
     if status_height > 0 {
         render_status(frame, chunks[2], view);
     }
@@ -238,21 +245,21 @@ fn render_title(frame: &mut Screen, area: Rect, view: &View<'_>) {
     frame.text(area, &text, Style::Reversed);
 }
 
-fn render_panes(frame: &mut Screen, area: Rect, view: &View<'_>, now: SystemTime) {
+fn render_panes(frame: &mut Screen, area: Rect, view: &View<'_>, scroll: &mut Scroll, now: SystemTime) {
     let size = TerminalSize { columns: frame.area().width, rows: frame.area().height };
     if !view.side_visible {
-        render_browser(frame, area, view, now);
+        render_browser(frame, area, view, scroll, now);
     } else if fits_two_panes(view.split, size) {
         let parts = match view.split {
             Split::Vertical => area.split_columns(55),
             Split::Horizontal => area.split_rows(60),
         };
-        render_browser(frame, parts[0], view, now);
-        render_marked(frame, parts[1], view, now);
+        render_browser(frame, parts[0], view, scroll, now);
+        render_marked(frame, parts[1], view, scroll, now);
     } else if view.focus == Pane::Marked {
-        render_marked(frame, area, view, now);
+        render_marked(frame, area, view, scroll, now);
     } else {
-        render_browser(frame, area, view, now);
+        render_browser(frame, area, view, scroll, now);
     }
 }
 
@@ -276,7 +283,7 @@ fn relative_path(view: &View<'_>, node: NodeId) -> String {
         .join("/")
 }
 
-fn render_browser(frame: &mut Screen, area: Rect, view: &View<'_>, now: SystemTime) {
+fn render_browser(frame: &mut Screen, area: Rect, view: &View<'_>, scroll: &mut Scroll, now: SystemTime) {
     let focused = view.focus == Pane::Browser;
     let current = view.tree.record(view.current_directory);
     let total = current.map_or(0, |record| size_of(record, view.size_mode));
@@ -293,15 +300,22 @@ fn render_browser(frame: &mut Screen, area: Rect, view: &View<'_>, now: SystemTi
     let budget = inner_width.saturating_sub(cell_width(&counts) + 1);
     let title = format!(" {}{counts}", clip_start(&location, budget));
     let inner = pane_border(frame, area, &title, focused);
-    render_rows(frame, inner, view, total, now);
+    render_rows(frame, inner, view, total, &mut scroll.browser, now);
 }
 
-fn render_rows(frame: &mut Screen, area: Rect, view: &View<'_>, directory_total: u64, now: SystemTime) {
+fn render_rows(
+    frame: &mut Screen,
+    area: Rect,
+    view: &View<'_>,
+    directory_total: u64,
+    top: &mut usize,
+    now: SystemTime,
+) {
     let focused = view.focus == Pane::Browser;
     let cursor_index = view.cursor_index;
     let available_rows = usize::from(area.height);
     let row_count = view.rows.len();
-    let start = window_start(cursor_index, row_count, available_rows);
+    let start = window_start(top, cursor_index, row_count, available_rows);
     let visible_end = start.saturating_add(available_rows).min(row_count);
     let width = usize::from(area.width);
     // The name is the most useful column, so the percentage and bar are dropped
@@ -379,7 +393,7 @@ fn row_style(view: &View<'_>, id: NodeId, record: &NodeRecord, name: &[u8]) -> S
     }
 }
 
-fn render_marked(frame: &mut Screen, area: Rect, view: &View<'_>, now: SystemTime) {
+fn render_marked(frame: &mut Screen, area: Rect, view: &View<'_>, scroll: &mut Scroll, now: SystemTime) {
     let focused = view.focus == Pane::Marked;
     let mut total = 0u64;
     for id in view.marked {
@@ -408,7 +422,7 @@ fn render_marked(frame: &mut Screen, area: Rect, view: &View<'_>, now: SystemTim
         return;
     }
     let available_rows = usize::from(inner.height);
-    let start = window_start(view.marked_cursor, view.marked.len(), available_rows);
+    let start = window_start(&mut scroll.marked, view.marked_cursor, view.marked.len(), available_rows);
     for (screen_row, index) in (start..view.marked.len().min(start + available_rows)).enumerate() {
         let id = view.marked[index];
         let Some(record) = view.tree.record(id) else {
@@ -441,12 +455,17 @@ fn render_marked(frame: &mut Screen, area: Rect, view: &View<'_>, now: SystemTim
 }
 
 /// First row of a window that keeps the cursor visible.
-fn window_start(cursor: Option<usize>, row_count: usize, available_rows: usize) -> usize {
-    cursor
-        .filter(|index| *index < row_count)
-        .map(|index| index.saturating_sub(available_rows.saturating_sub(1)))
-        .unwrap_or(0)
-        .min(row_count.saturating_sub(available_rows))
+fn window_start(top: &mut usize, cursor: Option<usize>, row_count: usize, available_rows: usize) -> usize {
+    let mut start = (*top).min(row_count.saturating_sub(available_rows));
+    if let Some(index) = cursor.filter(|index| *index < row_count) {
+        if index < start {
+            start = index;
+        } else if available_rows > 0 && index >= start + available_rows {
+            start = index + 1 - available_rows;
+        }
+    }
+    *top = start;
+    start
 }
 
 fn format_age(modified_time: ModifiedTime, now: SystemTime) -> String {
@@ -798,7 +817,7 @@ fn format_size(size: u64) -> String {
 mod tests {
     use super::{
         clip_end, clip_start, escape_name, format_age, render, LsColors, Modal, Operation, Pane,
-        Phase, SizeMode, SortMode, Split, View,
+        Phase, Scroll, SizeMode, SortMode, Split, View, window_start,
     };
     use fdu_core::{EntryType, FileIdentity, ModifiedTime, NodeId, NodeStatus, Tree};
     use super::screen::{Screen, Style};
@@ -933,6 +952,17 @@ mod tests {
     }
 
     #[test]
+    fn window_follows_the_cursor_up_from_the_bottom_instead_of_staying_anchored() {
+        let mut top = 0;
+        assert_eq!(window_start(&mut top, Some(99), 100, 10), 90);
+        assert_eq!(window_start(&mut top, Some(98), 100, 10), 90);
+        assert_eq!(window_start(&mut top, Some(90), 100, 10), 90);
+        assert_eq!(window_start(&mut top, Some(89), 100, 10), 89);
+        assert_eq!(window_start(&mut top, Some(95), 100, 10), 89);
+        assert_eq!(window_start(&mut top, Some(99), 100, 10), 90);
+    }
+
+    #[test]
     fn renderer_draws_only_the_visible_window_of_a_wide_listing() {
         let mut tree = Tree::new(b"root", FileIdentity { device: 1, inode: 1 }, 1).unwrap();
         let root = tree.root();
@@ -981,7 +1011,7 @@ mod tests {
 
     fn buffer(view: &View<'_>, columns: u16, rows: u16) -> Screen {
         let mut screen = Screen::new(columns, rows);
-        render(&mut screen, view);
+        render(&mut screen, view, &mut Scroll::default());
         screen
     }
 
