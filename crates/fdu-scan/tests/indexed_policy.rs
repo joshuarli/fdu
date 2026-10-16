@@ -222,6 +222,50 @@ fn scan_to_tree_with_exclusions(
 }
 
 #[test]
+#[cfg(target_os = "linux")]
+fn indexed_wide_tree_completes_with_a_low_hard_descriptor_limit() -> io::Result<()> {
+    const CHILD: &str = "FDU_LOW_DESCRIPTOR_CHILD";
+    const ROOT: &str = "FDU_LOW_DESCRIPTOR_ROOT";
+    let Some(limit) = std::env::var_os(CHILD) else {
+        let temp = TempDir::new()?;
+        for branch in 0..48 {
+            for leaf in 0..80 {
+                fs::create_dir_all(temp.0.join(format!("{branch}/{leaf}")))?;
+            }
+        }
+        let mut chain = temp.0.join("deep");
+        fs::create_dir(&chain)?;
+        for _ in 0..96 {
+            for sibling in 0..4 {
+                fs::create_dir(chain.join(format!("sibling-{sibling}")))?;
+            }
+            chain = chain.join("next");
+            fs::create_dir(&chain)?;
+        }
+        for limit in [64, 256] {
+            let output = std::process::Command::new(std::env::current_exe()?)
+                .args(["--exact", "indexed_wide_tree_completes_with_a_low_hard_descriptor_limit", "--nocapture"])
+                .env(CHILD, limit.to_string())
+                .env(ROOT, &temp.0)
+                .output()?;
+            assert!(output.status.success(), "descriptor limit {limit}: {}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        }
+        return Ok(());
+    };
+    let limit = limit.to_str().unwrap().parse::<u64>().unwrap();
+    rustix::process::setrlimit(
+        rustix::process::Resource::Nofile,
+        rustix::process::Rlimit { current: Some(limit), maximum: Some(limit) },
+    )?;
+    let root = PathBuf::from(std::env::var_os(ROOT).expect("parent fixture path"));
+    let result = scan_to_tree(open_root(&root)?, 64)?;
+    assert!(result.errors.is_empty(), "{} scan errors; first: {:?}", result.errors.len(), result.errors.first());
+    assert_eq!(result.tree.len(), 1 + 48 + 48 * 80 + 1 + 96 * 5);
+    assert_eq!(result.tree.record(result.tree.root()).unwrap().state, NodeState::Complete);
+    Ok(())
+}
+
+#[test]
 fn repeated_indexed_scans_on_one_anchor_start_at_the_root_directory_beginning() -> io::Result<()> {
     let temp = TempDir::new()?;
     fs::create_dir_all(temp.0.join("subdirectory"))?;

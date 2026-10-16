@@ -24,11 +24,8 @@ const INDEXED_SCAN_WORKER_LIMIT: usize = 64;
 const INDEXED_SCAN_WORKER_HEADROOM: usize = 24;
 const BASE_WORKERS_PER_CORE: usize = 2;
 const INDEXED_TASKS_PER_WORKER: usize = 8;
-/// Descriptors left for the process itself (terminal, deletion root, scan root).
 const RESERVED_DESCRIPTORS: usize = 128;
-/// A queued directory holds one descriptor, and a worker holds the directory it
-/// reads and the children it has opened but not yet queued.
-const DESCRIPTORS_PER_QUEUED_DIRECTORY: usize = 4;
+const DESCRIPTOR_BUDGET_DIVISOR: usize = 4;
 const MAX_SOFT_DESCRIPTOR_LIMIT: u64 = 1 << 20;
 
 pub(crate) type DirectoryBuffer = Vec<MaybeUninit<u8>>;
@@ -60,15 +57,17 @@ pub(crate) fn indexed_scan_limits() -> IndexedScanLimits {
     let cores = thread::available_parallelism().map(usize::from).unwrap_or(1);
     let workers = cores.saturating_add(INDEXED_SCAN_WORKER_HEADROOM).min(INDEXED_SCAN_WORKER_LIMIT);
     let base = cores.saturating_mul(BASE_WORKERS_PER_CORE);
-    let budget = descriptors.saturating_sub(RESERVED_DESCRIPTORS) / DESCRIPTORS_PER_QUEUED_DIRECTORY;
-    limits_within_budget(workers, base, budget, INDEXED_TASKS_PER_WORKER)
+    limits_within_budget(workers, base, descriptors, INDEXED_TASKS_PER_WORKER)
 }
 
-fn limits_within_budget(workers: usize, base: usize, queue_budget: usize, per_worker: usize) -> IndexedScanLimits {
+fn limits_within_budget(workers: usize, base: usize, descriptor_limit: usize, per_worker: usize) -> IndexedScanLimits {
+    let usable_descriptors = descriptor_limit.saturating_sub(RESERVED_DESCRIPTORS);
+    let queue_budget = usable_descriptors / DESCRIPTOR_BUDGET_DIVISOR;
     let workers = workers.min(queue_budget).max(1);
     IndexedScanLimits {
         workers,
         base_workers: base.clamp(1, workers),
+        retained_directory_budget: usable_descriptors.saturating_sub(2 * (workers + 1)).max(1),
         queued_directories: workers
             .saturating_mul(per_worker)
             .min(queue_budget)
@@ -270,10 +269,21 @@ mod tests {
     }
 
     #[test]
+    fn retained_and_temporary_directories_fit_the_process_descriptor_budget() {
+        for descriptor_limit in [256, 512, 1024, 4096, 1 << 20] {
+            let limits = limits_within_budget(64, 64, descriptor_limit, 8);
+            assert!(limits.retained_directory_budget + 2 * (limits.workers + 1) + RESERVED_DESCRIPTORS <= descriptor_limit);
+            assert!(limits.queued_directories <= limits.retained_directory_budget);
+        }
+        let limits = limits_within_budget(64, 64, 1 << 20, 8);
+        assert!(limits.retained_directory_budget > limits.queued_directories);
+    }
+
+    #[test]
     fn limits_never_queue_more_directories_than_the_descriptor_budget_allows() {
-        let limits = limits_within_budget(64, 64, 10, 8);
+        let limits = limits_within_budget(64, 64, RESERVED_DESCRIPTORS + 40, 8);
         assert_eq!((limits.workers, limits.queued_directories), (10, 10));
-        let limits = limits_within_budget(4, 4, 1000, 8);
+        let limits = limits_within_budget(4, 4, RESERVED_DESCRIPTORS + 4000, 8);
         assert_eq!((limits.workers, limits.queued_directories), (4, 32));
         let limits = limits_within_budget(8, 8, 0, 8);
         assert_eq!((limits.workers, limits.queued_directories), (1, 1));

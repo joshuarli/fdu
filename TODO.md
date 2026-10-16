@@ -11,15 +11,6 @@ Next: 11
 - **Effort:** M
 - **Design:** [FDU-1 RFC](docs/rfc/FDU-1-concurrent-replacement-deletion.md)
 
-### FDU-4 · P2 · Bound aggregate directory descriptors across Linux scan workers
-
-- **Area:** Concurrency
-- **Where:** `crates/fdu-scan/src/linux/platform.rs:58`, `crates/fdu-scan/src/indexed.rs:895`, `crates/fdu-scan/src/indexed.rs:1003`, `crates/fdu-scan/src/fsutil.rs:146`
-- **Problem:** Linux sizes the worker and queue limits from a process descriptor budget, but each worker-local outbox can independently retain up to the 64-directory flush threshold. With a 1024 hard descriptor limit, the configured budget permits 32 workers and 224 queued directories; the root scan and active workers can accumulate far more opened child directories than the budget accounts for. **Unproven runtime peak:** the exact overlap depends on scheduling and tree shape. When the hard limit is reached, descriptor retry cannot raise it further and child opens become incomplete scan entries.
-- **Recommendation:** Include worker-local held directories in one aggregate descriptor limit and add a low-`RLIMIT_NOFILE` wide-tree regression.
-- **Fix with:** `lifecycle-concurrency`
-- **Effort:** M
-
 ### FDU-9 · P3 · Pin the Linux release builder inputs
 
 - **Area:** Build

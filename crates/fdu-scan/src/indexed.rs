@@ -7,7 +7,7 @@ use fdu_core::{EntryType, ExclusionReason, FileIdentity, ModifiedTime, NodeStatu
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 use std::cell::RefCell;
 use std::io;
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -72,6 +72,7 @@ pub(crate) struct IndexedScanLimits {
     pub(crate) base_workers: usize,
     /// Directories that may wait with an open descriptor for a worker.
     pub(crate) queued_directories: usize,
+    pub(crate) retained_directory_budget: usize,
 }
 
 struct ScanEventSender<'a> {
@@ -85,15 +86,45 @@ impl ScanEventSender<'_> {
     }
 }
 
+struct RetainedDirectory {
+    descriptor: OwnedFd,
+    _permit: DirectoryPermit,
+}
+
+struct DirectoryPermit(Arc<AtomicUsize>);
+
+impl Drop for DirectoryPermit {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::Release);
+    }
+}
+
+struct DirectoryLineage {
+    parent: Option<Arc<DirectoryLineage>>,
+    name: Vec<u8>,
+    identity: FileIdentity,
+}
+
+impl Drop for DirectoryLineage {
+    fn drop(&mut self) {
+        let mut parent = self.parent.take();
+        while let Some(ancestor) = parent {
+            match Arc::try_unwrap(ancestor) {
+                Ok(mut ancestor) => parent = ancestor.parent.take(),
+                Err(_) => break,
+            }
+        }
+    }
+}
+
 enum IndexedDirectorySource {
-    Opened(Arc<OwnedFd>),
-    ReopenFromParent(Arc<OwnedFd>),
+    Opened(RetainedDirectory),
+    Reopen,
 }
 
 struct IndexedDirectoryTask {
     source: IndexedDirectorySource,
-    name: Vec<u8>,
-    identity: FileIdentity,
+    lineage: Arc<DirectoryLineage>,
     token: DirectoryToken,
     exclusion_node: Option<usize>,
 }
@@ -460,13 +491,8 @@ struct ScanContext<'a> {
     hints: ScanHints,
     progress: &'a ScanProgress<'a>,
     queue: &'a IndexedWorkQueue,
-}
-
-/// A directory the worker found but has not published yet.
-struct HeldTask {
-    task: IndexedDirectoryTask,
-    /// The directory it was found in, to reopen it from if its own descriptor is released.
-    parent: Option<Arc<OwnedFd>>,
+    root_directory: BorrowedFd<'a>,
+    descriptor_budget: Arc<AtomicUsize>,
 }
 
 /// What a worker has found but not yet sent. Entries of consecutive directories share one batch,
@@ -486,7 +512,7 @@ struct Outbox {
     releases: Vec<(DirectoryToken, bool)>,
     /// Directories to scan next, newest last. This worker takes them first, which keeps it inside
     /// one subtree and its descriptors few.
-    held: Vec<HeldTask>,
+    held: Vec<IndexedDirectoryTask>,
     held_open: usize,
     directories_scanned: u32,
 }
@@ -513,10 +539,10 @@ impl Outbox {
 
     fn pop_held(&mut self) -> Option<IndexedDirectoryTask> {
         let held = self.held.pop()?;
-        if matches!(held.task.source, IndexedDirectorySource::Opened(_)) {
+        if matches!(held.source, IndexedDirectorySource::Opened(_)) {
             self.held_open -= 1;
         }
-        Some(held.task)
+        Some(held)
     }
 
     /// Sends everything gathered, in the order described above. False means the receiver is gone.
@@ -533,18 +559,11 @@ impl Outbox {
                 return false;
             }
         }
-        // Directories the queue has no room for lose their descriptor and are reopened later by
-        // this worker, so the descriptors held never exceed the queue's bound.
         let mut kept = Vec::new();
-        for mut held in self.held.drain(..) {
-            match context.queue.try_push(held.task) {
-                Ok(()) => {}
-                Err(mut task) => {
-                    if let Some(parent) = held.parent.take() {
-                        task.source = IndexedDirectorySource::ReopenFromParent(parent);
-                    }
-                    kept.push(HeldTask { task, parent: None });
-                }
+        for held in self.held.drain(..) {
+            if let Err(mut task) = context.queue.try_push(held) {
+                task.source = IndexedDirectorySource::Reopen;
+                kept.push(task);
             }
         }
         self.held = kept;
@@ -640,6 +659,8 @@ pub(crate) fn scan_indexed(
         hints: scan_hints(anchor.as_fd()),
         progress: &progress,
         queue: &queue,
+        root_directory: anchor.as_fd(),
+        descriptor_budget: Arc::new(AtomicUsize::new(limits.retained_directory_budget.max(1))),
     };
 
     thread::scope(|scope| {
@@ -649,10 +670,13 @@ pub(crate) fn scan_indexed(
             .collect::<Vec<_>>();
         // The root is scanned like any other directory, on this thread, which then shares the
         // work its own subtree holds with the workers.
+        context.descriptor_budget.fetch_sub(1, Ordering::Relaxed);
         let root_task = IndexedDirectoryTask {
-            source: IndexedDirectorySource::Opened(Arc::new(root_scan_fd)),
-            name: Vec::new(),
-            identity: root_identity,
+            source: IndexedDirectorySource::Opened(RetainedDirectory {
+                descriptor: root_scan_fd,
+                _permit: DirectoryPermit(Arc::clone(&context.descriptor_budget)),
+            }),
+            lineage: Arc::new(DirectoryLineage { parent: None, name: Vec::new(), identity: root_identity }),
             token: DirectoryToken(0),
             exclusion_node: exclusions.root_node(),
         };
@@ -711,22 +735,15 @@ fn scan_indexed_task(
     context: &ScanContext<'_>,
     outbox: &mut Outbox,
 ) -> bool {
-    let directory = match task.source {
-        IndexedDirectorySource::Opened(directory) => directory,
-        IndexedDirectorySource::ReopenFromParent(parent) => {
-            let child = match open_directory_at(parent.as_fd(), task.name.as_slice()) {
-                Ok(child) => child,
+    let reopened;
+    let directory = match &task.source {
+        IndexedDirectorySource::Opened(directory) => directory.descriptor.as_fd(),
+        IndexedDirectorySource::Reopen => {
+            reopened = match reopen_directory(&task.lineage, context.root_directory, context.root_mount) {
+                Ok(directory) => directory,
                 Err(error) => return failed_task(task.token, error.to_string(), context, outbox),
             };
-            match describe_directory(child.as_fd(), context.root_mount) {
-                Ok(facts) if facts.identity != task.identity => {
-                    return failed_task(
-                        task.token,
-                        "directory identity changed before scanning".to_owned(),
-                        context,
-                        outbox,
-                    );
-                }
+            match describe_directory(reopened.as_fd(), context.root_mount) {
                 Ok(facts) if !facts.same_mount => {
                     outbox.notices.push(ScanEvent::DirectoryExcluded {
                         directory: task.token,
@@ -738,13 +755,40 @@ fn scan_indexed_task(
                 Ok(_) => {}
                 Err(error) => return failed_task(task.token, error.to_string(), context, outbox),
             }
-            Arc::new(child)
+            reopened.as_fd()
         }
     };
-    match scan_indexed_directory(&directory, task.token, task.exclusion_node, context, outbox) {
+    match scan_indexed_directory(directory, &task, context, outbox) {
         Ok(keep_running) => keep_running,
         Err(error) => failed_task(task.token, error.to_string(), context, outbox),
     }
+}
+
+fn reopen_directory(
+    lineage: &Arc<DirectoryLineage>,
+    root_directory: BorrowedFd<'_>,
+    root_mount: &MountIdentity,
+) -> io::Result<OwnedFd> {
+    let mut ancestors = Vec::new();
+    let mut next = Some(lineage.as_ref());
+    while let Some(ancestor) = next {
+        if ancestor.parent.is_some() {
+            ancestors.push(ancestor);
+        }
+        next = ancestor.parent.as_deref();
+    }
+    let mut directory = None::<OwnedFd>;
+    let mut ancestors = ancestors.into_iter().rev().peekable();
+    while let Some(ancestor) = ancestors.next() {
+        let parent = directory.as_ref().map_or(root_directory, AsFd::as_fd);
+        let child = open_directory_at(parent, ancestor.name.as_slice())?;
+        let facts = describe_directory(child.as_fd(), root_mount)?;
+        if facts.identity != ancestor.identity || (!facts.same_mount && ancestors.peek().is_some()) {
+            return Err(io::Error::other("directory identity or mount changed before scanning"));
+        }
+        directory = Some(child);
+    }
+    directory.ok_or_else(|| io::Error::other("root directory cannot be reopened as a child"))
 }
 
 fn failed_task(
@@ -762,14 +806,13 @@ fn failed_task(
 }
 
 fn scan_indexed_directory(
-    directory: &Arc<OwnedFd>,
-    token: DirectoryToken,
-    exclusion_node: Option<usize>,
+    directory: BorrowedFd<'_>,
+    task: &IndexedDirectoryTask,
     context: &ScanContext<'_>,
     outbox: &mut Outbox,
 ) -> io::Result<bool> {
     with_indexed_directory_buffer(|buffer| {
-        scan_indexed_directory_with_buffer(directory, token, exclusion_node, context, buffer, outbox)
+        scan_indexed_directory_with_buffer(directory, task, context, buffer, outbox)
     })
 }
 
@@ -796,13 +839,14 @@ impl ClassifiedEntry {
 
 fn classify_entry(
     entry: &StreamEntry<'_>,
-    directory: &Arc<OwnedFd>,
+    directory: BorrowedFd<'_>,
+    lineage: &Arc<DirectoryLineage>,
     token: DirectoryToken,
     exclusion_node: Option<usize>,
     context: &ScanContext<'_>,
     outbox: &mut Outbox,
 ) -> ClassifiedEntry {
-    let directory_fd = directory.as_fd();
+    let directory_fd = directory;
     let mut found = ClassifiedEntry {
         entry_type: EntryType::Other,
         identity: FileIdentity { device: 0, inode: 0 },
@@ -814,7 +858,6 @@ fn classify_entry(
         child_token: None,
         failure: None,
     };
-    // The identity seen before a directory is opened, to detect it being replaced in between.
     let mut expected_identity = None;
     match (entry.bulk(), entry.hint()) {
         (Some(bulk), _) => {
@@ -828,7 +871,6 @@ fn classify_entry(
                 found.allocated_bytes = bulk.allocated_bytes;
             }
         }
-        // Enumeration says directory, so opening it yields everything a stat would.
         (None, EntryHint::Directory) => found.entry_type = EntryType::Directory,
         (None, _) => match stat_entry_at(directory_fd, entry.name()) {
             Ok(stat) => {
@@ -892,26 +934,36 @@ fn classify_entry(
         };
         context.progress.register_child(token, child_token);
         found.child_token = Some(child_token);
-        outbox.held.push(HeldTask {
-            task: IndexedDirectoryTask {
-                source: IndexedDirectorySource::Opened(Arc::new(child)),
+        let source = if context.descriptor_budget
+            .try_update(Ordering::Acquire, Ordering::Relaxed, |available| available.checked_sub(1))
+            .is_ok()
+        {
+            outbox.held_open += 1;
+            IndexedDirectorySource::Opened(RetainedDirectory {
+                descriptor: child,
+                _permit: DirectoryPermit(Arc::clone(&context.descriptor_budget)),
+            })
+        } else {
+            IndexedDirectorySource::Reopen
+        };
+        outbox.held.push(IndexedDirectoryTask {
+            source,
+            lineage: Arc::new(DirectoryLineage {
+                parent: Some(Arc::clone(lineage)),
                 name: entry.name().to_bytes().to_vec(),
                 identity: facts.identity,
-                token: child_token,
-                exclusion_node: exclusion_node.filter(|node| context.exclusions.has_children(*node)),
-            },
-            parent: Some(Arc::clone(directory)),
+            }),
+            token: child_token,
+            exclusion_node: exclusion_node.filter(|node| context.exclusions.has_children(*node)),
         });
-        outbox.held_open += 1;
     }
     found
 }
 
 /// Scans one directory into the outbox. Returns false when the scan should stop.
 fn scan_indexed_directory_with_buffer(
-    directory: &Arc<OwnedFd>,
-    token: DirectoryToken,
-    exclusion_node: Option<usize>,
+    directory: BorrowedFd<'_>,
+    task: &IndexedDirectoryTask,
     context: &ScanContext<'_>,
     buffer: &mut DirectoryBuffer,
     outbox: &mut Outbox,
@@ -920,6 +972,7 @@ fn scan_indexed_directory_with_buffer(
         send_cancelled_once(context);
         return Ok(false);
     }
+    let token = task.token;
     let sample = DirectorySample::start(context, outbox);
     let mut stream = IndexedDirectoryStream::new(directory.as_fd(), buffer, context.hints);
     let mut complete = true;
@@ -948,14 +1001,14 @@ fn scan_indexed_directory_with_buffer(
             continue;
         }
 
-        let child_exclusion_node = context.exclusions.child(exclusion_node, name_bytes);
+        let child_exclusion_node = context.exclusions.child(task.exclusion_node, name_bytes);
         if child_exclusion_node.is_some_and(|node| context.exclusions.excludes(node)) {
             // An excluded path makes this directory incomplete, so it cannot be deleted as a whole.
             complete = false;
             continue;
         }
 
-        let mut found = classify_entry(&entry, directory, token, child_exclusion_node, context, outbox);
+        let mut found = classify_entry(&entry, directory, &task.lineage, token, child_exclusion_node, context, outbox);
         if found.state != NodeStatus::Complete {
             complete = false;
         }
@@ -1058,4 +1111,69 @@ fn allocate_directory_token(next_token: &AtomicUsize) -> io::Result<DirectoryTok
         .filter(|token| *token != NO_PARENT)
         .map(DirectoryToken)
         .ok_or_else(|| io::Error::new(io::ErrorKind::OutOfMemory, "too many directories in index"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn deep_directory_lineage_drops_without_recursive_stack_growth() {
+        thread::Builder::new().stack_size(64 * 1024).spawn(|| {
+            let identity = FileIdentity { device: 1, inode: 1 };
+            let mut lineage = Arc::new(DirectoryLineage { parent: None, name: Vec::new(), identity });
+            for _ in 0..100_000 {
+                lineage = Arc::new(DirectoryLineage { parent: Some(lineage), name: b"next".to_vec(), identity });
+            }
+            drop(lineage);
+        }).unwrap().join().unwrap();
+    }
+
+    #[test]
+    fn deferred_lineage_rejects_replaced_ancestors_and_symlinks() -> io::Result<()> {
+        let scratch = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.work/tmp");
+        fs::create_dir_all(&scratch)?;
+        let path = scratch.join(format!("fdu-lineage-{}", std::process::id()));
+        fs::create_dir(&path)?;
+        struct Fixture(std::path::PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                fs::remove_dir_all(&self.0).unwrap();
+            }
+        }
+        let fixture = Fixture(path);
+        fs::create_dir_all(fixture.0.join("parent/leaf"))?;
+        let root = crate::fsutil::open_directory(&fixture.0)?;
+        let mount = mount_identity(root.as_fd())?;
+        let root_lineage = Arc::new(DirectoryLineage {
+            parent: None,
+            name: Vec::new(),
+            identity: crate::fsutil::identity_of(root.as_fd())?,
+        });
+        let parent = open_directory_at(root.as_fd(), c"parent")?;
+        let parent_lineage = Arc::new(DirectoryLineage {
+            parent: Some(root_lineage),
+            name: b"parent".to_vec(),
+            identity: crate::fsutil::identity_of(parent.as_fd())?,
+        });
+        let leaf = open_directory_at(parent.as_fd(), c"leaf")?;
+        let leaf_identity = crate::fsutil::identity_of(leaf.as_fd())?;
+        let lineage = Arc::new(DirectoryLineage {
+            parent: Some(parent_lineage),
+            name: b"leaf".to_vec(),
+            identity: leaf_identity,
+        });
+        assert_eq!(crate::fsutil::identity_of(reopen_directory(&lineage, root.as_fd(), &mount)?.as_fd())?, leaf_identity);
+        fs::rename(fixture.0.join("parent"), fixture.0.join("moved"))?;
+        fs::create_dir(fixture.0.join("parent"))?;
+        fs::rename(fixture.0.join("moved/leaf"), fixture.0.join("parent/leaf"))?;
+        assert_eq!(crate::fsutil::identity_of(leaf.as_fd())?, leaf_identity);
+        assert!(reopen_directory(&lineage, root.as_fd(), &mount).is_err());
+        fs::rename(fixture.0.join("parent/leaf"), fixture.0.join("moved/leaf"))?;
+        fs::remove_dir(fixture.0.join("parent"))?;
+        std::os::unix::fs::symlink("moved", fixture.0.join("parent"))?;
+        assert!(reopen_directory(&lineage, root.as_fd(), &mount).is_err());
+        Ok(())
+    }
 }

@@ -30,6 +30,7 @@ pub(super) fn indexed_scan_limits() -> IndexedScanLimits {
         workers,
         base_workers: base_workers.min(workers),
         queued_directories: workers.saturating_mul(INDEXED_TASKS_PER_WORKER),
+        retained_directory_budget: usize::MAX,
     }
 }
 

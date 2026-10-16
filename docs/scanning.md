@@ -34,6 +34,16 @@ mount boundaries are omitted from totals.
 The shared indexed scanner uses worker-local directory queues and work stealing.
 It batches entries and completion events over the browser's bounded channel.
 Platform code supplies enumeration, metadata, mount identity, and pool limits.
+Linux sizes a shared descriptor retention budget from its file descriptor limit,
+reserving capacity for temporary opens and other process descriptors. The budget
+covers active workers, queues, and unpublished batches. A worker that cannot
+retain a descriptor records the
+directory's names and identities from the root and reopens it later without
+waiting for a permit. Reopening uses at most two temporary descriptors per
+worker and checks every ancestor's identity and mount without following
+symlinks. A renamed or replaced ancestor can therefore make a deferred directory
+incomplete, even when its original directory remains accessible elsewhere.
+
 See [`indexed.rs`](../crates/fdu-scan/src/indexed.rs),
 [`linux.rs`](../crates/fdu-scan/src/linux.rs), and
 [`macos.rs`](../crates/fdu-scan/src/macos.rs).
