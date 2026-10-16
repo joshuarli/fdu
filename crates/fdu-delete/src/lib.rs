@@ -240,6 +240,11 @@ fn append_postorder(tree: &Tree, root: NodeId, output: &mut Vec<NodeId>) {
     }
 }
 
+/// Executes a confirmed deletion plan. The root must be writable. Other
+/// processes must leave private quarantine directories, their contents, and
+/// recovery records untouched, including through existing directory descriptors.
+/// Interrupted captures are restored without overwrite before any removal, then
+/// execution fails with a request to rescan. Recovery never deletes captures.
 pub fn execute(
     root: OwnedFd,
     plan: DeletionPlan,
@@ -250,6 +255,7 @@ pub fn execute(
 }
 
 mod posix {
+    mod quarantine;
     use super::*;
     use rustix::fs::{self, AtFlags, FileType, Mode, OFlags, Stat};
     use rustix::io::Errno;
@@ -306,10 +312,13 @@ mod posix {
 
     struct Deletion<'a> {
         tree: &'a Tree,
+        quarantine: &'a quarantine::Session,
         root_mount: MountIdentity,
         cancelled: &'a AtomicBool,
         sender: &'a SyncSender<DeleteEvent>,
         after_operation: &'a (dyn Fn(usize) + Sync),
+        #[cfg(test)]
+        before_capture: &'a (dyn Fn(NodeId) + Sync),
         recorded: Vec<AtomicBool>,
         outcomes: Mutex<Vec<DeleteOutcome>>,
         completed: AtomicUsize,
@@ -336,6 +345,31 @@ mod posix {
         threads: usize,
         after_operation: impl Fn(usize) + Sync,
     ) {
+        run_inner(root, plan, cancelled, sender, threads, after_operation, #[cfg(test)] |_| {});
+    }
+
+    #[cfg(test)]
+    pub(super) fn run_with_capture_hook(
+        root: OwnedFd,
+        plan: DeletionPlan,
+        cancelled: Arc<AtomicBool>,
+        sender: SyncSender<DeleteEvent>,
+        threads: usize,
+        after_operation: impl Fn(usize) + Sync,
+        before_capture: impl Fn(NodeId) + Sync,
+    ) {
+        run_inner(root, plan, cancelled, sender, threads, after_operation, before_capture);
+    }
+
+    fn run_inner(
+        root: OwnedFd,
+        plan: DeletionPlan,
+        cancelled: Arc<AtomicBool>,
+        sender: SyncSender<DeleteEvent>,
+        threads: usize,
+        after_operation: impl Fn(usize) + Sync,
+        #[cfg(test)] before_capture: impl Fn(NodeId) + Sync,
+    ) {
         let tree: &Tree = &plan.tree;
         let root_record = tree.record(tree.root()).expect("tree has root");
         let expected_root = root_record.identity;
@@ -350,12 +384,19 @@ mod posix {
                 return;
             }
         };
+        let quarantine = match quarantine::Session::start(root.as_fd()) {
+            Ok(session) => session,
+            Err(error) => { send_failure(&sender, &error.to_string()); return; }
+        };
         let deletion = Deletion {
             tree,
+            quarantine: &quarantine,
             root_mount,
             cancelled: &cancelled,
             sender: &sender,
             after_operation: &after_operation,
+            #[cfg(test)]
+            before_capture: &before_capture,
             recorded: (0..tree.len()).map(|_| AtomicBool::new(false)).collect(),
             outcomes: Mutex::new(Vec::with_capacity(OUTCOME_BATCH_SIZE)),
             completed: AtomicUsize::new(0),
@@ -421,12 +462,16 @@ mod posix {
         if !flush(&sender, &mut outcomes) {
             return;
         }
+        if let Err(error) = quarantine.finish() {
+            send_failure(&sender, &error.to_string());
+            return;
+        }
         let _ = sender.send(DeleteEvent::Finished);
     }
 
     impl Deletion<'_> {
         fn stopped(&self) -> bool {
-            self.cancelled.load(Ordering::Relaxed) || self.receiver_gone.load(Ordering::Relaxed)
+            self.cancelled.load(Ordering::Relaxed) || self.receiver_gone.load(Ordering::Relaxed) || self.quarantine.recovery_required()
         }
 
         fn record(&self, node: NodeId, kind: OutcomeKind, message: Option<String>) {
@@ -698,10 +743,9 @@ mod posix {
             }
             Err(error) => return deletion.record(node, OutcomeKind::Failed, Some(error.to_string())),
         }
-        unlink(deletion, parent_fd, name, node, AtFlags::REMOVEDIR);
+        capture_and_remove(deletion, parent_fd, name, node, AtFlags::REMOVEDIR);
     }
 
-    /// Removes one entry that is not a directory, after checking it is the entry that was indexed.
     fn delete_file(deletion: &Deletion<'_>, parent_fd: BorrowedFd<'_>, node: NodeId) {
         let record = deletion.tree.record(node).expect("deletion target exists");
         let name = deletion.tree.name(node).expect("indexed entry has name");
@@ -721,25 +765,12 @@ mod posix {
             }
             Err(error) => return deletion.record(node, OutcomeKind::Failed, Some(error.to_string())),
         }
-        unlink(deletion, parent_fd, name, node, AtFlags::empty());
+        capture_and_remove(deletion, parent_fd, name, node, AtFlags::empty());
     }
 
-    fn unlink(deletion: &Deletion<'_>, parent_fd: BorrowedFd<'_>, name: &[u8], node: NodeId, flags: AtFlags) {
-        match fs::unlinkat(parent_fd, name, flags) {
-            Ok(()) => deletion.record(node, OutcomeKind::Deleted, None),
-            Err(Errno::NOENT) => deletion.record(node, OutcomeKind::AlreadyAbsent, None),
-            Err(Errno::INTR) => deletion.record(
-                node,
-                OutcomeKind::Failed,
-                Some("unlink was interrupted; removal outcome is uncertain, refresh required".to_owned()),
-            ),
-            Err(Errno::NOTEMPTY) => deletion.record(
-                node,
-                OutcomeKind::Failed,
-                Some("directory gained unindexed children".to_owned()),
-            ),
-            Err(error) => deletion.record(node, OutcomeKind::Failed, Some(io::Error::from(error).to_string())),
-        }
+    fn capture_and_remove(deletion: &Deletion<'_>, parent_fd: BorrowedFd<'_>, name: &[u8], node: NodeId, flags: AtFlags) {
+        let (kind, message) = deletion.quarantine.remove(deletion, parent_fd, name, node, flags);
+        deletion.record(node, kind, message);
     }
 
     fn stat_at(parent: BorrowedFd<'_>, name: &[u8]) -> Result<Stat, Errno> {
@@ -947,7 +978,7 @@ mod tests {
     }
 
     mod filesystem {
-        use crate::posix::run_with;
+        use crate::posix::{run_with, run_with_capture_hook};
         use crate::{create_plan, DeleteEvent, DeleteOutcome, DeletionPlan, OutcomeKind};
         use fdu_core::{EntryType, FileIdentity, NodeId, NodeStatus, Tree};
         use rustix::fs::{Mode, OFlags};
@@ -1161,8 +1192,174 @@ mod tests {
             outcomes
         }
 
+        fn execute_with_replacement(
+            root: &Path,
+            plan: DeletionPlan,
+            target: NodeId,
+            directory: bool,
+        ) -> io::Result<(Vec<DeleteOutcome>, FileIdentity, fs::File)> {
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let (sender, receiver) = mpsc::sync_channel(8);
+            let (reached_sender, reached_receiver) = mpsc::sync_channel(1);
+            let after_metadata = Arc::new(std::sync::Barrier::new(2));
+            let replacement_ready = Arc::new(std::sync::Barrier::new(2));
+            let worker_after_metadata = Arc::clone(&after_metadata);
+            let worker_replacement_ready = Arc::clone(&replacement_ready);
+            let root = root.to_path_buf();
+            let worker_root = root.clone();
+            let worker = thread::spawn(move || {
+                run_with_capture_hook(
+                    root_fd(&worker_root).unwrap(),
+                    plan,
+                    cancelled,
+                    sender,
+                    1,
+                    |_| {},
+                    move |node| {
+                        if node == target {
+                            reached_sender.send(()).expect("test runner receives the unlink boundary");
+                            worker_after_metadata.wait();
+                            worker_replacement_ready.wait();
+                        }
+                    },
+                );
+            });
+
+            if reached_receiver.recv_timeout(Duration::from_secs(5)).is_err() {
+                worker.join().expect("deletion worker exits when the boundary is not reached");
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "deletion worker did not reach unlink boundary"));
+            }
+
+            let target_path = root.join("target");
+            let indexed_path = root.join("indexed-original");
+            let replacement_result: io::Result<(FileIdentity, fs::File)> = (|| {
+                fs::rename(&target_path, &indexed_path)?;
+                if directory {
+                    fs::create_dir(&target_path)?;
+                } else {
+                    fs::write(&target_path, b"unindexed replacement")?;
+                }
+                let held = fs::File::open(&target_path)?;
+                let metadata = held.metadata()?;
+                Ok((FileIdentity { device: metadata.dev(), inode: metadata.ino() }, held))
+            })();
+            after_metadata.wait();
+            replacement_ready.wait();
+
+            let mut outcomes = Vec::new();
+            let mut execution_error = None;
+            loop {
+                match receiver.recv_timeout(Duration::from_secs(5)) {
+                    Ok(DeleteEvent::Outcomes(batch)) => outcomes.extend(batch),
+                    Ok(DeleteEvent::Failed { message }) => execution_error = Some(message),
+                    Ok(DeleteEvent::Progress { .. }) => {}
+                    Ok(DeleteEvent::Finished) => break,
+                    Err(error) => {
+                        execution_error = Some(format!("deletion worker did not finish: {error}"));
+                        break;
+                    }
+                }
+            }
+            worker.join().expect("deletion worker exits after unlink boundary release");
+            if let Some(message) = execution_error {
+                return Err(io::Error::other(message));
+            }
+            let (replacement_identity, replacement_handle) = replacement_result?;
+            Ok((outcomes, replacement_identity, replacement_handle))
+        }
+
         fn outcome(outcomes: &[DeleteOutcome], node: NodeId) -> OutcomeKind {
             outcomes.iter().find(|item| item.node == node).expect("target has an outcome").kind
+        }
+
+        #[test]
+        fn cleanup_failure_preserves_completed_removal_outcomes() -> io::Result<()> {
+            let temp = TempRoot::new()?;
+            fs::write(temp.root.join("target"), b"indexed file")?;
+            let tree = index_root(&temp.root)?;
+            let target = child(&tree, tree.root(), b"target");
+            let plan = create_plan(tree, &[target]).unwrap();
+            let (sender, receiver) = mpsc::sync_channel(8);
+            run_with(root_fd(&temp.root)?, plan, Arc::new(AtomicBool::new(false)), sender, 1, |_| {
+                let workspace = fs::read_dir(&temp.root).unwrap().map(Result::unwrap)
+                    .find(|entry| entry.file_name().as_bytes().starts_with(b".fdu-quarantine-v1-"))
+                    .expect("active workspace");
+                fs::remove_file(workspace.path().join("header")).unwrap();
+            });
+            let mut outcomes = Vec::new();
+            let mut failed = false;
+            for event in receiver {
+                match event {
+                    DeleteEvent::Outcomes(batch) => {
+                        assert!(!failed, "outcomes precede terminal cleanup failure");
+                        outcomes.extend(batch);
+                    }
+                    DeleteEvent::Failed { .. } => failed = true,
+                    DeleteEvent::Progress { .. } | DeleteEvent::Finished => {}
+                }
+            }
+            assert!(failed);
+            assert_eq!(outcomes.len(), 1);
+            assert_eq!(outcome(&outcomes, target), OutcomeKind::Deleted);
+            assert!(!temp.root.join("target").exists());
+            Ok(())
+        }
+
+        #[test]
+        fn file_replacement_after_metadata_check_is_not_deleted() -> io::Result<()> {
+            let temp = TempRoot::new()?;
+            fs::write(temp.root.join("target"), b"indexed file")?;
+            let tree = index_root(&temp.root)?;
+            let target = child(&tree, tree.root(), b"target");
+            let indexed_identity = tree.record(target).expect("target is indexed").identity;
+            let plan = create_plan(Arc::clone(&tree), &[target]).unwrap();
+            let (outcomes, replacement_identity, replacement_handle) =
+                execute_with_replacement(&temp.root, plan, target, false)?;
+
+            assert_ne!(indexed_identity, replacement_identity);
+            let held_metadata = replacement_handle.metadata()?;
+            assert_eq!(held_metadata.dev(), replacement_identity.device);
+            assert_eq!(held_metadata.ino(), replacement_identity.inode);
+            assert_ne!(
+                outcome(&outcomes, target),
+                OutcomeKind::Deleted,
+                "unindexed replacement was deleted; indexed identity {indexed_identity:?}, replacement identity {replacement_identity:?}, held FD identity {}:{}",
+                held_metadata.dev(),
+                held_metadata.ino()
+            );
+            assert_eq!(fs::read(temp.root.join("target"))?, b"unindexed replacement");
+            assert_eq!(fs::read(temp.root.join("indexed-original"))?, b"indexed file");
+            drop(replacement_handle);
+            Ok(())
+        }
+
+        #[test]
+        fn empty_directory_replacement_after_metadata_check_is_not_deleted() -> io::Result<()> {
+            let temp = TempRoot::new()?;
+            fs::create_dir(temp.root.join("target"))?;
+            let tree = index_root(&temp.root)?;
+            let target = child(&tree, tree.root(), b"target");
+            let indexed_identity = tree.record(target).expect("target is indexed").identity;
+            let plan = create_plan(Arc::clone(&tree), &[target]).unwrap();
+            let (outcomes, replacement_identity, replacement_handle) =
+                execute_with_replacement(&temp.root, plan, target, true)?;
+
+            assert_ne!(indexed_identity, replacement_identity);
+            let held_metadata = replacement_handle.metadata()?;
+            assert_eq!(held_metadata.dev(), replacement_identity.device);
+            assert_eq!(held_metadata.ino(), replacement_identity.inode);
+            assert_ne!(
+                outcome(&outcomes, target),
+                OutcomeKind::Deleted,
+                "unindexed replacement was deleted; indexed identity {indexed_identity:?}, replacement identity {replacement_identity:?}, held FD identity {}:{}",
+                held_metadata.dev(),
+                held_metadata.ino()
+            );
+            assert_eq!(fs::metadata(temp.root.join("target"))?.ino(), replacement_identity.inode);
+            assert!(temp.root.join("indexed-original").is_dir());
+            assert_eq!(fs::read_dir(temp.root.join("target"))?.count(), 0);
+            drop(replacement_handle);
+            Ok(())
         }
 
         #[test]

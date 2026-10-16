@@ -52,11 +52,11 @@ detail. Do not store generated fixture trees or full scan output there.
   end-to-end time improves.
 - Consider batched Linux deletion only if profiles show syscall overhead is
   material. Stop if scan time or filesystem journal and directory locks
-  dominate, and keep the identity check before each unlink. macOS has no
+  dominate, and preserve capture validation before each unlink. macOS has no
   equivalent batch interface.
 - Revisit adaptive deletion workers only with repeatable measurements on quiet
   and busy hosts. The current pool has 16 threads. If implemented, tune against
   sustained throughput, grow slowly, shrink when throughput falls, and ignore
   short jobs that finish before measurements settle. Keep the controller out
-  of the identity-check and unlink path.
+  of the capture-validation and unlink path.
 

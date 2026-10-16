@@ -1,6 +1,9 @@
 # FDU-1: Concurrent replacement can unlink an unindexed entry
 
-Status: draft
+Status: accepted
+
+The [later isolation-boundary decision](FDU-1-deletion-isolation-boundary.md)
+supersedes the concurrency boundary recorded here.
 
 ## Summary
 
@@ -32,6 +35,32 @@ quarantine namespace is protected and how mismatches or process crashes are
 recovered. No portable unconditional compare-inode-and-unlink operation has
 been established.
 
+### Prototype results
+
+A Linux prototype tested atomic `renameat2(RENAME_NOREPLACE)` capture into a
+same-filesystem directory with mode `0700`. It checked the captured device,
+inode, and entry type before descriptor-relative removal. Tests covered files
+and empty directories.
+
+Source replacement before capture produced an identity mismatch. Restoration
+with `RENAME_NOREPLACE` restored the captured entry when the source name was
+absent. When another entry occupied that name, restoration retained both
+entries without overwriting either.
+
+A separate process running as the same user replaced the captured name after
+validation and before unlink. Socket handshakes fixed the interleaving without
+sleeps. The unlink removed the unindexed replacement, while the indexed entry
+survived under another name. An open descriptor to the replacement reported a
+zero link count after removal. This happened for both files and empty
+directories. Mode `0700` does not isolate a directory from its owner's other
+processes, so this quarantine design fails the accepted contract.
+
+Killing the capturing process after its rename left the captured entry intact.
+The surviving parent restored it when the source name was absent and retained
+both entries on a restoration conflict. These tests used the parent's known
+source mapping and identity. They do not establish recovery after all processes
+exit, protection of recovery metadata, or power-loss durability.
+
 ## Alternatives considered
 
 - Repeat the metadata check immediately before `unlinkat`. The race remains
@@ -44,14 +73,17 @@ been established.
 
 ## Open questions
 
-- Should the hard contract cover arbitrary concurrent namespace mutation, as
-  the current indexed-entry invariant implies? Recommendation: yes.
-- Is the visible rename and conflict-safe crash recovery required by a
-  quarantine design acceptable? Recommendation: prototype it before selecting
-  it; do not claim the race is closed until mismatch restoration and recovery
-  are defined.
+- Which removal primitive or isolation mechanism binds removal to the indexed
+  identity despite concurrent namespace mutation?
+- If a future design captures entries before removal, how does recovery find
+  and validate them after all participating processes exit?
 
 ## Decision
 
-Pending owner decision on the concurrency contract and an implementation design
-that satisfies it.
+On 2026-10-16, the owner accepted both recommendations: preserve the indexed-only
+deletion contract under arbitrary concurrent namespace mutation, and prototype
+quarantine before selecting an implementation.
+
+The prototype rejects mode-`0700` quarantine as sufficient protection. The
+accepted contract remains unchanged. No production removal design is selected,
+and the existing deletion race remains open.

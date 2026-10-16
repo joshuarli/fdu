@@ -95,8 +95,16 @@ is unavailable in summary-only builds.
 - An incomplete root scan, incomplete selected directory, or nested mount
   rejects the deletion plan before any entry is removed.
 - Only names found by the scan are planned. A child created under a different
-  name after scanning is left in place; if a scanned name is replaced between
-  the identity check and removal, the replacement can be removed.
+  name after scanning is left in place. A replacement of a scanned entry is
+  left intact or restored without overwriting concurrent changes.
+
+Both deletion modes require write access to the scan root for a private
+`.fdu-quarantine-v1-*` directory. Other processes must leave the quarantine
+directory, its contents, and recovery records untouched, including through open
+directory descriptors.
+After an interruption, a confirmed deletion request restores retained captures
+and stops for a rescan. Conflicts retain both entries and report the capture
+location. See [deletion recovery](docs/deletion.md#interruption-and-recovery).
 
 ### Environment
 
