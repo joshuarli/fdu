@@ -11,15 +11,6 @@ Next: 11
 - **Effort:** M
 - **Design:** [FDU-1 RFC](docs/rfc/FDU-1-concurrent-replacement-deletion.md)
 
-### FDU-2 · P1 · Linux summary reports direct mount boundaries as zero bytes
-
-- **Area:** Data
-- **Where:** `crates/fdu-scan/src/linux.rs:438`, `src/main.rs:126`, `crates/fdu-scan/src/macos.rs:301`, `crates/fdu-scan/tests/indexed_policy.rs:591`
-- **Problem:** When an immediate child is itself a mount boundary, Linux increments the boundary count and returns size zero, then constructs the summary row with no exclusion reason. The CLI therefore prints `0B` instead of the mount-boundary label that the shared writer emits for macOS. The privileged mount test checks the boundary count but not the summary row. Users can mistake an excluded filesystem for an empty directory.
-- **Recommendation:** Preserve the mount-boundary classification in Linux summary results and assert the emitted row in the mount-boundary test.
-- **Fix with:** `os-boundaries`, `root-cause`
-- **Effort:** S
-
 ### FDU-4 · P2 · Bound aggregate directory descriptors across Linux scan workers
 
 - **Area:** Concurrency

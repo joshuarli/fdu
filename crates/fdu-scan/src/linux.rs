@@ -435,17 +435,32 @@ fn scan_top_level_entry<const APPARENT: bool>(
         }
     }
 
-    let disk_size = scan_child_directory::<APPARENT>(
+    let (disk_size, exclusion) = match open_child_directory(
         parent,
         entry.as_c_str(names),
-        child_position,
-        skipped_entries,
-        mount_boundaries,
-    )?;
+        child_position.ext4_eof_cookie,
+    )? {
+        OpenedChildDirectory::MountBoundary => {
+            mount_boundaries.fetch_add(1, Ordering::Relaxed);
+            (0, Some(fdu_core::ExclusionReason::MountBoundary))
+        }
+        OpenedChildDirectory::Directory(child, child_ext4_eof_cookie) => {
+            let disk_size = scan_directory_contents::<APPARENT>(
+                child,
+                SummaryScanPosition {
+                    ext4_eof_cookie: child_ext4_eof_cookie,
+                    ..child_position
+                },
+                skipped_entries,
+                mount_boundaries,
+            )?;
+            (disk_size, None)
+        }
+    };
     Ok(Some(TopLevelDirectory {
         name: OsString::from_vec(entry.as_c_str(names).to_bytes().to_vec()),
         disk_size,
-        exclusion: None,
+        exclusion,
     }))
 }
 
@@ -1125,6 +1140,51 @@ mod tests {
         drop(buffers);
         let cached_count = DIRECTORY_ENTRY_POOL.with(|pool| pool.borrow().len());
         assert_eq!(cached_count, super::MAX_CACHED_DIRECTORY_ENTRY_VECTORS);
+    }
+
+    #[test]
+    fn top_level_mount_boundaries_preserve_their_exclusion() -> io::Result<()> {
+        let root = fsutil::open_directory(std::path::Path::new("/"))?;
+        let proc = fsutil::open_directory(std::path::Path::new("/proc"))?;
+        assert_ne!(
+            super::mount_id_for_fd(root.as_fd())?,
+            super::mount_id_for_fd(proc.as_fd())?,
+        );
+        let exclusions = crate::ScanExclusions::default();
+        let position = super::SummaryScanPosition::root(&exclusions, super::is_ext4(root.as_fd()));
+        for apparent in [false, true] {
+            for kind in [EntryKind::Directory, EntryKind::Unknown] {
+                let skipped_entries = AtomicUsize::new(0);
+                let mount_boundaries = AtomicUsize::new(0);
+                let entry = DirectoryEntry {
+                    name_offset: 0,
+                    name_length: 4,
+                    kind,
+                };
+                let scan = if apparent {
+                    super::scan_top_level_entry::<true>
+                } else {
+                    super::scan_top_level_entry::<false>
+                };
+                let directory = scan(
+                    root.as_fd(),
+                    b"proc\0",
+                    entry,
+                    position,
+                    &skipped_entries,
+                    &mount_boundaries,
+                )?.unwrap();
+                assert_eq!(directory.name, "proc");
+                assert_eq!(directory.disk_size, 0);
+                assert_eq!(
+                    directory.exclusion,
+                    Some(fdu_core::ExclusionReason::MountBoundary),
+                );
+                assert_eq!(skipped_entries.load(Ordering::Relaxed), 0);
+                assert_eq!(mount_boundaries.load(Ordering::Relaxed), 1);
+            }
+        }
+        Ok(())
     }
 
     #[test]
