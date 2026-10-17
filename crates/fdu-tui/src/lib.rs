@@ -170,6 +170,7 @@ pub struct TerminalSession {
     terminal: terminal::Terminal,
     screen: Screen,
     scroll: Scroll,
+    age_reference: Option<SystemTime>,
 }
 
 #[derive(Default)]
@@ -180,13 +181,24 @@ struct Scroll {
 
 impl TerminalSession {
     pub fn enter() -> io::Result<Self> {
-        Ok(Self { terminal: terminal::Terminal::enter()?, screen: Screen::new(0, 0), scroll: Scroll::default() })
+        Ok(Self {
+            terminal: terminal::Terminal::enter()?,
+            screen: Screen::new(0, 0),
+            scroll: Scroll::default(),
+            age_reference: None,
+        })
     }
 
     pub fn draw(&mut self, view: &View<'_>) -> io::Result<()> {
         let size = terminal_size()?;
         let mut next = Screen::new(size.columns, size.rows);
-        render(&mut next, view, &mut self.scroll);
+        let now = if view.phase == Phase::Scanning {
+            self.age_reference = None;
+            SystemTime::now()
+        } else {
+            *self.age_reference.get_or_insert_with(SystemTime::now)
+        };
+        render(&mut next, view, &mut self.scroll, now);
         self.terminal.write(&next.diff(&self.screen))?;
         self.screen = next;
         Ok(())
@@ -208,9 +220,8 @@ const AGE_COLUMN_WIDTH: usize = 5;
 /// Wide enough that every modal line fits an 80-column terminal.
 const MODAL_WIDTH_PERCENT: u16 = 94;
 
-fn render(frame: &mut Screen, view: &View<'_>, scroll: &mut Scroll) {
+fn render(frame: &mut Screen, view: &View<'_>, scroll: &mut Scroll, now: SystemTime) {
     let area = frame.area();
-    let now = SystemTime::now();
     // Short terminals give up the title strip before the panes.
     let title_height = u16::from(area.height >= 8);
     let status_height = u16::from(area.height >= 3);
@@ -365,7 +376,7 @@ fn render_rows(
             _ => "",
         };
         let prefix = format!(
-            "{mark} {marker}{size_text:>size_width$} {percent}{bar}{link}{age:>age_width$} ",
+            "{mark} {marker}{size_text:>size_width$} {percent}{bar}{link} {age:>age_width$} ",
             size_width = SIZE_COLUMN_WIDTH,
             age_width = AGE_COLUMN_WIDTH,
         );
@@ -1011,7 +1022,7 @@ mod tests {
 
     fn buffer(view: &View<'_>, columns: u16, rows: u16) -> Screen {
         let mut screen = Screen::new(columns, rows);
-        render(&mut screen, view, &mut Scroll::default());
+        render(&mut screen, view, &mut Scroll::default(), SystemTime::now());
         screen
     }
 
