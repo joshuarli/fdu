@@ -4,6 +4,7 @@ use rayon::prelude::*;
 use rustix::fs::{self, AtFlags, FileType, Mode, OFlags, RawDir, ResolveFlags, Statx, StatxFlags};
 use rustix::io::Errno;
 use std::cell::RefCell;
+use std::cmp::Reverse;
 use std::ffi::{CStr, OsString};
 use std::io;
 use std::marker::PhantomData;
@@ -81,7 +82,7 @@ struct DirectoryEntry {
 }
 
 thread_local! {
-    static DIRECTORY_ENTRY_POOL: RefCell<Vec<Vec<DirectoryEntry>>> = RefCell::new(Vec::new());
+    static DIRECTORY_ENTRY_POOL: RefCell<Vec<Vec<DirectoryEntry>>> = const { RefCell::new(Vec::new()) };
 }
 
 // The Rc marker keeps each buffer lease on the thread whose TLS pool owns its capacity.
@@ -392,7 +393,7 @@ fn scan_mode<const APPARENT: bool>(path: &Path, exclusions: &ScanExclusions) -> 
             }
         })
         .collect::<Vec<_>>();
-    directories.sort_unstable_by(|left, right| right.disk_size.cmp(&left.disk_size));
+    directories.sort_unstable_by_key(|directory| Reverse(directory.disk_size));
 
     Ok(ScanReport {
         directories,

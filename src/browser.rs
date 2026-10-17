@@ -1803,6 +1803,7 @@ fn run_session(
             Action::Quit => break,
             Action::Refresh => {
                 model.reset_for_rescan(&root)?;
+                terminal.begin_scan();
                 first_live_listing_directory = None;
                 let metrics = ScanQueueMetrics::new(SCAN_EVENT_CHANNEL_CAPACITY, profiling_enabled);
                 profile.reset_scan_queue(metrics.clone());

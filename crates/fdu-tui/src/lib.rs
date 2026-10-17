@@ -189,6 +189,11 @@ impl TerminalSession {
         })
     }
 
+    /// Starts a new scan display cycle so ages use its completion time.
+    pub fn begin_scan(&mut self) {
+        self.age_reference = None;
+    }
+
     pub fn draw(&mut self, view: &View<'_>) -> io::Result<()> {
         let size = terminal_size()?;
         let mut next = Screen::new(size.columns, size.rows);
@@ -499,33 +504,37 @@ fn unix_seconds(time: SystemTime) -> i128 {
 
 fn format_age_seconds(seconds: u64) -> String {
     const YEAR_SECONDS: u64 = 365 * 24 * 60 * 60;
-    if seconds / YEAR_SECONDS > 999 {
-        return "999y+".to_owned();
-    }
+    const MONTH_SECONDS: u64 = YEAR_SECONDS / 12;
     let units = [
         (YEAR_SECONDS, "y"),
+        (MONTH_SECONDS, "mo"),
         (7 * 24 * 60 * 60, "w"),
         (24 * 60 * 60, "d"),
         (60 * 60, "h"),
         (60, "m"),
         (1, "s"),
     ];
-    for (index, (unit_seconds, suffix)) in units.iter().enumerate() {
-        if seconds >= *unit_seconds || index + 1 == units.len() {
-            let value = seconds / unit_seconds;
-            let Some((next_unit_seconds, next_suffix)) = units.get(index + 1) else {
-                return format!("{value}{suffix}");
-            };
-            let remainder = seconds % unit_seconds;
-            let next_value = remainder / next_unit_seconds;
-            return if next_value == 0 {
-                format!("{value}{suffix}")
+    let mut unit_index = units
+        .iter()
+        .position(|(unit_seconds, _)| seconds >= *unit_seconds)
+        .unwrap_or(units.len() - 1);
+    loop {
+        let (unit_seconds, suffix) = units[unit_index];
+        let value = ((u128::from(seconds) + u128::from(unit_seconds / 2))
+            / u128::from(unit_seconds)) as u64;
+        if unit_index == 0 {
+            return if value > 999 {
+                "999y+".to_owned()
             } else {
-                format!("{value}{suffix}{next_value}{next_suffix}")
+                format!("{value}{suffix}")
             };
         }
+        if u128::from(value) * u128::from(unit_seconds) >= u128::from(units[unit_index - 1].0) {
+            unit_index -= 1;
+            continue;
+        }
+        return format!("{value}{suffix}");
     }
-    unreachable!()
 }
 
 fn state_columns(record: &NodeRecord, mode: SizeMode) -> (&'static str, String) {
@@ -844,7 +853,7 @@ mod tests {
     }
 
     #[test]
-    fn ages_use_compact_adjacent_units_and_handle_unknown_or_future_times() {
+    fn ages_round_to_one_unit_and_handle_unknown_or_future_times() {
         let now_seconds = 2_000_000_000_i64;
         let now = UNIX_EPOCH + Duration::from_secs(u64::try_from(now_seconds).unwrap());
         let cases = [
@@ -852,8 +861,12 @@ mod tests {
             (2 * 7 * 24 * 60 * 60, "2w"),
             (4 * 24 * 60 * 60, "4d"),
             (5 * 60, "5m"),
-            (60 * 60 + 2 * 60, "1h2m"),
-            (6 * 60 + 2, "6m2s"),
+            (5 * 60 + 22, "5m"),
+            (60 * 60 + 2 * 60, "1h"),
+            (60 * 60 + 30 * 60, "2h"),
+            (31 * 24 * 60 * 60, "1mo"),
+            (20 * (365 * 24 * 60 * 60 / 12), "20mo"),
+            (8, "8s"),
         ];
         for (age, expected) in cases {
             let modified = ModifiedTime::from_unix_seconds(now_seconds - age).unwrap();
@@ -879,7 +892,7 @@ mod tests {
 
         let output = draw(&view, 80, 12);
 
-        assert!(output.contains("1h2m"), "{output}");
+        assert!(output.contains("1h"), "{output}");
         assert!(output.contains("top.log"), "{output}");
     }
 

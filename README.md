@@ -55,8 +55,8 @@ mount boundary is labeled separately on macOS; on Linux it currently appears as
 a `0B` directory row, while a warning reports excluded boundaries. Hidden names
 are included, and fdu does not read `.gitignore`.
 
-The browser shows how long ago each file or directory was modified, in compact
-forms such as `1h2m`.
+The browser shows each file or directory's modification age in one rounded
+unit, such as `5m`, `1h`, `4w`, or `20mo`.
 
 The supplied root path may resolve through symlinks; the browser shows
 discovered symlinks beneath it as entries and never follows them.
