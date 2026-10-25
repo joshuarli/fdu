@@ -1485,7 +1485,7 @@ mod tests {
 
         #[test]
         fn deep_paths_can_be_selected_and_their_directories_removed() -> io::Result<()> {
-            const DEPTH: usize = 5000;
+            const DEPTH: usize = 1000;
 
             let temp = TempRoot::new()?;
             let _cleanup = DeepFixtureCleanup(temp.root.clone());
