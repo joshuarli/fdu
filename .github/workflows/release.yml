@@ -87,6 +87,7 @@ jobs:
               cp target/${{ matrix.target }}/release/fdu fdu-${{ matrix.target }}-static
             '
           docker run --rm --init --cap-add=SYS_ADMIN \
+            --security-opt apparmor=unconfined \
             --platform "${{ matrix.docker_platform }}" \
             -v "$GITHUB_WORKSPACE:/fdu" \
             -w /fdu \
