@@ -58,6 +58,7 @@ pub(super) fn scan_hints(_root: BorrowedFd<'_>) -> ScanHints {
 struct DirectoryEntry {
     name: CString,
     kind: EntryKind,
+    bulk: Option<BulkMetadata>,
 }
 
 #[derive(Clone, Copy)]
@@ -100,10 +101,48 @@ fn read_entries(directory: &OwnedFd) -> io::Result<Vec<DirectoryEntry>> {
         let entry = entry?;
         let name = entry.file_name();
         if name.to_bytes() != b"." && name.to_bytes() != b".." {
-            entries.push(DirectoryEntry { name: name.to_owned(), kind: entry_kind(entry.file_type()) });
+            entries.push(DirectoryEntry {
+                name: name.to_owned(),
+                kind: entry_kind(entry.file_type()),
+                bulk: None,
+            });
         }
     }
     Ok(entries)
+}
+
+fn read_entries_with_metadata(directory: &OwnedFd) -> io::Result<Vec<DirectoryEntry>> {
+    with_indexed_directory_buffer(|buffer| {
+        let mut entries = Vec::new();
+        let mut stream = IndexedDirectoryStream::new(directory.as_fd(), buffer, ScanHints);
+        while let Some(entry) = stream.next_entry()? {
+            let name_bytes = entry.name().to_bytes();
+            if name_bytes == b"." || name_bytes == b".." {
+                continue;
+            }
+            let owned = CString::new(name_bytes).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "directory entry has interior NUL")
+            })?;
+            match entry {
+                StreamEntry::Bulk { metadata, .. } => {
+                    let kind = match metadata {
+                        Some(meta) if meta.entry_type == EntryType::Directory => EntryKind::Directory,
+                        Some(_) => EntryKind::Other,
+                        None => EntryKind::Unknown,
+                    };
+                    entries.push(DirectoryEntry { name: owned, kind, bulk: metadata });
+                }
+                StreamEntry::Listed(listed) => {
+                    entries.push(DirectoryEntry {
+                        name: owned,
+                        kind: entry_kind(listed.file_type()),
+                        bulk: None,
+                    });
+                }
+            }
+        }
+        Ok(entries)
+    })
 }
 
 /// One directory entry. Bulk enumeration carries its metadata; the fallback carries a name and a
@@ -405,7 +444,7 @@ fn scan_subtree(
             }
         }
 
-        let entries = match read_entries(&directory) {
+        let entries = match read_entries_with_metadata(&directory) {
             Ok(entries) => entries,
             Err(error) if path_index == 0 => return Err(error),
             Err(_) => {
@@ -423,11 +462,22 @@ fn scan_subtree(
             let child_directory = match entry.kind {
                 EntryKind::Directory => true,
                 EntryKind::Other => {
-                    match fsutil::stat_at(directory.as_fd(), &entry.name)
-                        .and_then(|stat| fsutil::file_size(&stat, apparent))
-                    {
-                        Ok(size) => add_size(&mut disk_size, size, &mut report.skipped_entries),
-                        Err(_) => mark_skipped(&mut report.skipped_entries),
+                    if let Some(bulk) = entry.bulk {
+                        let size = if apparent {
+                            bulk.apparent_bytes
+                        } else {
+                            bulk.allocated_bytes
+                        };
+                        add_size(&mut disk_size, size, &mut report.skipped_entries);
+                    } else {
+                        match fsutil::stat_at(directory.as_fd(), &entry.name)
+                            .and_then(|stat| fsutil::file_size(&stat, apparent))
+                        {
+                            Ok(size) => {
+                                add_size(&mut disk_size, size, &mut report.skipped_entries)
+                            }
+                            Err(_) => mark_skipped(&mut report.skipped_entries),
+                        }
                     }
                     continue;
                 }
