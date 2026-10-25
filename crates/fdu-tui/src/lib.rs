@@ -381,7 +381,7 @@ fn render_rows(
             _ => "",
         };
         let prefix = format!(
-            "{mark} {marker}{size_text:>size_width$} {percent}{bar}{link} {age:>age_width$} ",
+            "{mark} {marker}{size_text:>size_width$} {percent}{bar}{link}{age:>age_width$} ",
             size_width = SIZE_COLUMN_WIDTH,
             age_width = AGE_COLUMN_WIDTH,
         );
