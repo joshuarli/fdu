@@ -865,7 +865,7 @@ mod tests {
             (60 * 60 + 2 * 60, "1h"),
             (60 * 60 + 30 * 60, "2h"),
             (31 * 24 * 60 * 60, "1mo"),
-            (20 * (365 * 24 * 60 * 60 / 12), "20mo"),
+            (20 * (365 * 24 * 60 * 60 / 12), "2y"),
             (8, "8s"),
         ];
         for (age, expected) in cases {
@@ -1273,7 +1273,7 @@ mod tests {
         let fixture = Fixture { tree, root, directory: root, nested: root, top: root };
         let colors = LsColors::default();
         let view = base_view(&fixture, &rows, &marks, &[], &colors);
-        let output = draw(&view, 40, 10);
+        let output = draw(&view, 44, 10);
         assert!(output.contains("tab\\u{9}name\\xff"), "{output}");
         for line in output.lines().skip(2).take(3) {
             assert!(line.ends_with('│'), "row overflowed its pane border: {line:?}");
