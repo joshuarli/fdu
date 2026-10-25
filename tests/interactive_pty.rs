@@ -581,9 +581,11 @@ fn count_after(screen: &ScreenSnapshot, label: &str) -> usize {
 
 #[test]
 fn deletion_locks_the_interface_until_it_finishes() -> io::Result<()> {
+    const CRASH_SAFE_DELETION_STEP: Duration = Duration::from_secs(300);
     let (_temp, root) = TempDir::standard_tree()?;
     let operations = populate_bulk(&root, 8, 2500)?;
     let mut session = Session::start("deletion-lock", &root, &[], 100, 24);
+    session.step = CRASH_SAFE_DELETION_STEP;
     session.ready_by_name();
     session.text("d"); // alpha/, then the cursor moves down
     session.text("d"); // beta/
