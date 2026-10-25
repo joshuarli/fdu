@@ -14,7 +14,7 @@ RUN apk add --no-cache \
     file=5.47-r2 \
     make=4.4.1-r4 \
     strace=6.19-r1 \
-    musl-dev=1.2.6-r2 \
+    musl-dev=1.2.6-r3 \
     libgcc=15.2.0-r5 \
     git=2.54.0-r0 \
     tzdata=2026e-r0
