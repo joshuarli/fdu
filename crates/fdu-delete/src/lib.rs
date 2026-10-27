@@ -12,10 +12,19 @@ const OUTCOME_BATCH_SIZE: usize = 2048;
 /// operation. A send per operation made the worker wait on the interface.
 const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Disposition {
+    Retain,
+    Enter,
+    Remove,
+}
+
 pub struct DeletionPlan {
     tree: Arc<Tree>,
     pub roots: Vec<NodeId>,
     targets: Vec<NodeId>,
+    disposition: Vec<Disposition>,
+    pub skipped: Vec<Skipped>,
     pub apparent_bytes: u64,
     pub allocated_bytes: u64,
 }
@@ -30,8 +39,17 @@ impl DeletionPlan {
     }
 }
 
-/// One selected root that cannot be deleted. `node` is `None` for problems with
-/// the selection as a whole, such as an empty selection or a byte total that
+/// An indexed entry under a selected root that the plan leaves in place because
+/// its scan is not complete or it is excluded. A directory that is only kept
+/// because something inside it is skipped is not listed.
+#[derive(Debug)]
+pub struct Skipped {
+    pub node: NodeId,
+    pub reason: &'static str,
+}
+
+/// A selection the planner refuses as a whole. `node` is `None` for problems
+/// with the selection itself, such as an empty selection or a byte total that
 /// overflows.
 #[derive(Debug)]
 pub struct Rejection {
@@ -77,9 +95,13 @@ pub enum DeleteEvent {
 }
 
 /// Plans the permanent removal of `selected` roots, which may live in different
-/// directories. The whole selection is accepted or rejected; an ineligible root
-/// is never dropped to let the others through. Roots must not overlap, because a
-/// directory root already covers every descendant. The scan root must be complete.
+/// directories. Roots must not overlap, because a directory root already covers
+/// every descendant, and the scan must have finished.
+///
+/// Scan problems are advisory. Entries whose scan is incomplete or that are
+/// excluded are left in place and listed in `skipped`, together with the
+/// directories that hold them; everything else under the roots is planned. The
+/// plan is refused only when nothing at all can be deleted.
 pub fn create_plan(tree: Arc<Tree>, selected: &[NodeId]) -> Result<DeletionPlan, PlanError> {
     let mut rejected = Vec::new();
     if selected.is_empty() {
@@ -102,36 +124,64 @@ pub fn create_plan(tree: Arc<Tree>, selected: &[NodeId]) -> Result<DeletionPlan,
             Some(_) if has_selected_ancestor(&tree, &seen, *id) => {
                 rejected.push(reject("already covered by a selected parent directory"));
             }
-            Some(record) => {
-                if let Some(reason) = ineligible_reason(&tree, *id, record.entry_type) {
-                    rejected.push(reject(reason));
-                }
-            }
+            Some(_) => {}
         }
     }
-    if !unique.is_empty() && tree.record(tree.root()).expect("root record exists").state != NodeState::Complete {
-        rejected.push(Rejection { node: None, reason: "root scan is not complete".to_owned() });
+    if !unique.is_empty() {
+        let root_state = tree.record(tree.root()).expect("root record exists").state;
+        let block = match root_state {
+            NodeState::Complete | NodeState::Incomplete => None,
+            NodeState::Scanning => Some("scan is still running"),
+            _ => Some("root totals are stale; rescan first"),
+        };
+        if let Some(reason) = block {
+            rejected.push(Rejection { node: None, reason: reason.to_owned() });
+        }
     }
     if !rejected.is_empty() {
         return Err(PlanError { rejected });
     }
 
+    let mut disposition = vec![Disposition::Retain; tree.len()];
+    let mut targets = Vec::new();
+    let mut skipped = Vec::new();
+    let mut roots = Vec::with_capacity(unique.len());
+    for root in &unique {
+        classify_subtree(&tree, *root, &mut disposition, &mut targets, &mut skipped).map_err(|reason| PlanError {
+            rejected: vec![Rejection { node: Some(*root), reason: reason.to_owned() }],
+        })?;
+        if disposition[root.index()] != Disposition::Retain {
+            roots.push(*root);
+        }
+    }
+    if targets.is_empty() {
+        return Err(PlanError {
+            rejected: skipped
+                .into_iter()
+                .map(|entry| Rejection { node: Some(entry.node), reason: entry.reason.to_owned() })
+                .collect(),
+        });
+    }
+
     let overflow = |what: &str| PlanError {
         rejected: vec![Rejection { node: None, reason: format!("selected {what} byte total exceeds u64") }],
     };
-    let mut targets = Vec::new();
     let mut apparent_bytes = 0u64;
     let mut allocated_bytes = 0u64;
-    for root in &unique {
-        let record = tree.record(*root).expect("validated deletion root");
-        apparent_bytes = apparent_bytes.checked_add(record.apparent_bytes).ok_or_else(|| overflow("apparent"))?;
-        allocated_bytes = allocated_bytes.checked_add(record.allocated_bytes).ok_or_else(|| overflow("allocated"))?;
-        append_postorder(&tree, *root, &mut targets);
+    for target in &targets {
+        let record = tree.record(*target).expect("validated deletion target");
+        let covered = record.parent().is_some_and(|parent| disposition[parent.index()] == Disposition::Remove);
+        if !covered {
+            apparent_bytes = apparent_bytes.checked_add(record.apparent_bytes).ok_or_else(|| overflow("apparent"))?;
+            allocated_bytes = allocated_bytes.checked_add(record.allocated_bytes).ok_or_else(|| overflow("allocated"))?;
+        }
     }
     Ok(DeletionPlan {
         tree,
-        roots: unique,
+        roots,
         targets,
+        disposition,
+        skipped,
         apparent_bytes,
         allocated_bytes,
     })
@@ -148,96 +198,103 @@ fn has_selected_ancestor(tree: &Tree, selected: &HashSet<NodeId>, id: NodeId) ->
     false
 }
 
-fn ineligible_reason(tree: &Tree, id: NodeId, entry_type: EntryType) -> Option<&'static str> {
-    let record = tree.record(id)?;
-    match record.state {
-        NodeState::Excluded(ExclusionReason::MountBoundary) => return Some("mount boundary is protected"),
-        NodeState::Excluded(ExclusionReason::UnsupportedAlias) => return Some("unsupported directory alias is protected"),
-        NodeState::Complete => {}
-        NodeState::Scanning => return Some("scan is still in progress"),
-        NodeState::Incomplete => return Some("scan is incomplete"),
-        NodeState::Stale => return Some("entry totals are stale; rescan first"),
-        NodeState::Tombstone => return Some("entry has already been removed from the index"),
+fn skip_reason(state: NodeState) -> &'static str {
+    match state {
+        NodeState::Excluded(ExclusionReason::MountBoundary) => "mount boundary is protected",
+        NodeState::Excluded(ExclusionReason::UnsupportedAlias) => "unsupported directory alias is protected",
+        NodeState::Complete => "nothing inside it can be deleted",
+        NodeState::Scanning => "scan is still in progress",
+        NodeState::Incomplete => "scan is incomplete",
+        NodeState::Stale => "entry totals are stale; rescan first",
+        NodeState::Tombstone => "entry has already been removed from the index",
     }
-    if entry_type != EntryType::Directory {
-        return None;
+}
+
+struct ClassifyFrame {
+    node: NodeId,
+    state: NodeState,
+    next_child: Option<NodeId>,
+    skipped_start: usize,
+    all_removed: bool,
+    any_planned: bool,
+}
+
+impl ClassifyFrame {
+    fn settle(&mut self, child: Disposition) {
+        self.all_removed &= child == Disposition::Remove;
+        self.any_planned |= child != Disposition::Retain;
     }
-    let mut pending = vec![WalkFrame::Children {
-        next: record.first_child(),
-        directories: false,
-    }];
-    while let Some(WalkFrame::Children { next, directories }) = pending.pop() {
-        let Some(child) = next else {
+}
+
+enum Visit {
+    Leaf(Disposition),
+    Descend(ClassifyFrame),
+}
+
+const INVALID_INDEX: &str = "directory index is invalid";
+
+fn visit(tree: &Tree, id: NodeId, targets: &mut Vec<NodeId>, disposition: &mut [Disposition], skipped: &mut Vec<Skipped>) -> Result<Visit, &'static str> {
+    let record = tree.record(id).ok_or(INVALID_INDEX)?;
+    if record.entry_type == EntryType::Directory && matches!(record.state, NodeState::Complete | NodeState::Incomplete) {
+        return Ok(Visit::Descend(ClassifyFrame {
+            node: id,
+            state: record.state,
+            next_child: record.first_child(),
+            skipped_start: skipped.len(),
+            all_removed: true,
+            any_planned: false,
+        }));
+    }
+    if record.state == NodeState::Complete {
+        disposition[id.index()] = Disposition::Remove;
+        targets.push(id);
+        return Ok(Visit::Leaf(Disposition::Remove));
+    }
+    skipped.push(Skipped { node: id, reason: skip_reason(record.state) });
+    Ok(Visit::Leaf(Disposition::Retain))
+}
+
+/// Walks the subtree below `root` without recursion and appends its removable
+/// entries to `targets`, descendants before their directory. A directory is
+/// removed only when everything inside it is; otherwise it is entered when
+/// something inside it is removable and left alone when nothing is.
+fn classify_subtree(
+    tree: &Tree,
+    root: NodeId,
+    disposition: &mut [Disposition],
+    targets: &mut Vec<NodeId>,
+    skipped: &mut Vec<Skipped>,
+) -> Result<(), &'static str> {
+    let mut stack = Vec::new();
+    if let Visit::Descend(frame) = visit(tree, root, targets, disposition, skipped)? {
+        stack.push(frame);
+    }
+    while let Some(top) = stack.last_mut() {
+        if let Some(child) = top.next_child {
+            top.next_child = tree.record(child).ok_or(INVALID_INDEX)?.next_sibling();
+            match visit(tree, child, targets, disposition, skipped)? {
+                Visit::Leaf(outcome) => top.settle(outcome),
+                Visit::Descend(frame) => stack.push(frame),
+            }
             continue;
-        };
-        let Some(child_record) = tree.record(child) else {
-            return Some("directory index is invalid");
-        };
-        pending.push(WalkFrame::Children {
-            next: child_record.next_sibling(),
-            directories,
-        });
-        if child_record.entry_type == EntryType::Directory {
-            pending.push(WalkFrame::Children {
-                next: child_record.first_child(),
-                directories: false,
-            });
         }
-        match child_record.state {
-            NodeState::Complete => {}
-            NodeState::Excluded(ExclusionReason::MountBoundary) => return Some("subtree contains an excluded mount boundary"),
-            NodeState::Excluded(ExclusionReason::UnsupportedAlias) => return Some("subtree contains an unsupported directory alias"),
-            NodeState::Scanning => return Some("subtree scan is incomplete"),
-            NodeState::Incomplete => return Some("subtree contains scan errors"),
-            NodeState::Stale => return Some("subtree totals are stale; rescan first"),
-            NodeState::Tombstone => return Some("subtree changed during a deletion operation"),
+        let frame = stack.pop().expect("frame exists");
+        let outcome = if frame.state == NodeState::Complete && frame.all_removed {
+            targets.push(frame.node);
+            Disposition::Remove
+        } else if frame.any_planned {
+            Disposition::Enter
+        } else {
+            skipped.truncate(frame.skipped_start);
+            skipped.push(Skipped { node: frame.node, reason: skip_reason(frame.state) });
+            Disposition::Retain
+        };
+        disposition[frame.node.index()] = outcome;
+        if let Some(parent) = stack.last_mut() {
+            parent.settle(outcome);
         }
     }
-    None
-}
-
-enum WalkFrame {
-    Enter(NodeId),
-    Children { next: Option<NodeId>, directories: bool },
-    Exit(NodeId),
-}
-
-fn append_postorder(tree: &Tree, root: NodeId, output: &mut Vec<NodeId>) {
-    let mut stack = vec![WalkFrame::Enter(root)];
-    while let Some(frame) = stack.pop() {
-        match frame {
-            WalkFrame::Enter(id) => {
-                let record = tree.record(id).expect("validated deletion subtree");
-                if record.entry_type == EntryType::Directory {
-                    stack.push(WalkFrame::Exit(id));
-                    stack.push(WalkFrame::Children {
-                        next: record.first_child(),
-                        directories: true,
-                    });
-                    stack.push(WalkFrame::Children {
-                        next: record.first_child(),
-                        directories: false,
-                    });
-                } else {
-                    output.push(id);
-                }
-            }
-            WalkFrame::Children { next: Some(child), directories } => {
-                let Some(record) = tree.record(child) else {
-                    continue;
-                };
-                stack.push(WalkFrame::Children {
-                    next: record.next_sibling(),
-                    directories,
-                });
-                if (record.entry_type == EntryType::Directory) == directories {
-                    stack.push(WalkFrame::Enter(child));
-                }
-            }
-            WalkFrame::Children { next: None, .. } => {}
-            WalkFrame::Exit(id) => output.push(id),
-        }
-    }
+    Ok(())
 }
 
 /// Executes a confirmed deletion plan. The root must be writable. Other
@@ -312,6 +369,7 @@ mod posix {
 
     struct Deletion<'a> {
         tree: &'a Tree,
+        disposition: &'a [Disposition],
         quarantine: &'a quarantine::Session,
         root_mount: MountIdentity,
         cancelled: &'a AtomicBool,
@@ -390,6 +448,7 @@ mod posix {
         };
         let deletion = Deletion {
             tree,
+            disposition: &plan.disposition,
             quarantine: &quarantine,
             root_mount,
             cancelled: &cancelled,
@@ -475,7 +534,7 @@ mod posix {
         }
 
         fn record(&self, node: NodeId, kind: OutcomeKind, message: Option<String>) {
-            if self.recorded[node.index()].swap(true, Ordering::Relaxed) {
+            if self.disposition[node.index()] != Disposition::Remove || self.recorded[node.index()].swap(true, Ordering::Relaxed) {
                 return;
             }
             let completed = self.completed.fetch_add(1, Ordering::Relaxed) + 1;
@@ -639,7 +698,7 @@ mod posix {
                 return;
             }
         };
-        let mut stack = vec![directory_walk_frame(deletion.tree, node, parent.node)];
+        let mut stack = vec![directory_walk_frame(deletion.tree, deletion.disposition, node, parent.node)];
 
         loop {
             if deletion.stopped() {
@@ -658,7 +717,7 @@ mod posix {
                         Ok(directory) => {
                             let parent_node = stack.last().expect("parent directory frame exists").node;
                             current = directory;
-                            stack.push(directory_walk_frame(deletion.tree, child, parent_node));
+                            stack.push(directory_walk_frame(deletion.tree, deletion.disposition, child, parent_node));
                         }
                         Err((kind, message)) => {
                             deletion.record(child, kind, Some(message.clone()));
@@ -674,15 +733,20 @@ mod posix {
 
             let frame = stack.last().expect("directory frame exists");
             let finished = frame.node;
+            let removable = deletion.disposition[finished.index()] == Disposition::Remove;
             if stack.len() == 1 {
-                remove_directory(deletion, parent.fd.as_fd(), finished);
+                if removable {
+                    remove_directory(deletion, parent.fd.as_fd(), finished);
+                }
                 return;
             }
 
             let expected_parent = frame.parent;
             match open_parent_checked(deletion, current.as_fd(), expected_parent) {
                 Ok(parent_fd) => {
-                    remove_directory(deletion, parent_fd.as_fd(), finished);
+                    if removable {
+                        remove_directory(deletion, parent_fd.as_fd(), finished);
+                    }
                     stack.pop();
                     current = parent_fd;
                 }
@@ -697,8 +761,8 @@ mod posix {
         }
     }
 
-    fn directory_walk_frame(tree: &Tree, node: NodeId, parent: NodeId) -> DirectoryWalkFrame {
-        let mut children: Vec<_> = tree.children(node).collect();
+    fn directory_walk_frame(tree: &Tree, disposition: &[Disposition], node: NodeId, parent: NodeId) -> DirectoryWalkFrame {
+        let mut children: Vec<_> = tree.children(node).filter(|child| disposition[child.index()] != Disposition::Retain).collect();
         children.sort_unstable_by_key(|child| {
             let record = tree.record(*child).expect("indexed child");
             (record.entry_type == EntryType::Directory, record.identity.inode)
@@ -862,7 +926,7 @@ mod posix {
 
 #[cfg(test)]
 mod tests {
-    use super::{append_postorder, create_plan, ineligible_reason};
+    use super::{create_plan, Disposition};
     use fdu_core::{EntryType, FileIdentity, NodeId, NodeStatus, Tree};
     use std::sync::Arc;
 
@@ -885,59 +949,91 @@ mod tests {
     #[test]
     fn plan_emits_directory_descendants_before_their_parent() {
         let (tree, directory, file, second) = test_tree();
-        let mut targets = Vec::new();
-        append_postorder(&tree, directory, &mut targets);
-        assert_eq!(targets, vec![file, second, directory]);
+        let plan = create_plan(tree, &[directory]).unwrap();
+        assert_eq!(plan.targets, vec![file, second, directory]);
+        assert!(plan.skipped.is_empty());
+        assert_eq!(plan.apparent_bytes, 10);
     }
 
     #[test]
-    fn ineligible_directory_is_rejected_as_a_whole() {
+    fn scan_errors_inside_a_directory_skip_only_that_entry() {
+        let (tree, directory, file, second) = test_tree();
+        let mut mutable = Arc::try_unwrap(tree).ok().unwrap();
+        mutable.set_state(file, NodeStatus::Incomplete);
+        mutable.set_state(directory, NodeStatus::Incomplete);
+        mutable.set_state(mutable.root(), NodeStatus::Incomplete);
+        let plan = create_plan(Arc::new(mutable), &[directory]).unwrap();
+        assert_eq!(plan.targets, vec![second]);
+        assert_eq!(plan.roots, vec![directory]);
+        assert_eq!(plan.disposition[directory.index()], Disposition::Enter);
+        assert_eq!(plan.skipped.len(), 1);
+        assert_eq!(plan.skipped[0].node, file);
+        assert_eq!(plan.skipped[0].reason, "scan is incomplete");
+    }
+
+    #[test]
+    fn a_directory_with_nothing_deletable_is_one_skipped_entry() {
+        let (tree, directory, file, second) = test_tree();
+        let mut mutable = Arc::try_unwrap(tree).ok().unwrap();
+        mutable.set_state(file, NodeStatus::Incomplete);
+        mutable.set_state(second, NodeStatus::Incomplete);
+        mutable.set_state(directory, NodeStatus::Incomplete);
+        let top_level = mutable
+            .append(mutable.root(), b"top", EntryType::RegularFile, FileIdentity { device: 1, inode: 9 }, 1, 5, 512, NodeStatus::Complete)
+            .unwrap();
+        let plan = create_plan(Arc::new(mutable), &[directory, top_level]).unwrap();
+        assert_eq!(plan.targets, vec![top_level]);
+        assert_eq!(plan.roots, vec![top_level]);
+        assert_eq!(plan.skipped.len(), 1);
+        assert_eq!(plan.skipped[0].node, directory);
+    }
+
+    #[test]
+    fn a_selection_with_nothing_deletable_is_rejected_with_each_reason() {
         let (tree, directory, file, _) = test_tree();
         let mut mutable = Arc::try_unwrap(tree).ok().unwrap();
         mutable.set_state(file, NodeStatus::Incomplete);
-        let tree = Arc::new(mutable);
-        assert_eq!(ineligible_reason(&tree, directory, EntryType::Directory), Some("subtree contains scan errors"));
-        assert!(create_plan(tree, &[directory]).is_err());
+        mutable.set_state(directory, NodeStatus::Excluded(fdu_core::ExclusionReason::MountBoundary));
+        let rejection = create_plan(Arc::new(mutable), &[directory]).err().expect("nothing to delete");
+        assert_eq!(rejection.rejected.len(), 1);
+        assert_eq!(rejection.rejected[0].node, Some(directory));
+        assert_eq!(rejection.rejected[0].reason, "mount boundary is protected");
     }
 
     #[test]
-    fn incomplete_root_scan_rejects_deletion_plan() {
+    fn incomplete_root_scan_still_plans_complete_entries() {
         let (tree, _, file, _) = test_tree();
         let mut mutable = Arc::try_unwrap(tree).ok().unwrap();
         mutable.set_state(mutable.root(), NodeStatus::Incomplete);
-        let rejection = create_plan(Arc::new(mutable), &[file]).err().expect("incomplete root scan is rejected");
-        assert_eq!(rejection.rejected.len(), 1);
-        assert_eq!(rejection.rejected[0].node, None);
-        assert_eq!(rejection.rejected[0].reason, "root scan is not complete");
+        let plan = create_plan(Arc::new(mutable), &[file]).unwrap();
+        assert_eq!(plan.targets, vec![file]);
     }
 
     #[test]
-    fn excluded_directories_and_subtrees_cannot_be_planned_for_deletion() {
-        for (reason, direct, nested) in [
-            (
-                fdu_core::ExclusionReason::MountBoundary,
-                "mount boundary is protected",
-                "subtree contains an excluded mount boundary",
-            ),
-            (
-                fdu_core::ExclusionReason::UnsupportedAlias,
-                "unsupported directory alias is protected",
-                "subtree contains an unsupported directory alias",
-            ),
-        ] {
-            let (tree, directory, _, _) = test_tree();
-            let mut mutable = Arc::try_unwrap(tree).ok().unwrap();
-            mutable.set_state(directory, NodeStatus::Excluded(reason));
-            let tree = Arc::new(mutable);
-            assert_eq!(ineligible_reason(&tree, directory, EntryType::Directory), Some(direct));
-            assert!(create_plan(Arc::clone(&tree), &[directory]).is_err());
+    fn running_scan_rejects_deletion_plan() {
+        let (tree, _, file, _) = test_tree();
+        let mut mutable = Arc::try_unwrap(tree).ok().unwrap();
+        mutable.set_state(mutable.root(), NodeStatus::Scanning);
+        let rejection = create_plan(Arc::new(mutable), &[file]).err().expect("running scan is rejected");
+        assert_eq!(rejection.rejected.len(), 1);
+        assert_eq!(rejection.rejected[0].node, None);
+        assert_eq!(rejection.rejected[0].reason, "scan is still running");
+    }
 
-            let (tree, directory, file, _) = test_tree();
+    #[test]
+    fn excluded_entries_are_skipped_and_never_entered() {
+        for reason in [fdu_core::ExclusionReason::MountBoundary, fdu_core::ExclusionReason::UnsupportedAlias] {
+            let (tree, directory, file, second) = test_tree();
             let mut mutable = Arc::try_unwrap(tree).ok().unwrap();
-            mutable.set_state(file, NodeStatus::Excluded(reason));
-            let tree = Arc::new(mutable);
-            assert_eq!(ineligible_reason(&tree, directory, EntryType::Directory), Some(nested));
-            assert!(create_plan(tree, &[directory]).is_err());
+            let nested = mutable
+                .append(directory, b"nested", EntryType::Directory, FileIdentity { device: 1, inode: 8 }, 2, 0, 0, NodeStatus::Excluded(reason))
+                .unwrap();
+            let plan = create_plan(Arc::new(mutable), &[directory]).unwrap();
+            assert_eq!(plan.targets, vec![file, second]);
+            assert_eq!(plan.disposition[nested.index()], Disposition::Retain);
+            assert_eq!(plan.disposition[directory.index()], Disposition::Enter);
+            assert_eq!(plan.skipped.len(), 1);
+            assert_eq!(plan.skipped[0].node, nested);
         }
     }
 
@@ -965,16 +1061,17 @@ mod tests {
     }
 
     #[test]
-    fn plan_names_each_ineligible_root_and_deletes_none_of_the_selection() {
+    fn plan_skips_ineligible_roots_and_keeps_the_rest() {
         let (tree, _, file, _) = test_tree();
         let mut mutable = Arc::try_unwrap(tree).ok().unwrap();
         let blocked = mutable
             .append(mutable.root(), b"blocked", EntryType::RegularFile, FileIdentity { device: 1, inode: 9 }, 1, 5, 512, NodeStatus::Incomplete)
             .unwrap();
         let tree = Arc::new(mutable);
-        let rejection = create_plan(tree, &[file, blocked]).err().expect("selection is rejected");
-        assert_eq!(rejection.rejected.len(), 1);
-        assert_eq!(rejection.rejected[0].node, Some(blocked));
+        let plan = create_plan(tree, &[file, blocked]).unwrap();
+        assert_eq!(plan.roots, vec![file]);
+        assert_eq!(plan.skipped.len(), 1);
+        assert_eq!(plan.skipped[0].node, blocked);
     }
 
     mod filesystem {
@@ -1686,18 +1783,35 @@ mod tests {
         }
 
         #[test]
-        fn incomplete_directories_are_refused_as_a_whole() -> io::Result<()> {
+        fn entries_with_scan_errors_are_left_in_place_and_everything_else_is_removed() -> io::Result<()> {
             let temp = TempRoot::new()?;
-            let directory = temp.root.join("selected");
-            fs::create_dir(&directory)?;
-            fs::write(directory.join("important"), b"keep")?;
-            let tree = Arc::try_unwrap(index_root(&temp.root)?).ok().unwrap();
-            let selected = child(&tree, tree.root(), b"selected");
-            let important = child(&tree, selected, b"important");
-            let mut tree = tree;
-            tree.set_state(important, NodeStatus::Incomplete);
-            assert!(create_plan(Arc::new(tree), &[selected]).is_err());
-            assert_eq!(fs::read(directory.join("important"))?, b"keep");
+            let selected = temp.root.join("selected");
+            fs::create_dir_all(selected.join("unreadable"))?;
+            fs::create_dir_all(selected.join("clean/inner"))?;
+            fs::write(selected.join("top"), b"1")?;
+            fs::write(selected.join("clean/inner/leaf"), b"2")?;
+            fs::write(selected.join("unreadable/known"), b"3")?;
+            fs::write(selected.join("unreadable/unscanned"), b"4")?;
+            let mut tree = Arc::try_unwrap(index_root(&temp.root)?).ok().unwrap();
+            let selected_node = child(&tree, tree.root(), b"selected");
+            let unreadable = child(&tree, selected_node, b"unreadable");
+            let unscanned = child(&tree, unreadable, b"unscanned");
+            tree.set_state(unscanned, NodeStatus::Incomplete);
+            tree.set_state(unreadable, NodeStatus::Incomplete);
+            tree.set_state(selected_node, NodeStatus::Incomplete);
+            tree.set_state(tree.root(), NodeStatus::Incomplete);
+            let tree = Arc::new(tree);
+
+            let plan = create_plan(Arc::clone(&tree), &[selected_node]).unwrap();
+            assert_eq!(plan.skipped.len(), 1);
+            let outcomes = execute_plan(&temp.root, plan, None);
+
+            assert!(outcomes.iter().all(|item| item.kind == OutcomeKind::Deleted), "{outcomes:?}");
+            assert_eq!(outcomes.len(), 5, "top, leaf, inner, clean, known");
+            assert!(!selected.join("top").exists());
+            assert!(!selected.join("clean").exists());
+            assert!(!selected.join("unreadable/known").exists());
+            assert_eq!(fs::read(selected.join("unreadable/unscanned"))?, b"4");
             Ok(())
         }
     }

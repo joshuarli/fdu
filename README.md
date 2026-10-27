@@ -44,7 +44,8 @@ Use `-x PATH` or `--exclude PATH` to omit an exact path beneath the selected
 root, including its subtree. Exclusion paths are relative to the selected root;
 repeat the option to omit more paths. Path components must match exactly.
 In the browser, directories whose contents include excluded paths are marked
-incomplete. Any incomplete selected-root scan blocks deletion planning.
+incomplete. Browser deletion skips incomplete and excluded entries and deletes
+the rest.
 
 By default, sizes are filesystem-allocated bytes; `--apparent` uses logical
 file lengths. Use `--read-only` to disable deletion in the browser. The summary
@@ -68,7 +69,8 @@ describe a live scan, not an atomic snapshot.
 - Move with arrows or `j`/`k`; open with Enter, right, or `l`; go up with
   left, Backspace, or `h`. Page Up/Down and Home/End move through a listing.
 - Press `d` to mark an entry, `v` to start or end a range, `*` to mark
-  matching entries, and `c` to clear marks.
+  matching entries, and `c` to clear marks. Marking a directory replaces any
+  marks inside it.
 - Press `s` to sort by name or size, `a` to switch size modes, `r` to
   rescan, and `/` to filter names in the current directory.
 - Marked entries appear in a second pane. Tab changes panes; `-` changes
@@ -76,6 +78,8 @@ describe a live scan, not an atomic snapshot.
   mark and Enter shows it in the listing.
 - To delete marks, focus the marked pane and press Ctrl-R. Review the prompt
   and press Enter to delete permanently or Esc to cancel. There is no Trash.
+  Entries with scan errors or exclusions are skipped and counted in the prompt;
+  their directories stay in place.
 - Press `?` for in-app help, or `q` or Ctrl-C to quit.
 
 ### Empty a directory

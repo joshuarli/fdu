@@ -120,6 +120,7 @@ pub enum Operation {
         entries: usize,
         allocated_bytes: u64,
         apparent_bytes: u64,
+        skipped: usize,
     },
     Deleting {
         completed: usize,
@@ -157,6 +158,7 @@ pub struct View<'a> {
     pub visible_items: usize,
     pub incomplete_entries: usize,
     pub exclusions: usize,
+    pub scan_errors: usize,
     pub read_only: bool,
     pub range_mode: bool,
     pub message: Option<&'a str>,
@@ -613,11 +615,21 @@ fn key_hints(view: &View<'_>) -> String {
 /// scan is still adding to it, followed by a transient message and key hints.
 /// A pending confirmation or running deletion has no other place to appear, so
 /// it comes first and the count moves to the end.
+const MIN_MESSAGE_WIDTH: usize = 12;
+
+/// Shown instead of the full hints when a message needs the room.
+const COMPACT_KEY_HINTS: &str = "? help · q quit";
+
 fn render_status(frame: &mut Screen, area: Rect, view: &View<'_>) {
     let count = format!(
-        "{} entries{}",
+        "{} entries{}{}",
         view.indexed_entries,
-        if view.phase == Phase::Scanning { "…" } else { "" }
+        if view.phase == Phase::Scanning { "…" } else { "" },
+        match view.scan_errors {
+            0 => String::new(),
+            1 => " · 1 scan error".to_owned(),
+            errors => format!(" · {errors} scan errors"),
+        },
     );
     let (text, style) = match &view.operation {
         Operation::Deleting { completed, total, stopping } => (
@@ -627,21 +639,32 @@ fn render_status(frame: &mut Screen, area: Rect, view: &View<'_>) {
             ),
             Style::Plain,
         ),
-        Operation::ConfirmDelete { roots, entries, allocated_bytes, .. } => (
+        Operation::ConfirmDelete { roots, entries, allocated_bytes, skipped, .. } => (
             format!(
-                " Permanently delete {roots} marked item{} ({entries} entries, {})? Enter confirms · Esc cancels · {count}",
+                " Permanently delete {roots} item{} ({entries} entries, {})? Enter confirms · Esc cancels{} · {count}",
                 if *roots == 1 { "" } else { "s" },
                 format_size(*allocated_bytes),
+                if *skipped == 0 { String::new() } else { format!(" · {skipped} skipped") },
             ),
             Style::Red,
         ),
-        Operation::Idle => (
-            match view.message.or(view.detail_message) {
-                Some(message) => format!(" {count} · {message} · {}", key_hints(view)),
-                None => format!(" {count} · {}", key_hints(view)),
-            },
-            Style::Plain,
-        ),
+        Operation::Idle => {
+            let head = format!(" {count}");
+            let text = match view.message.or(view.detail_message) {
+                Some(message) => {
+                    let width = usize::from(area.width);
+                    let full = format!(" · {}", key_hints(view));
+                    let compact = format!(" · {COMPACT_KEY_HINTS}");
+                    let fits = |tail: &str| cell_width(&head) + 3 + cell_width(message) + cell_width(tail) <= width;
+                    let tail = if fits(&full) { full } else { compact };
+                    let budget = width.saturating_sub(cell_width(&head) + cell_width(&tail) + 3);
+                    let message = if budget >= MIN_MESSAGE_WIDTH { clip_end(message, budget) } else { message.to_owned() };
+                    format!("{head} · {message}{tail}")
+                }
+                None => format!("{head} · {}", key_hints(view)),
+            };
+            (text, Style::Plain)
+        }
     };
     frame.text(area, &clip_end(&text, usize::from(area.width)), style);
 }
@@ -679,8 +702,8 @@ fn help_lines(focus: Pane) -> (String, Vec<String>) {
         "Marked items: arrows move, d unmarks, Enter shows it in the list,",
         "  Ctrl-R deletes them all after you press Enter to confirm.",
         "",
-        "A marked directory covers its subtree: nothing inside it, and no",
-        "  directory containing a mark, can be marked until that is removed.",
+        "Marking a directory covers its subtree and replaces marks inside it;",
+        "  entries inside a marked directory cannot be marked separately.",
         "Deletion is permanent; there is no Trash. Byte totals are metadata",
         "  counts and released storage can differ.",
         "Rows: [x] marked (red)  [=] covered  ! incomplete  ~ stale  M mount  A alias",
@@ -965,6 +988,7 @@ mod tests {
             visible_items: rows.len(),
             incomplete_entries: 0,
             exclusions: 0,
+            scan_errors: 0,
             read_only: false,
             range_mode: false,
             message: None,
@@ -1163,7 +1187,7 @@ mod tests {
         assert!(screen[(70, 2)].style.reversed);
         assert!(screen[(70, 2)].style.fg.is_some());
         // Confirmation and progress strips warn in red.
-        view.operation = Operation::ConfirmDelete { roots: 1, entries: 1, allocated_bytes: 1, apparent_bytes: 1 };
+        view.operation = Operation::ConfirmDelete { roots: 1, entries: 1, allocated_bytes: 1, apparent_bytes: 1, skipped: 0 };
         let confirming = buffer(&view, 100, 24);
         assert!(confirming[(1, 23)].style == Style::Red);
         view.operation = Operation::Deleting { completed: 0, total: 1, stopping: false };
@@ -1181,9 +1205,9 @@ mod tests {
         let mut view = base_view(&fixture, &rows, &marks, &marked, &colors);
         view.side_visible = true;
         view.focus = Pane::Marked;
-        view.operation = Operation::ConfirmDelete { roots: 2, entries: 2, allocated_bytes: 5120, apparent_bytes: 5000 };
+        view.operation = Operation::ConfirmDelete { roots: 2, entries: 2, allocated_bytes: 5120, apparent_bytes: 5000, skipped: 0 };
         let output = draw(&view, 100, 24);
-        assert!(output.contains("Permanently delete 2 marked items (2 entries, 5.0 KiB)? Enter confirms"), "{output}");
+        assert!(output.contains("Permanently delete 2 items (2 entries, 5.0 KiB)? Enter confirms"), "{output}");
         assert!(output.contains("projects/payload.bin"), "the marked pane is still the review: {output}");
         assert!(!output.contains("┌Confirm"), "no modal: {output}");
 
@@ -1192,6 +1216,44 @@ mod tests {
         let output = draw(&view, 100, 24);
         assert!(output.contains("Deleting 1 of 3 · Esc stops"), "{output}");
         assert!(output.contains("removed entries cannot be restored"), "{output}");
+    }
+
+    #[test]
+    fn a_long_message_is_clipped_before_the_key_hints_are() {
+        let fixture = fixture();
+        let rows = [fixture.directory, fixture.top];
+        let marks = HashSet::new();
+        let colors = LsColors::default();
+        let mut view = base_view(&fixture, &rows, &marks, &[], &colors);
+        view.message = Some("a very long message that would otherwise push every key hint off the end of the strip");
+        let status = draw(&view, 80, 24).lines().last().unwrap().trim().to_owned();
+        assert!(status.contains("? help · q quit"), "{status}");
+        assert!(status.contains('…'), "{status}");
+    }
+
+    #[test]
+    fn skipped_entries_do_not_push_the_confirmation_key_off_an_80_column_strip() {
+        let fixture = fixture();
+        let rows = [fixture.directory, fixture.top];
+        let marks = HashSet::from([fixture.top]);
+        let marked = [fixture.top];
+        let colors = LsColors::default();
+        let mut view = base_view(&fixture, &rows, &marks, &marked, &colors);
+        view.operation = Operation::ConfirmDelete { roots: 2, entries: 15, allocated_bytes: 4096, apparent_bytes: 4000, skipped: 12 };
+        let output = draw(&view, 80, 24);
+        assert!(output.contains("(15 entries, 4.0 KiB)? Enter confirms · Esc cancels"), "{output}");
+    }
+
+    #[test]
+    fn scan_errors_are_counted_beside_the_entry_count() {
+        let fixture = fixture();
+        let rows = [fixture.directory, fixture.top];
+        let marks = HashSet::new();
+        let colors = LsColors::default();
+        let mut view = base_view(&fixture, &rows, &marks, &[], &colors);
+        view.scan_errors = 3;
+        let status = draw(&view, 100, 24).lines().last().unwrap().trim().to_owned();
+        assert!(status.contains("entries · 3 scan errors · d mark"), "{status}");
     }
 
     #[test]
@@ -1232,7 +1294,7 @@ mod tests {
                         0 => {}
                         1 => view.modal = Modal::Help { focus: Pane::Browser },
                         2 => view.modal = Modal::Filter { value: "abc" },
-                        3 => view.operation = Operation::ConfirmDelete { roots: 1, entries: 1, allocated_bytes: 1, apparent_bytes: 1 },
+                        3 => view.operation = Operation::ConfirmDelete { roots: 1, entries: 1, allocated_bytes: 1, apparent_bytes: 1, skipped: 0 },
                         4 => view.operation = Operation::Deleting { completed: 0, total: 1, stopping: true },
                         _ => view.phase = Phase::Scanning,
                     }

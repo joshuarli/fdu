@@ -121,6 +121,22 @@ pub fn run(path: PathBuf, assume_yes: bool) -> Result<(), Box<dyn Error>> {
         let details = details.join("; ");
         io::Error::other(format!("{error}: {details}"))
     })?;
+    if !plan.skipped.is_empty() {
+        let mut details = plan
+            .skipped
+            .iter()
+            .map(|entry| format!("{}: {}", display_name(&tree, entry.node), entry.reason))
+            .collect::<Vec<_>>();
+        details.sort();
+        return Err(io::Error::other(format!(
+            "refusing to empty {}: {} entr{} cannot be deleted: {}",
+            path.display(),
+            details.len(),
+            if details.len() == 1 { "y" } else { "ies" },
+            details.join("; ")
+        ))
+        .into());
+    }
     let total = plan.operation_count();
     if !assume_yes {
         confirm_interactively(

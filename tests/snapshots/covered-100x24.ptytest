@@ -24,7 +24,7 @@ modes: alternate-screen=true application-cursor=false application-keypad=false b
 20││[=]··········0·B···0.0%··<age>·file-000008···········││···········································│
 21││[=]··········0·B···0.0%··<age>·file-000009···········││···········································│
 22│└─────────────────────────────────────────────────────┘└───────────────────────────────────────────┘
-23│·192238·entries···Inside·marked·directory·directory-000030;·its·entries·are·already·covered.···d·ma…
+23│·192238·entries···Inside·marked·directory·directory-000030.···?·help···q·quit·······················
 attr: row=0 columns=0..100 fg=Default bg=Default bold=false dim=false italic=false underline=false inverse=true
 attr: row=1 columns=1..54 fg=Default bg=Default bold=true dim=false italic=false underline=false inverse=false
 attr: row=1 columns=55..100 fg=Default bg=Default bold=false dim=true italic=false underline=false inverse=false

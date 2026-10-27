@@ -6,13 +6,17 @@ and use the descriptor-relative engine in
 
 ## Eligibility and outcomes
 
-A plan may contain several entries, but its roots cannot overlap. A directory
-can be selected only when its indexed subtree is complete and has no traversal
-exclusions or errors. The shared planner also requires the selected root scan
-to be complete, so a complete indexed file or symlink cannot be selected when
-another part of the scan is incomplete. Browser deletion calls the shared
-planner when Ctrl-R is pressed. `--rmrf` checks for an incomplete root scan
-before planning and rejects the same condition.
+A plan may contain several entries, but its roots cannot overlap. The shared
+planner requires the root scan to have finished. Scan problems are advisory:
+an entry whose scan is incomplete, or that is a mount boundary or unsupported
+alias, is skipped and never entered, and everything else under the selected
+roots is planned. A directory is removed only when everything inside it is
+planned; otherwise it stays, and its planned contents are still removed. The
+plan lists each skipped entry, and the planner rejects the selection only when
+nothing can be deleted. Browser deletion calls the shared planner when Ctrl-R
+is pressed and shows the skipped count in the confirmation. `--rmrf` stays
+strict: it rejects an incomplete root scan and any skipped entry before
+deleting.
 
 The engine opens each parent relative to an already-open descriptor. It moves
 each planned entry into a private quarantine on the root mount using an
@@ -69,8 +73,8 @@ Physical power-loss behavior and native macOS behavior have not been verified.
 
 `--rmrf` selects all immediate children of the explicit root and leaves that
 root in place. See the [README](../README.md#empty-a-directory) for the
-user-facing root safeguards and confirmation. An incomplete root scan or an
-ineligible selected entry rejects the whole operation before deletion starts.
+user-facing root safeguards and confirmation. An incomplete root scan or a
+skipped entry rejects the whole operation before deletion starts.
 
 The production engine uses a fixed 16-thread Rayon pool for independent
 selected directories. It walks each selected directory depth first and reopens

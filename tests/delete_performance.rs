@@ -26,7 +26,7 @@ fn deleting_the_whole_layout_fixture_removes_every_entry() {
     session.wait_for("Marked 48 items");
     session.key(Key::Tab);
     session.key(Key::Ctrl('r'));
-    session.wait_for("Permanently delete 48 marked items");
+    session.wait_for("Permanently delete 48 items");
 
     let started = Instant::now();
     session.key(Key::Enter);
@@ -35,7 +35,7 @@ fn deleting_the_whole_layout_fixture_removes_every_entry() {
     let summary = (0..screen.row_count()).filter_map(|row| screen.row(row)).find(|row| row.contains("Deleted ")).unwrap();
     eprintln!("deleted the layout fixture in {elapsed:?}: {}", summary.trim());
 
-    assert!(summary.contains("Deleted 192238 · 0 already absent · 0 changed · 0 failed · 0 not attempted"), "{summary}");
+    assert!(summary.contains("Deleted 192238") && !summary.contains("failed") && !summary.contains("not attempted"), "{summary}");
     assert_eq!(fs::read_dir(&root).unwrap().count(), 0, "every entry under the clone is gone");
     assert!(support::layout_fixture().join("directory-000000").exists(), "the shared fixture is untouched");
     let output = session.quit_with_output();

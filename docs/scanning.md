@@ -13,7 +13,8 @@ and deletion planner.
   and its subtree. Repeat the option for multiple paths; matching is by path
   component, not by substring. These exclusions apply to summary and browser
   scans, and are not accepted with `--rmrf`. Browser directories that contain
-  omitted paths are marked incomplete, so they cannot be deleted as a whole.
+  omitted paths are marked incomplete, so browser deletion keeps them and
+  removes the entries around the omitted paths.
 - Discovered symlinks are leaves. Files and directories beyond a filesystem or
   mount boundary are not traversed.
 - Errors and unsupported directory aliases make affected totals incomplete.

@@ -125,12 +125,14 @@ struct DeleteRun {
     failure: Option<String>,
     completed: usize,
     total: usize,
+    skipped: usize,
     started: Instant,
 }
 
 impl DeleteRun {
     fn start(root: std::os::fd::OwnedFd, plan: DeletionPlan) -> Self {
         let total = plan.operation_count();
+        let skipped = plan.skipped.len();
         let (sender, receiver) = mpsc::sync_channel(DELETE_CHANNEL_CAPACITY);
         let cancelled = Arc::new(AtomicBool::new(false));
         let worker_cancelled = Arc::clone(&cancelled);
@@ -145,6 +147,7 @@ impl DeleteRun {
             failure: None,
             completed: 0,
             total,
+            skipped,
             started: Instant::now(),
         }
     }
@@ -248,6 +251,11 @@ impl MarkSet {
         Some(id)
     }
 
+    fn retain(&mut self, keep: impl Fn(&NodeId) -> bool) {
+        self.members.retain(|id| keep(id));
+        self.order.retain(|id| keep(id));
+    }
+
     fn clear(&mut self) {
         self.members.clear();
         self.order.clear();
@@ -264,14 +272,6 @@ impl MarkSet {
     fn get(&self, index: usize) -> Option<NodeId> {
         self.order.get(index).copied()
     }
-}
-
-/// Why an entry cannot join the marks.
-enum MarkBlock {
-    /// A marked directory already covers the entry.
-    Covered(NodeId),
-    /// The entry is a directory with a marked entry inside it.
-    ContainsMark,
 }
 
 enum Action {
@@ -562,11 +562,9 @@ impl BrowserModel {
             }
             ScanEvent::DirectoryFailed { directory, message } => {
                 self.scan_errors = self.scan_errors.saturating_add(1);
-                if self.message.is_none() {
-                    self.message = Some(format!("Scan error: {message}"));
-                }
                 if let Some(node) = self.node_for_token(directory) {
                     self.mark_incomplete_chain(node);
+                    self.explain_scan_error(node, message);
                 }
                 true
             }
@@ -742,6 +740,15 @@ impl BrowserModel {
     }
 
     fn handle_intent(&mut self, intent: Intent, phase: Phase) -> (Action, bool) {
+        if matches!(intent, Intent::Resize(_)) {
+            return self.dispatch_intent(intent, phase);
+        }
+        let had_message = self.message.take().is_some();
+        let (action, changed) = self.dispatch_intent(intent, phase);
+        (action, changed || had_message)
+    }
+
+    fn dispatch_intent(&mut self, intent: Intent, phase: Phase) -> (Action, bool) {
         if let Intent::Resize(size) = intent {
             self.terminal = size;
             self.normalize_focus();
@@ -825,7 +832,7 @@ impl BrowserModel {
                 return (Action::None, true);
             }
             Intent::StartFilter | Intent::ToggleRange | Intent::MarkAll if self.focus == Pane::Marked => {
-                self.message = Some("That command applies to the browser list; press Tab to return to it.".to_owned());
+                self.message = Some("That applies to the list; press Tab.".to_owned());
                 return (Action::None, true);
             }
             _ => {}
@@ -993,7 +1000,7 @@ impl BrowserModel {
             return (Action::None, true);
         }
         if self.focus != Pane::Marked {
-            self.message = Some("Press Tab to review the marked items, then Ctrl-R to delete them.".to_owned());
+            self.message = Some("Press Tab to review marks, then Ctrl-R.".to_owned());
             return (Action::None, true);
         }
         self.range_mode = false;
@@ -1014,7 +1021,7 @@ impl BrowserModel {
                     None => rejection.reason.clone(),
                 });
                 self.message = Some(format!(
-                    "Nothing deleted or narrowed: {}{}",
+                    "Nothing can be deleted: {}{}",
                     first.unwrap_or_default(),
                     if more > 0 { format!(" (+{more} more)") } else { String::new() },
                 ));
@@ -1040,6 +1047,7 @@ impl BrowserModel {
                 entries: plan.operation_count(),
                 allocated_bytes: plan.allocated_bytes,
                 apparent_bytes: plan.apparent_bytes,
+                skipped: plan.skipped.len(),
             },
             (None, _) => Operation::Idle,
         };
@@ -1068,6 +1076,7 @@ impl BrowserModel {
             visible_items: self.visible.len(),
             incomplete_entries: self.incomplete_entries,
             exclusions: self.exclusions,
+            scan_errors: self.scan_errors,
             read_only: self.read_only,
             range_mode: self.range_mode,
             message: self.message.as_deref(),
@@ -1104,9 +1113,13 @@ impl BrowserModel {
         self.rebuild_listing(preserve_cursor);
     }
 
-    fn apply_delete_outcomes(&mut self, outcomes: Vec<DeleteOutcome>, worker_error: Option<String>) {
+    fn apply_delete_outcomes(&mut self, outcomes: Vec<DeleteOutcome>, worker_error: Option<String>, skipped: usize) {
         let mut summary = DeleteSummary::default();
+        let mut unfinished = Vec::new();
         for outcome in outcomes {
+            if matches!(outcome.kind, OutcomeKind::Changed | OutcomeKind::Failed | OutcomeKind::Cancelled) {
+                unfinished.push(outcome.node);
+            }
             match outcome.kind {
                 OutcomeKind::Deleted => {
                     summary.deleted = summary.deleted.saturating_add(1);
@@ -1143,18 +1156,37 @@ impl BrowserModel {
                 summary.deleted, summary.not_attempted
             ));
         } else {
-            self.message = Some(format!(
-                "Deleted {} · {} already absent · {} changed · {} failed · {} not attempted",
-                summary.deleted, summary.already_absent, summary.changed, summary.failed, summary.not_attempted
-            ));
+            self.message = Some(summary.describe(skipped));
         }
         self.actual_deletions = self.actual_deletions.saturating_add(summary.deleted);
-        self.marks.clear();
-        self.marked_cursor = 0;
+        self.keep_unfinished_marks(&unfinished, worker_error.is_some());
         self.normalize_focus();
         self.range_mode = false;
         self.range_anchor = None;
         self.rebuild_listing(true);
+    }
+
+    /// After a deletion only the marks that still have work left stay marked,
+    /// so a retry needs no re-marking. A stopped deletion keeps every surviving
+    /// mark because its unattempted entries are not all reported.
+    fn keep_unfinished_marks(&mut self, unfinished: &[NodeId], stopped: bool) {
+        let mut unfinished_marks = HashSet::new();
+        for node in unfinished {
+            let mut current = Some(*node);
+            while let Some(id) = current {
+                if self.marks.contains(&id) {
+                    unfinished_marks.insert(id);
+                    break;
+                }
+                current = self.tree.record(id).and_then(|record| record.parent());
+            }
+        }
+        let tree = &self.tree;
+        self.marks.retain(|id| {
+            tree.record(*id).is_some_and(|record| record.state != NodeState::Tombstone)
+                && (stopped || unfinished_marks.contains(id))
+        });
+        self.marked_cursor = self.marked_cursor.min(self.marks.len().saturating_sub(1));
     }
 
     fn node_for_token(&self, token: DirectoryToken) -> Option<NodeId> {
@@ -1203,6 +1235,18 @@ impl BrowserModel {
                     *counter = counter.saturating_sub(amount.unsigned_abs());
                 }
             }
+        }
+    }
+
+    fn explain_scan_error(&mut self, node: NodeId, message: String) {
+        self.status_by_node.insert(node, message);
+        let mut current = self.tree.record(node).and_then(|record| record.parent());
+        while let Some(ancestor) = current {
+            if self.status_by_node.contains_key(&ancestor) {
+                break;
+            }
+            self.status_by_node.insert(ancestor, "Contains entries with scan errors.".to_owned());
+            current = self.tree.record(ancestor).and_then(|record| record.parent());
         }
     }
 
@@ -1450,34 +1494,6 @@ impl BrowserModel {
         }
     }
 
-    fn mark_blocker(&self, id: NodeId, ancestors_of_marks: &HashSet<NodeId>) -> Option<MarkBlock> {
-        if let Some(ancestor) = self.marked_ancestor(id) {
-            Some(MarkBlock::Covered(ancestor))
-        } else if ancestors_of_marks.contains(&id) {
-            Some(MarkBlock::ContainsMark)
-        } else {
-            None
-        }
-    }
-
-    fn describe_block(&self, id: NodeId, block: &MarkBlock) -> String {
-        match block {
-            MarkBlock::Covered(ancestor) => format!(
-                "Already covered by marked directory {}; unmark it to choose individual entries.",
-                self.display_path(*ancestor)
-            ),
-            MarkBlock::ContainsMark => {
-                let inner = self
-                    .marks
-                    .order
-                    .iter()
-                    .find(|mark| self.is_inside(**mark, id))
-                    .map_or_else(String::new, |mark| format!(" ({})", self.display_path(*mark)));
-                format!("Cannot mark a directory that contains a marked entry{inner}; unmark that entry first.")
-            }
-        }
-    }
-
     fn is_inside(&self, node: NodeId, ancestor: NodeId) -> bool {
         let mut current = self.tree.record(node).and_then(|record| record.parent());
         while let Some(candidate) = current {
@@ -1499,8 +1515,8 @@ impl BrowserModel {
             .join("/")
     }
 
-    /// Marks `id` unless it would overlap an existing mark. Returns the reason
-    /// it was refused.
+    /// Marks `id`, replacing any marks inside it, unless a marked directory
+    /// already covers it. Returns the reason it was refused.
     fn try_mark(&mut self, id: NodeId, ancestors_of_marks: &HashSet<NodeId>) -> Result<bool, String> {
         if self.marks.contains(&id) {
             return Ok(false);
@@ -1508,10 +1524,24 @@ impl BrowserModel {
         if self.tree.record(id).is_none_or(|record| record.state == NodeState::Tombstone) {
             return Err("That entry has already been removed.".to_owned());
         }
-        if let Some(block) = self.mark_blocker(id, ancestors_of_marks) {
-            return Err(self.describe_block(id, &block));
+        if let Some(ancestor) = self.marked_ancestor(id) {
+            return Err(format!(
+                "Already covered by marked directory {}.",
+                self.display_path(ancestor)
+            ));
+        }
+        if ancestors_of_marks.contains(&id) {
+            self.unmark_inside(id);
         }
         Ok(self.marks.insert(id))
+    }
+
+    fn unmark_inside(&mut self, directory: NodeId) {
+        let inside: Vec<NodeId> = self.marks.order.iter().copied().filter(|mark| self.is_inside(*mark, directory)).collect();
+        for mark in inside {
+            self.marks.remove(&mark);
+        }
+        self.marked_cursor = self.marked_cursor.min(self.marks.len().saturating_sub(1));
     }
 
     fn toggle_mark(&mut self) -> bool {
@@ -1573,28 +1603,30 @@ impl BrowserModel {
     }
 
     fn mark_all_visible(&mut self) -> bool {
-        let before = self.marks.len();
-        self.mark_many(self.visible.clone());
-        self.marks.len() != before || self.message.is_some()
+        let changed = self.mark_many(self.visible.clone());
+        changed || self.message.is_some()
     }
 
-    /// Marks each entry that does not overlap an existing mark and reports how
-    /// many were skipped.
-    fn mark_many(&mut self, entries: Vec<NodeId>) {
+    /// Marks each entry that is not covered by a marked directory and reports
+    /// how many were skipped. Returns whether any mark was added.
+    fn mark_many(&mut self, entries: Vec<NodeId>) -> bool {
         let ancestors = self.ancestors_of_marks();
         let mut skipped = 0usize;
+        let mut changed = false;
         for id in entries {
-            if self.try_mark(id, &ancestors).is_err() {
-                skipped += 1;
+            match self.try_mark(id, &ancestors) {
+                Ok(added) => changed |= added,
+                Err(_) => skipped += 1,
             }
         }
         self.normalize_focus();
         if skipped > 0 {
             self.message = Some(format!(
-                "{skipped} entr{} skipped: already covered by, or containing, a marked entry.",
+                "{skipped} entr{} skipped: already covered by a marked directory.",
                 if skipped == 1 { "y" } else { "ies" }
             ));
         }
+        changed
     }
 
     fn enter_cursor(&mut self) -> bool {
@@ -1642,7 +1674,7 @@ impl BrowserModel {
         self.range_anchor = None;
         self.message = self.covering_mark().map(|marked| {
             format!(
-                "Inside marked directory {}; its entries are already covered.",
+                "Inside marked directory {}.",
                 self.display_path(marked)
             )
         });
@@ -1687,6 +1719,27 @@ struct DeleteSummary {
     changed: usize,
     failed: usize,
     not_attempted: usize,
+}
+
+impl DeleteSummary {
+    fn describe(&self, skipped: usize) -> String {
+        let mut parts = vec![format!("Deleted {}", self.deleted)];
+        for (count, label) in [
+            (self.already_absent, "already absent"),
+            (self.changed, "changed"),
+            (self.failed, "failed"),
+            (self.not_attempted, "not attempted"),
+            (skipped, "skipped"),
+        ] {
+            if count > 0 {
+                parts.push(format!("{count} {label}"));
+            }
+        }
+        if self.changed + self.failed > 0 {
+            parts.push("select a ~ row for why".to_owned());
+        }
+        parts.join(" · ")
+    }
 }
 
 fn size_for(record: &fdu_core::NodeRecord, mode: SizeMode) -> u64 {
@@ -1823,7 +1876,6 @@ fn run_session(
             Action::CancelDeletion => {
                 if let AppPhase::Deleting(worker) = &phase {
                     worker.cancel();
-                    model.message = Some("Stopping after the current operation; entries already removed cannot be restored.".to_owned());
                     draw_pending = true;
                 }
             }
@@ -1943,18 +1995,19 @@ fn run_session(
             }
         }
         if delete_finished {
-            let (outcomes, delete_error) = match &mut phase {
+            let (outcomes, delete_error, skipped) = match &mut phase {
                 AppPhase::Deleting(worker) => {
                     profile.delete_worker = Some(worker.started.elapsed());
+                    let skipped = worker.skipped;
                     match worker.finish() {
-                        Ok((outcomes, failure)) => (outcomes, failure),
-                        Err(error) => (Vec::new(), Some(error)),
+                        Ok((outcomes, failure)) => (outcomes, failure, skipped),
+                        Err(error) => (Vec::new(), Some(error), skipped),
                     }
                 }
-                _ => (Vec::new(), None),
+                _ => (Vec::new(), None, 0),
             };
             let applying = Instant::now();
-            model.apply_delete_outcomes(outcomes, delete_error);
+            model.apply_delete_outcomes(outcomes, delete_error, skipped);
             profile.delete_apply = Some(applying.elapsed());
             phase = AppPhase::Ready;
             model_changed = true;
@@ -2000,7 +2053,7 @@ fn run_session(
 
 #[cfg(test)]
 mod tests {
-    use super::{combine_shutdown_result, create_plan, Action, BrowserModel, DialogState};
+    use super::{combine_shutdown_result, Action, BrowserModel, DeleteSummary, DialogState};
     use fdu_core::{DirectoryToken, EntryType, FileIdentity, NodeId, NodeState, NodeStatus, ScanEvent};
     use fdu_delete::{DeleteOutcome, OutcomeKind};
     use fdu_scan::{open_root, RootAnchor};
@@ -2285,22 +2338,17 @@ mod tests {
         assert!(model.message.as_deref().unwrap().contains("Inside marked directory alpha"));
         assert_eq!(model.covering_mark(), Some(alpha));
 
-        // A marked descendant keeps its ancestor from being marked.
+        // Marking the ancestor of a marked descendant replaces the descendant.
         model.marks.clear();
         model.marks.insert(inner);
         let ancestors = model.ancestors_of_marks();
-        let reason = model.try_mark(alpha, &ancestors).unwrap_err();
-        assert!(reason.contains("contains a marked entry (alpha/inner.bin)"), "{reason}");
-
-        // Once the descendant is unmarked the ancestor is allowed.
-        model.marks.clear();
-        let ancestors = model.ancestors_of_marks();
         assert_eq!(model.try_mark(alpha, &ancestors), Ok(true));
+        assert_eq!(model.marks.order, vec![alpha]);
         Ok(())
     }
 
     #[test]
-    fn bulk_marking_skips_overlapping_entries_and_says_so() -> io::Result<()> {
+    fn bulk_marking_a_directory_replaces_marks_inside_it() -> io::Result<()> {
         let temp = TempDir::new()?;
         let (_, mut model) = make_model(&temp, false)?;
         let root = model.tree.root();
@@ -2311,8 +2359,26 @@ mod tests {
         model.marks.insert(inner);
 
         assert!(model.mark_all_visible());
+        assert!(model.marks.contains(&alpha));
         assert!(model.marks.contains(&beta));
-        assert!(!model.marks.contains(&alpha));
+        assert!(!model.marks.contains(&inner));
+        assert_eq!(model.message, None);
+        Ok(())
+    }
+
+    #[test]
+    fn bulk_marking_inside_a_marked_directory_skips_entries_and_says_so() -> io::Result<()> {
+        let temp = TempDir::new()?;
+        let (_, mut model) = make_model(&temp, false)?;
+        let root = model.tree.root();
+        let alpha = append(&mut model, root, b"alpha", EntryType::Directory, 0, 2);
+        let inner = append(&mut model, alpha, b"inner.bin", EntryType::RegularFile, 9, 3);
+        ready(&mut model);
+        model.marks.insert(alpha);
+        model.change_directory(alpha);
+
+        model.mark_all_visible();
+        assert!(!model.marks.contains(&inner));
         assert!(model.message.as_deref().unwrap().contains("1 entry skipped"));
         Ok(())
     }
@@ -2539,7 +2605,7 @@ mod tests {
     }
 
     #[test]
-    fn ineligible_marks_block_the_whole_deletion_and_say_why() -> io::Result<()> {
+    fn ineligible_marks_are_skipped_and_counted_in_the_confirmation() -> io::Result<()> {
         let temp = TempDir::new()?;
         let (_, mut model) = make_model(&temp, false)?;
         let root = model.tree.root();
@@ -2549,11 +2615,18 @@ mod tests {
         model.set_state(bad, NodeStatus::Incomplete);
 
         assert!(matches!(press_delete_on_marks(&mut model, &[good, bad]), Action::None));
-        assert!(model.pending_delete.is_none());
-        let message = model.message.as_deref().unwrap();
-        assert!(message.contains("Nothing deleted or narrowed"), "{message}");
-        assert!(message.contains("bad.bin: scan is incomplete"), "{message}");
+        let plan = model.pending_delete.as_ref().expect("the complete entry is still deletable");
+        assert_eq!(plan.operation_count(), 1);
+        assert_eq!(plan.skipped.len(), 1);
         assert_eq!(model.marks.len(), 2, "no mark is dropped");
+
+        model.pending_delete = None;
+        model.marks.clear();
+        model.focus = Pane::Browser;
+        assert!(matches!(press_delete_on_marks(&mut model, &[bad]), Action::None));
+        let message = model.message.as_deref().unwrap();
+        assert!(message.contains("Nothing can be deleted"), "{message}");
+        assert!(message.contains("bad.bin: scan is incomplete"), "{message}");
         Ok(())
     }
 
@@ -2609,7 +2682,7 @@ mod tests {
         model.focus = Pane::Marked;
         model.handle_intent(Intent::MarkAll, Phase::Ready);
         assert_eq!(model.marks.len(), 1);
-        assert!(model.message.as_deref().unwrap().contains("applies to the browser list"));
+        assert!(model.message.as_deref().unwrap().contains("applies to the list"));
         Ok(())
     }
 
@@ -2661,7 +2734,7 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_root_rejects_complete_leaf_in_planner_and_browser() -> io::Result<()> {
+    fn incomplete_root_still_allows_deleting_complete_entries() -> io::Result<()> {
         let temp = TempDir::new()?;
         let (_, mut model) = make_model(&temp, false)?;
         let root = model.tree.root();
@@ -2680,15 +2753,80 @@ mod tests {
         assert_eq!(model.tree.record(root).unwrap().state, NodeState::Incomplete);
         assert_eq!(model.tree.record(directory).unwrap().state, NodeState::Incomplete);
         assert_eq!(model.tree.record(file).unwrap().state, NodeState::Complete);
-        let rejection = match create_plan(Arc::clone(&model.tree), &[file]) {
-            Ok(_) => panic!("an incomplete root scan cannot be planned for deletion"),
-            Err(rejection) => rejection,
-        };
-        assert!(rejection.rejected.iter().any(|item| item.reason == "root scan is not complete"));
         assert!(matches!(press_delete_on_marks(&mut model, &[file]), Action::None));
-        assert!(model.pending_delete.is_none());
-        assert!(model.message.as_deref().unwrap().contains("root scan is not complete"));
-        assert_eq!(model.marks.len(), 1, "rejected entries remain marked");
+        assert_eq!(model.pending_delete.as_ref().map(fdu_delete::DeletionPlan::operation_count), Some(1));
+        Ok(())
+    }
+
+    #[test]
+    fn a_message_lasts_until_the_next_command() -> io::Result<()> {
+        let temp = TempDir::new()?;
+        let (_, mut model) = make_model(&temp, false)?;
+        let root = model.tree.root();
+        append(&mut model, root, b"file", EntryType::RegularFile, 5, 2);
+        ready(&mut model);
+        model.message = Some("stale".to_owned());
+
+        let (_, changed) = model.handle_intent(Intent::MoveDown, Phase::Ready);
+        assert!(changed, "clearing the message needs a redraw");
+        assert_eq!(model.message, None);
+        Ok(())
+    }
+
+    #[test]
+    fn delete_summary_lists_only_nonzero_counts() {
+        let clean = DeleteSummary { deleted: 3, ..DeleteSummary::default() };
+        assert_eq!(clean.describe(0), "Deleted 3");
+        let mixed = DeleteSummary { deleted: 3, failed: 2, ..DeleteSummary::default() };
+        assert_eq!(mixed.describe(1), "Deleted 3 · 2 failed · 1 skipped · select a ~ row for why");
+    }
+
+    #[test]
+    fn only_marks_with_unfinished_work_stay_marked_after_a_deletion() -> io::Result<()> {
+        let temp = TempDir::new()?;
+        let (_, mut model) = make_model(&temp, false)?;
+        let root = model.tree.root();
+        let done = append(&mut model, root, b"done", EntryType::RegularFile, 1, 2);
+        let directory = append(&mut model, root, b"dir", EntryType::Directory, 0, 3);
+        let stuck = append(&mut model, directory, b"stuck", EntryType::RegularFile, 1, 4);
+        let ok = append(&mut model, root, b"ok", EntryType::RegularFile, 1, 5);
+        ready(&mut model);
+        model.marks.insert(done);
+        model.marks.insert(directory);
+        model.marks.insert(ok);
+
+        model.apply_delete_outcomes(
+            vec![
+                DeleteOutcome { node: done, kind: OutcomeKind::Deleted, message: None },
+                DeleteOutcome { node: stuck, kind: OutcomeKind::Failed, message: Some("busy".to_owned()) },
+                DeleteOutcome { node: directory, kind: OutcomeKind::Failed, message: Some("busy".to_owned()) },
+                DeleteOutcome { node: ok, kind: OutcomeKind::Deleted, message: None },
+            ],
+            None,
+            0,
+        );
+        assert_eq!(model.marks.order, vec![directory]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_failed_directory_explains_itself_and_its_ancestors() -> io::Result<()> {
+        let temp = TempDir::new()?;
+        let (_, mut model) = make_model(&temp, false)?;
+        let root = model.tree.root();
+        let outer = append(&mut model, root, b"outer", EntryType::Directory, 0, 2);
+        let inner = append(&mut model, outer, b"inner", EntryType::Directory, 0, 3);
+        model.token_nodes.push(Some(outer));
+        model.token_nodes.push(Some(inner));
+
+        model.apply_scan_event(ScanEvent::DirectoryFailed {
+            directory: DirectoryToken(2),
+            message: "permission denied".to_owned(),
+        });
+        assert_eq!(model.scan_errors, 1);
+        assert_eq!(model.message, None);
+        assert_eq!(model.status_by_node.get(&inner).map(String::as_str), Some("permission denied"));
+        assert_eq!(model.status_by_node.get(&outer).map(String::as_str), Some("Contains entries with scan errors."));
         Ok(())
     }
 
@@ -2708,6 +2846,7 @@ mod tests {
                 DeleteOutcome { node: directory, kind: OutcomeKind::Deleted, message: None },
             ],
             None,
+            0,
         );
         assert_eq!(model.indexed_entries, 0);
         assert_eq!(model.actual_deletions, 2);

@@ -14,8 +14,8 @@ modes: alternate-screen=true application-cursor=false application-keypad=false b
 10││··│Marked·items:·arrows·move,·d·unmarks,·Enter·shows·it·in·the·list,···························│··│
 11││··│··Ctrl-R·deletes·them·all·after·you·press·Enter·to·confirm.·································│··│
 12││··│····························································································│··│
-13││··│A·marked·directory·covers·its·subtree:·nothing·inside·it,·and·no····························│··│
-14││··│··directory·containing·a·mark,·can·be·marked·until·that·is·removed.·························│··│
+13││··│Marking·a·directory·covers·its·subtree·and·replaces·marks·inside·it;························│··│
+14││··│··entries·inside·a·marked·directory·cannot·be·marked·separately.····························│··│
 15││··│Deletion·is·permanent;·there·is·no·Trash.·Byte·totals·are·metadata··························│··│
 16││··│··counts·and·released·storage·can·differ.···················································│··│
 17││··│Rows:·[x]·marked·(red)··[=]·covered··!·incomplete··~·stale··M·mount··A·alias················│··│

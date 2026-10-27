@@ -59,7 +59,7 @@ fn repeated_exclusions_hide_exact_root_relative_paths_in_the_browser() -> io::Re
 }
 
 #[test]
-fn directory_with_excluded_contents_cannot_be_deleted_as_a_whole() -> io::Result<()> {
+fn directory_with_excluded_contents_is_deleted_around_the_excluded_entry() -> io::Result<()> {
     let temp = TempDir::new()?;
     let root = temp.0.join("root");
     fs::create_dir_all(root.join("alpha/nested"))?;
@@ -72,13 +72,13 @@ fn directory_with_excluded_contents_cannot_be_deleted_as_a_whole() -> io::Result
     session.wait_for("Marked 1 item");
     session.key(Key::Tab);
     session.key(Key::Ctrl('r'));
-    let screen = session.wait_for("Nothing deleted or narrowed");
-    assert!(screen.shows("scan is incomplete"));
-    assert!(!screen.shows("Permanently delete"));
+    session.wait_for("Permanently delete");
+    session.key(Key::Enter);
+    session.wait_for("Deleted 1");
     session.quit();
 
     assert!(root.join("alpha/nested/hidden.txt").exists());
-    assert!(root.join("alpha/visible.txt").exists());
+    assert!(!root.join("alpha/visible.txt").exists());
     Ok(())
 }
 
@@ -243,7 +243,7 @@ fn marking_a_directory_covers_its_contents_and_overlaps_are_refused() -> io::Res
     let screen = session.wait_for("Already covered by marked directory alpha");
     assert!(screen.shows("Marked 1 item"), "the refused mark is not added");
 
-    // The reverse: a marked descendant blocks marking its ancestor.
+    // The reverse: marking an ancestor replaces its marked descendants.
     session.key(Key::Tab);
     session.text("d");
     session.wait_until_absent("Marked 1 item");
@@ -253,7 +253,7 @@ fn marking_a_directory_covers_its_contents_and_overlaps_are_refused() -> io::Res
     session.key(Key::Left);
     session.key(Key::Home);
     session.text("d");
-    session.wait_for("contains a marked entry (alpha/inner.txt)");
+    session.wait_until_absent("alpha/inner.txt");
     session.quit();
     Ok(())
 }
@@ -408,7 +408,7 @@ fn read_only_session_rejects_delete_and_restores_terminal_state() -> io::Result<
 }
 
 #[test]
-fn ineligible_marks_block_the_whole_deletion_and_say_why() -> io::Result<()> {
+fn ineligible_marks_are_skipped_while_the_rest_is_deleted() -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     let (_temp, root) = TempDir::standard_tree()?;
@@ -427,14 +427,13 @@ fn ineligible_marks_block_the_whole_deletion_and_say_why() -> io::Result<()> {
     session.wait_for("Marked 2 items");
     session.key(Key::Tab);
     session.key(Key::Ctrl('r'));
-    let screen = session.wait_for("Nothing deleted or narrowed");
-    assert!(screen.shows("beta: scan is incomplete"));
-    assert!(!screen.shows("Permanently delete"), "no confirmation is offered");
-    assert!(screen.shows("Marked 2 items"), "the marks are kept");
-    // Enter does nothing: there is nothing armed.
+    let screen = session.wait_for("Permanently delete");
+    assert!(screen.shows("1 skipped"));
     session.key(Key::Enter);
+    session.wait_for("Deleted 1");
     session.quit();
-    assert!(root.join("top.txt").exists());
+    assert!(!root.join("top.txt").exists());
+    assert!(root.join("beta").exists());
     Ok(())
 }
 
@@ -450,7 +449,7 @@ fn cancelling_confirmation_leaves_everything_in_place_and_ctrl_c_restores_the_te
     session.wait_for("Marked 2 items");
     session.key(Key::Tab);
     session.key(Key::Ctrl('r'));
-    let screen = session.wait_for("Permanently delete 2 marked items");
+    let screen = session.wait_for("Permanently delete 2 items");
     assert!(screen.shows("Enter confirms · Esc cancels"));
     assert!(screen.shows("alpha/"), "the marked pane is the review");
     assert!(screen.shows("top.txt"));
@@ -527,7 +526,8 @@ fn confirmed_deletion_removes_marks_from_several_directories_and_reports_the_res
     session.text("d"); // top.txt
     session.wait_for("Marked 2 items");
     confirm_delete(&mut session, "Deleted");
-    let screen = session.wait_for("Deleted 2 · 0 already absent · 0 changed · 0 failed · 0 not attempted");
+    let screen = session.wait_for("Deleted 2");
+    assert!(!screen.shows("failed") && !screen.shows("not attempted"), "zero counters are omitted");
     assert!(!screen.shows("top.txt"));
     assert!(!screen.shows("Marked"), "the basket is empty after deletion");
     assert!(!root.join("alpha/inner.txt").exists());
@@ -606,8 +606,8 @@ fn deletion_locks_the_interface_until_it_finishes() -> io::Result<()> {
     session.key(Key::Enter);
 
     let screen = session.wait("summary", |screen| screen.shows("Deleted "));
-    assert!(screen.shows("0 not attempted"), "only Esc may stop deletion");
-    assert!(screen.shows("0 failed"));
+    assert!(!screen.shows("not attempted"), "only Esc may stop deletion");
+    assert!(!screen.shows("failed"));
     // alpha is a directory and two files, beta a directory and one file.
     assert_eq!(count_after(&screen, "Deleted "), operations + 3 + 2);
     assert!(!root.join("bulk").exists());
@@ -635,7 +635,12 @@ fn escape_stops_later_removals_without_undoing_completed_ones() -> io::Result<()
 
     let screen = session.wait("summary", |screen| screen.shows("Deleted "));
     let deleted = count_after(&screen, "Deleted ");
-    let not_attempted = count_after(&screen, " changed · 0 failed · ");
+    let not_attempted = if screen.shows(" not attempted") {
+        let row = row_containing(&screen, " not attempted");
+        row.split(" not attempted").next().unwrap().rsplit(' ').next().unwrap().parse().unwrap()
+    } else {
+        0
+    };
     assert_eq!(deleted + not_attempted, operations, "every planned operation is accounted for");
     assert_eq!(
         count_entries(&root.join("bulk")),
