@@ -21,7 +21,7 @@ repository's release flags. Linux release targets are built in the workflow's
 Docker image, which provides the musl linker wrapper. It uses
 `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` and verifies both
 artifacts with `make verify-release`. `make install`
-copies the local release binary to `~/usr/bin/fdu` and ad-hoc signs it on
+copies the local release binary to `~/.local/bin/fdu` and ad-hoc signs it on
 macOS. `make lint` runs Clippy with automatic fixes and may modify source
 files.
 
