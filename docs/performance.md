@@ -33,6 +33,11 @@ options.
 Set `FDU_PROFILE=1` to have the interactive browser report scan readiness,
 index memory, and main-thread timing when it exits.
 
+On macOS, [`scan`](../crates/fdu-scan/src/macos.rs) lists the root with
+`read_entries`. Subtrees use `read_entries_with_metadata`. The summary does not
+report root files, so a bulk attribute read of the root fetches metadata the
+summary drops.
+
 ## Captures
 
 Keep selected human-readable captures in [`perf/captures/`](../perf/captures/README.md).

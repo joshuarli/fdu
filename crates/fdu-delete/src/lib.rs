@@ -326,14 +326,6 @@ mod posix {
         .union(OFlags::DIRECTORY)
         .union(OFlags::NOFOLLOW)
         .union(OFlags::CLOEXEC);
-    /// Removing a directory mostly waits on the filesystem (a journal commit, not the CPU), and
-    /// that waiting overlaps across threads, so the pool is larger than the number of cores. More
-    /// threads stop helping early and then hurt, and the best size falls as the host gets busier.
-    /// Measured on the layout fixture (192 thousand entries), whole-tree deletion on an idle host
-    /// took 4.3 s with 2 threads, 2.9 s with 4, 2.7 s with 16, 2.3 s with 32, and no less with
-    /// 64 or 128. On a host with a load average of 20 to 40 it took a median of 11.6 s with 4
-    /// threads, 9.6 s with 8, 10.2 s with 16, 11.8 s with 32 and 22.7 s with 64. Sixteen gives up
-    /// little when idle and keeps a busy host from being flooded with filesystem calls.
     const DELETE_THREADS: usize = 16;
 
     /// Identifies the mount a directory lives on, so a directory that became a mount point since

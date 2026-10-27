@@ -9,13 +9,11 @@ for Apple silicon.
 Download the archive for your platform from [GitHub Releases](https://github.com/laputa-systems/fdu/releases):
 
 - macOS arm64: `fdu-aarch64-apple-darwin.zip`
-- Linux x86_64: `fdu-x86_64-unknown-linux-musl.zip` or
-  `fdu-x86_64-unknown-linux-musl-static.zip`
-- Linux arm64: `fdu-aarch64-unknown-linux-musl.zip` or
-  `fdu-aarch64-unknown-linux-musl-static.zip`
+- Linux x86_64: `fdu-x86_64-unknown-linux-musl-static.zip`
+- Linux arm64: `fdu-aarch64-unknown-linux-musl-static.zip`
 
-The Linux `-static` archive does not need a musl dynamic loader. Extract the
-archive, then put its executable on your `PATH`; for example:
+The Linux archives are static and do not need a musl dynamic loader. Extract
+the archive, then put its executable on your `PATH`; for example:
 
 ```sh
 mkdir -p ~/.local/bin
@@ -52,9 +50,9 @@ file lengths. Use `--read-only` to disable deletion in the browser. The summary
 prints each included immediate child directory in descending size order as a
 compact size (such as `5G` or `2.4M`), a tab, and a quoted name. Sizes use
 1024-based units. Root-level files are not listed. An immediate child that is a
-mount boundary is labeled separately on macOS; on Linux it currently appears as
-a `0B` directory row, while a warning reports excluded boundaries. Hidden names
-are included, and fdu does not read `.gitignore`.
+mount boundary is labeled `MOUNT BOUNDARY` on both platforms, and a warning
+reports excluded boundaries. Hidden names are included, and fdu does not read
+`.gitignore`.
 
 The browser shows each file or directory's modification age in one rounded
 unit, such as `5m`, `1h`, `4w`, or `20mo`.

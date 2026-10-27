@@ -33,6 +33,12 @@ Concurrent changes to the source tree are supported. Other processes must
 leave fdu's private quarantine directories, their contents, and recovery
 records untouched, including through previously opened directory descriptors. Mode `0700` limits
 access by other users but cannot enforce this precondition against the owner.
+Linux `unlinkat` and macOS `unlink` resolve a path. Neither accepts the indexed
+inode. Removal therefore renames the current name into the quarantine with
+`RENAME_NOREPLACE`, checks the captured device, inode, and type, and unlinks
+only the captured name. A second stat, an open descriptor, or an advisory lock
+does not attach a later name-based unlink to that object.
+
 The scan root must be writable to create the quarantine.
 
 Each planned entry gets one outcome: deleted, already absent, changed, failed,
@@ -67,7 +73,8 @@ requires inspection. No capture precedes a durable header, and final header
 removal follows capture and intent cleanup.
 
 Process-exit tests cover intent publication, capture, restoration, and removal.
-Physical power-loss behavior and native macOS behavior have not been verified.
+The workspace suite runs those tests, and the macOS release job runs the suite.
+Physical power loss is not tested.
 
 ## `--rmrf`
 
