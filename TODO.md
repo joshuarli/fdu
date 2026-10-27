@@ -1,15 +1,6 @@
 Prefix: FDU
 Next: 6
 
-### FDU-2 · P1 · GitHub Release publishes no macOS binary
-
-- **Area:** Build
-- **Where:** `.github/workflows/release.yml:219`, `.github/workflows/release.yml:258`, `README.md:11`
-- **Problem:** The release workflow builds `fdu-aarch64-apple-darwin`, checks that the file is present, and uploads it as an Actions artifact. The packaging loop zips only `fdu-aarch64-unknown-linux-musl-static` and `fdu-x86_64-unknown-linux-musl-static`. `gh release create` uploads `dist/zips/*.zip` and `SHA256SUMS`. Replaying that loop on dummy files produced those two Linux zips and no Apple archive. README tells macOS users to download `fdu-aarch64-apple-darwin.zip` from GitHub Releases. Every published release therefore has no macOS asset.
-- **Recommendation:** Zip `dist/fdu-aarch64-apple-darwin/fdu-aarch64-apple-darwin` in the same packaging step, include that zip in the checksum file, and fail the job if the Apple zip is absent.
-- **Fix with:** none
-- **Effort:** S
-
 ### FDU-3 · P3 · Committed browser backup is not the program
 
 - **Area:** Dead code

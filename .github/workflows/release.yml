@@ -217,6 +217,7 @@ jobs:
           done
           mkdir dist/zips
           for file in \
+            dist/fdu-aarch64-apple-darwin/fdu-aarch64-apple-darwin \
             dist/fdu-aarch64-unknown-linux-musl/fdu-aarch64-unknown-linux-musl-static \
             dist/fdu-x86_64-unknown-linux-musl/fdu-x86_64-unknown-linux-musl-static; do
             zip -9 --junk-paths "dist/zips/$(basename "$file").zip" "$file"
