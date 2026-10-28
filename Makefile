@@ -6,7 +6,7 @@ CARGO_CMD  := $(if $(findstring -linux-musl,$(TARGET)),$(shell command -v musl-c
 comma      := ,
 # Setting RUSTFLAGS replaces the target rustflags from .cargo/config.toml, so the
 # macOS unused-dylib link argument is repeated for release builds.
-RELEASE_RUSTFLAGS := -Zlocation-detail=none -Zunstable-options -Cpanic=immediate-abort $(if $(findstring apple-darwin,$(TARGET)),-Clink-arg=-Wl$(comma)-dead_strip_dylibs)
+RELEASE_RUSTFLAGS := -Zlocation-detail=none -Zunstable-options $(if $(findstring apple-darwin,$(TARGET)),-Clink-arg=-Wl$(comma)-dead_strip_dylibs)
 cargo = $(if $(findstring -linux-musl,$(TARGET)),,$(if $(filter release-static test,$(1)),CARGO_TARGET_$(TARGET_ENV)_LINKER=clang ,)$(if $(filter release-static,$(1)),RUSTFLAGS="$(RELEASE_RUSTFLAGS)")) MUSL_TARGET="$(TARGET)" MUSL_BUILD_MODE="$(1)" $(CARGO_CMD)
 
 .PHONY: build test test-ci test-mounts lint release verify-release install
