@@ -170,7 +170,9 @@ fn scan_to_tree_with_exclusions(
                         })?;
                     }
                     match entry.state {
-                        NodeStatus::Incomplete => tree.mark_incomplete_to_root(parent),
+                        NodeStatus::Incomplete => {
+                            tree.mark_incomplete_to_root(parent);
+                        }
                         NodeStatus::Excluded(reason) => {
                             tree.set_state(id, NodeStatus::Excluded(reason));
                             tree.mark_incomplete_to_root(parent);

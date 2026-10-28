@@ -584,38 +584,14 @@ impl BrowserModel {
     }
 
     fn finish_directory(&mut self, directory: DirectoryToken, complete: bool) {
-        if let Some(node) = self.node_for_token(directory) {
-            let old = self.tree.record(node).map(|record| record.state);
-            if old.is_some_and(|state| !matches!(state, NodeState::Excluded(_) | NodeState::Tombstone)) {
-                if complete {
-                    if old == Some(NodeState::Scanning) {
-                        self.set_state(node, NodeStatus::Complete);
-                    }
-                } else {
-                    self.mark_incomplete_chain(node);
-                }
-            }
-        }
+        let marked = match Arc::get_mut(&mut self.tree) {
+            Some(tree) => fdu_core::finish_scan_directory(tree, &self.token_nodes, directory, complete),
+            None => 0,
+        };
+        self.bump_incomplete(marked);
     }
 
     fn apply_entry_batch(&mut self, mut batch: fdu_core::EntryBatch) -> fdu_core::EntryBatch {
-        // Entries of several directories share a batch, each run of one directory's entries
-        // being contiguous. Totals are added once per run, after the entries are appended.
-        struct Run {
-            parent: NodeId,
-            apparent: u64,
-            allocated: u64,
-            fits: bool,
-            problem: bool,
-        }
-        let mut runs: Vec<Run> = Vec::new();
-        let mut run_token = None;
-        let mut new_ids = Vec::new();
-        let mut incomplete_entries = 0usize;
-        let mut excluded_entries = 0usize;
-        let mut unknown_directory = false;
-        let mut invalid_range = false;
-        let mut exhausted = false;
         let current_directory = self.current_directory;
         match Arc::get_mut(&mut self.tree) {
             None => {
@@ -623,120 +599,44 @@ impl BrowserModel {
                 // Nothing was appended, so nothing is added to any total.
             }
             Some(tree) => {
-                for entry in &batch.entries {
-                    if run_token != Some(entry.parent) {
-                        let parent = self.token_nodes.get(entry.parent.0 as usize).copied().flatten();
-                        let Some(parent) = parent else {
-                            unknown_directory = true;
-                            run_token = None;
-                            continue;
-                        };
-                        run_token = Some(entry.parent);
-                        runs.push(Run { parent, apparent: 0, allocated: 0, fits: true, problem: false });
-                    }
-                    let run = runs.last_mut().expect("a run exists for the current directory");
-                    let Some(name) = batch.names.get(entry.name.start as usize..entry.name.end as usize) else {
-                        invalid_range = true;
-                        run.problem = true;
-                        continue;
-                    };
-                    let Some(id) = tree.append(
-                        run.parent,
-                        name,
-                        entry.entry_type,
-                        entry.identity,
-                        entry.link_count,
-                        entry.apparent_bytes,
-                        entry.allocated_bytes,
-                        entry.state,
-                    ) else {
-                        exhausted = true;
-                        run.problem = true;
-                        break;
-                    };
-                    assert!(tree.set_modified_time(id, entry.modified_time));
-                    if run.parent == current_directory {
+                let outcome = fdu_core::fold_entry_batch(tree, &mut self.token_nodes, &batch);
+                if outcome.unknown_directory {
+                    self.message = Some("Scanner sent entries for an unknown directory.".to_owned());
+                }
+                if outcome.invalid_range {
+                    self.message = Some("Scanner sent an invalid filename range.".to_owned());
+                }
+                if outcome.exhausted {
+                    self.message = Some("Index exhausted the supported number of entries.".to_owned());
+                }
+                if outcome.overflow {
+                    self.message = Some("A directory total exceeded the supported byte range.".to_owned());
+                }
+                self.bump_incomplete(outcome.incomplete_entries + outcome.marked_incomplete);
+                self.exclusions = self.exclusions.saturating_add(outcome.excluded_entries);
+                self.indexed_entries = self.tree.len().saturating_sub(1);
+                let mut new_ids = Vec::new();
+                for id in outcome.appended {
+                    if self.tree.record(id).and_then(|record| record.parent()) == Some(current_directory) {
                         new_ids.push(id);
                     }
-                    if let Some(token) = entry.directory_token {
-                        let index = token.0 as usize;
-                        if self.token_nodes.len() <= index {
-                            self.token_nodes.resize(index + 1, None);
+                }
+                if !new_ids.is_empty() {
+                    self.listing.extend(new_ids.iter().copied());
+                    for id in new_ids {
+                        if self.filter_matches(id) {
+                            self.visible.push(id);
                         }
-                        self.token_nodes[index] = Some(id);
                     }
-                    match entry.state {
-                        NodeStatus::Incomplete => {
-                            incomplete_entries += 1;
-                            run.problem = true;
-                        }
-                        NodeStatus::Excluded(_) => {
-                            excluded_entries += 1;
-                            run.problem = true;
-                        }
-                        _ => {}
-                    }
-                    if entry.entry_type != EntryType::Directory && entry.state == NodeStatus::Complete {
-                        match (
-                            run.apparent.checked_add(entry.apparent_bytes),
-                            run.allocated.checked_add(entry.allocated_bytes),
-                        ) {
-                            (Some(apparent), Some(allocated)) => {
-                                run.apparent = apparent;
-                                run.allocated = allocated;
-                            }
-                            _ => run.fits = false,
-                        }
+                    if matches!(self.cursor, Cursor::None) {
+                        self.cursor = self.visible.first().copied().map(Cursor::Entry).unwrap_or(Cursor::None);
+                        self.refresh_cursor_index();
                     }
                 }
-            }
-        }
-        if unknown_directory {
-            self.message = Some("Scanner sent entries for an unknown directory.".to_owned());
-            self.mark_incomplete_chain(self.tree.root());
-        }
-        if invalid_range {
-            self.message = Some("Scanner sent an invalid filename range.".to_owned());
-        }
-        if exhausted {
-            self.message = Some("Index exhausted the supported number of entries.".to_owned());
-        }
-        self.bump_incomplete(incomplete_entries);
-        self.exclusions = self.exclusions.saturating_add(excluded_entries);
-        self.indexed_entries = self.tree.len().saturating_sub(1);
-        for run in &runs {
-            if run.problem {
-                self.mark_incomplete_chain(run.parent);
-            }
-            // Directories add nothing to their ancestors' totals, so a run of them skips the walk.
-            let added = !run.fits
-                || (run.apparent == 0 && run.allocated == 0)
-                || self.add_batch_totals(run.parent, run.apparent, run.allocated);
-            if !run.fits || !added {
-                self.message = Some("A directory total exceeded the supported byte range.".to_owned());
-                self.mark_incomplete_chain(run.parent);
-            }
-        }
-        if !new_ids.is_empty() {
-            self.listing.extend(new_ids.iter().copied());
-            for id in new_ids {
-                if self.filter_matches(id) {
-                    self.visible.push(id);
-                }
-            }
-            if matches!(self.cursor, Cursor::None) {
-                self.cursor = self.visible.first().copied().map(Cursor::Entry).unwrap_or(Cursor::None);
-                self.refresh_cursor_index();
             }
         }
         batch.clear();
         batch
-    }
-
-    /// Adds a batch's bytes to every ancestor; false when a total would overflow, in which case
-    /// the tree has already marked those ancestors incomplete.
-    fn add_batch_totals(&mut self, parent: NodeId, apparent: u64, allocated: u64) -> bool {
-        Arc::get_mut(&mut self.tree).is_some_and(|tree| tree.add_to_ancestors(parent, apparent, allocated))
     }
 
     fn handle_intent(&mut self, intent: Intent, phase: Phase) -> (Action, bool) {
@@ -2054,7 +1954,7 @@ fn run_session(
 #[cfg(test)]
 mod tests {
     use super::{combine_shutdown_result, Action, BrowserModel, DeleteSummary, DialogState};
-    use fdu_core::{DirectoryToken, EntryType, FileIdentity, NodeId, NodeState, NodeStatus, ScanEvent};
+    use fdu_core::{DirectoryToken, EntryBatch, EntryType, FileIdentity, ModifiedTime, NodeId, NodeState, NodeStatus, ScanEntry, ScanEvent, Tree};
     use fdu_delete::{DeleteOutcome, OutcomeKind};
     use fdu_scan::{open_root, RootAnchor};
     use fdu_tui::{Cursor, Intent, Pane, Phase, SizeMode, SortMode, Split, TerminalSize};
@@ -2853,6 +2753,108 @@ mod tests {
         assert_eq!(model.tree.record(root).unwrap().apparent_bytes, 0);
         assert_eq!(model.tree.record(directory).unwrap().state, NodeState::Tombstone);
         assert!(model.visible.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn entry_batch_fold_matches_rmrf_states_names_times_and_totals() -> io::Result<()> {
+        type Snapshot = Vec<(Vec<u8>, NodeState, u64, u64, Option<i64>)>;
+
+        fn batch() -> EntryBatch {
+            let mut batch = EntryBatch::with_capacity(4, 64);
+            let push = |batch: &mut EntryBatch,
+                            name: &[u8],
+                            entry_type: EntryType,
+                            token: Option<u32>,
+                            state: NodeStatus,
+                            apparent: u64,
+                            allocated: u64,
+                            mtime: i64| {
+                let start = batch.names.len();
+                batch.names.extend_from_slice(name);
+                let end = batch.names.len();
+                batch.entries.push(ScanEntry {
+                    parent: DirectoryToken(0),
+                    name: start as u32..end as u32,
+                    directory_token: token.map(DirectoryToken),
+                    entry_type,
+                    identity: FileIdentity { device: 1, inode: batch.entries.len() as u64 + 2 },
+                    modified_time: ModifiedTime::from_unix_seconds(mtime).unwrap(),
+                    link_count: 1,
+                    apparent_bytes: apparent,
+                    allocated_bytes: allocated,
+                    state,
+                });
+            };
+            push(&mut batch, b"sub", EntryType::Directory, Some(1), NodeStatus::Complete, 0, 0, 1_700_000_001);
+            push(&mut batch, b"kept.bin", EntryType::RegularFile, None, NodeStatus::Complete, 100, 512, 1_700_000_002);
+            push(
+                &mut batch,
+                b"broken.bin",
+                EntryType::RegularFile,
+                None,
+                NodeStatus::Incomplete,
+                50,
+                64,
+                1_700_000_003,
+            );
+            batch
+        }
+
+        fn snapshot(tree: &Tree) -> Snapshot {
+            let mut out = Vec::new();
+            let mut stack = vec![(tree.root(), Vec::new())];
+            while let Some((id, path)) = stack.pop() {
+                let record = tree.record(id).expect("snapshot visits live nodes");
+                out.push((
+                    path.clone(),
+                    record.state,
+                    record.apparent_bytes,
+                    record.allocated_bytes,
+                    record.modified_time().unix_seconds(),
+                ));
+                let mut children: Vec<NodeId> = tree.children(id).collect();
+                children.reverse();
+                for child in children {
+                    let mut child_path = path.clone();
+                    child_path.extend_from_slice(tree.name(child).expect("child has a name"));
+                    stack.push((child, child_path));
+                }
+            }
+            out
+        }
+
+        let temp = TempDir::new()?;
+        let (_, mut model) = make_model(&temp, false)?;
+        model.apply_entry_batch(batch());
+        assert_eq!(model.message, None, "the batch folds without scanner defects");
+
+        // `rmrf::apply_batch` is this same fold plus error mapping, so folding
+        // the same batch into a bare tree is the `--rmrf` side of the parity check.
+        let mut plain = Tree::new(b"root", FileIdentity { device: 1, inode: 1 }, 1).unwrap();
+        assert!(plain.set_modified_time(
+            plain.root(),
+            model.tree.record(model.tree.root()).expect("model has a root").modified_time()
+        ));
+        let mut plain_tokens = vec![Some(plain.root())];
+        let outcome = fdu_core::fold_entry_batch(&mut plain, &mut plain_tokens, &batch());
+        assert!(!outcome.unknown_directory && !outcome.invalid_range && !outcome.exhausted && !outcome.overflow);
+        assert_eq!(snapshot(&model.tree), snapshot(&plain));
+
+        let root = model.tree.root();
+        assert_eq!(model.tree.record(root).unwrap().state, NodeState::Incomplete);
+        assert_eq!(model.tree.record(root).unwrap().apparent_bytes, 100);
+        assert_eq!(model.tree.record(root).unwrap().allocated_bytes, 512);
+        let kept = model.tree.children(root).nth(1).expect("file follows the directory");
+        assert_eq!(model.tree.name(kept), Some(b"kept.bin".as_slice()));
+        assert_eq!(model.tree.record(kept).unwrap().modified_time().unix_seconds(), Some(1_700_000_002));
+        // Browser-only listing updates stay outside the shared fold.
+        assert_eq!(model.listing.len(), 3);
+        assert_eq!(model.visible.len(), 3);
+
+        model.finish_directory(DirectoryToken(1), true);
+        fdu_core::finish_scan_directory(&mut plain, &plain_tokens, DirectoryToken(1), true);
+        assert_eq!(snapshot(&model.tree), snapshot(&plain));
         Ok(())
     }
 }

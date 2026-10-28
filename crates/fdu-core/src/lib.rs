@@ -363,7 +363,8 @@ impl Tree {
         fits
     }
 
-    pub fn mark_incomplete_to_root(&mut self, id: NodeId) {
+    pub fn mark_incomplete_to_root(&mut self, id: NodeId) -> usize {
+        let mut marked = 0;
         let mut current = Some(id);
         while let Some(node) = current {
             let Some(record) = self.nodes.get_mut(node.index()) else {
@@ -371,9 +372,11 @@ impl Tree {
             };
             if record.state == NodeState::Scanning || record.state == NodeState::Complete {
                 record.state = NodeState::Incomplete;
+                marked += 1;
             }
             current = record.parent;
         }
+        marked
     }
 
     pub fn materialize_path(&self, id: NodeId) -> Option<Vec<&[u8]>> {
@@ -508,6 +511,159 @@ impl<'a> Iterator for Children<'a> {
     }
 }
 
+/// What folding one scanner batch changed, so the browser and `--rmrf` can
+/// map the same fold onto their own bookkeeping without reimplementing it.
+#[derive(Debug, Default)]
+pub struct BatchFoldOutcome {
+    pub appended: Vec<NodeId>,
+    pub incomplete_entries: usize,
+    pub excluded_entries: usize,
+    pub marked_incomplete: usize,
+    pub unknown_directory: bool,
+    pub invalid_range: bool,
+    pub exhausted: bool,
+    pub overflow: bool,
+}
+
+/// Appends one scanner batch and rolls byte totals to ancestors. Entries of
+/// different directories may share a batch; each run of one directory's
+/// entries is contiguous, and totals are added once per run.
+///
+/// Both scan consumers fold through this function so their trees match: every
+/// appended entry keeps its scanner `modified_time`, and only `Complete`
+/// non-directory entries contribute to ancestor totals. `Incomplete` and
+/// `Excluded` entries mark the parent incomplete, as do `Scanning` and
+/// `Stale` entries, whose totals are not final.
+pub fn fold_entry_batch(
+    tree: &mut Tree,
+    token_nodes: &mut Vec<Option<NodeId>>,
+    batch: &EntryBatch,
+) -> BatchFoldOutcome {
+    struct Run {
+        parent: NodeId,
+        apparent: u64,
+        allocated: u64,
+        fits: bool,
+        problem: bool,
+    }
+    let mut outcome = BatchFoldOutcome::default();
+    let mut runs: Vec<Run> = Vec::new();
+    let mut run_token = None;
+    for entry in &batch.entries {
+        if run_token != Some(entry.parent) {
+            let parent = token_nodes.get(entry.parent.0 as usize).copied().flatten();
+            let Some(parent) = parent else {
+                outcome.unknown_directory = true;
+                run_token = None;
+                continue;
+            };
+            run_token = Some(entry.parent);
+            runs.push(Run { parent, apparent: 0, allocated: 0, fits: true, problem: false });
+        }
+        let run = runs.last_mut().expect("a run exists for the current directory");
+        let Some(name) = batch.names.get(entry.name.start as usize..entry.name.end as usize) else {
+            outcome.invalid_range = true;
+            run.problem = true;
+            continue;
+        };
+        let Some(id) = tree.append(
+            run.parent,
+            name,
+            entry.entry_type,
+            entry.identity,
+            entry.link_count,
+            entry.apparent_bytes,
+            entry.allocated_bytes,
+            entry.state,
+        ) else {
+            outcome.exhausted = true;
+            run.problem = true;
+            break;
+        };
+        assert!(tree.set_modified_time(id, entry.modified_time));
+        outcome.appended.push(id);
+        if let Some(token) = entry.directory_token {
+            let index = token.0 as usize;
+            if token_nodes.len() <= index {
+                token_nodes.resize(index + 1, None);
+            }
+            token_nodes[index] = Some(id);
+        }
+        match entry.state {
+            NodeStatus::Incomplete => {
+                outcome.incomplete_entries += 1;
+                run.problem = true;
+            }
+            NodeStatus::Excluded(_) => {
+                outcome.excluded_entries += 1;
+                run.problem = true;
+            }
+            NodeStatus::Scanning | NodeStatus::Stale => {
+                run.problem = true;
+            }
+            NodeStatus::Complete => {
+                if entry.entry_type != EntryType::Directory {
+                    match (
+                        run.apparent.checked_add(entry.apparent_bytes),
+                        run.allocated.checked_add(entry.allocated_bytes),
+                    ) {
+                        (Some(apparent), Some(allocated)) => {
+                            run.apparent = apparent;
+                            run.allocated = allocated;
+                        }
+                        _ => run.fits = false,
+                    }
+                }
+            }
+        }
+    }
+    if outcome.unknown_directory {
+        outcome.marked_incomplete += tree.mark_incomplete_to_root(tree.root());
+    }
+    for run in &runs {
+        if run.problem {
+            outcome.marked_incomplete += tree.mark_incomplete_to_root(run.parent);
+        }
+        // Directories add nothing to their ancestors' totals, so a run of them skips the walk.
+        let added = !run.fits
+            || (run.apparent == 0 && run.allocated == 0)
+            || tree.add_to_ancestors(run.parent, run.apparent, run.allocated);
+        if !run.fits || !added {
+            outcome.overflow = true;
+            outcome.marked_incomplete += tree.mark_incomplete_to_root(run.parent);
+        }
+    }
+    outcome
+}
+
+/// Settles one directory's scan state after its entries folded. Returns how
+/// many ancestors flipped to `Incomplete`. Directories the scanner excluded
+/// stay excluded: neither completion nor failure rewrites them.
+pub fn finish_scan_directory(
+    tree: &mut Tree,
+    token_nodes: &[Option<NodeId>],
+    directory: DirectoryToken,
+    complete: bool,
+) -> usize {
+    let Some(node) = token_nodes.get(directory.0 as usize).copied().flatten() else {
+        return 0;
+    };
+    if matches!(
+        tree.record(node).map(|record| record.state),
+        Some(NodeState::Excluded(_)) | Some(NodeState::Tombstone)
+    ) {
+        return 0;
+    }
+    if complete {
+        if tree.record(node).map(|record| record.state) == Some(NodeState::Scanning) {
+            tree.set_state(node, NodeStatus::Complete);
+        }
+        0
+    } else {
+        tree.mark_incomplete_to_root(node)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{EntryType, FileIdentity, NodeState, NodeStatus, Tree};
@@ -579,6 +735,155 @@ mod tests {
         assert_eq!(tree.tombstone_subtree(directory), Some((0, 0, 0)));
         assert_eq!(tree.record(tree.root()).unwrap().allocated_bytes, 0);
         assert!(tree.children(directory).next().is_none());
+    }
+
+    #[test]
+    fn batch_fold_keeps_states_names_times_and_totals_for_both_callers() {
+        use super::{
+            finish_scan_directory, fold_entry_batch, DirectoryToken, EntryBatch, ModifiedTime, NodeId, ScanEntry,
+        };
+
+        type Snapshot = Vec<(Vec<u8>, NodeState, u64, u64, Option<i64>)>;
+
+        fn snapshot(tree: &Tree) -> Snapshot {
+            let mut out = Vec::new();
+            let mut stack = vec![(tree.root(), Vec::new())];
+            while let Some((id, path)) = stack.pop() {
+                let record = tree.record(id).expect("snapshot visits live nodes");
+                out.push((
+                    path.clone(),
+                    record.state,
+                    record.apparent_bytes,
+                    record.allocated_bytes,
+                    record.modified_time().unix_seconds(),
+                ));
+                let mut children: Vec<NodeId> = tree.children(id).collect();
+                children.reverse();
+                for child in children {
+                    let mut child_path = path.clone();
+                    child_path.extend_from_slice(tree.name(child).expect("child has a name"));
+                    stack.push((child, child_path));
+                }
+            }
+            out
+        }
+
+        fn batch() -> EntryBatch {
+            let mut batch = EntryBatch::with_capacity(4, 64);
+            let push = |batch: &mut EntryBatch,
+                            name: &[u8],
+                            entry_type: EntryType,
+                            token: Option<u32>,
+                            state: NodeStatus,
+                            apparent: u64,
+                            allocated: u64,
+                            mtime: i64| {
+                let start = batch.names.len();
+                batch.names.extend_from_slice(name);
+                let end = batch.names.len();
+                batch.entries.push(ScanEntry {
+                    parent: DirectoryToken(0),
+                    name: start as u32..end as u32,
+                    directory_token: token.map(DirectoryToken),
+                    entry_type,
+                    identity: FileIdentity { device: 1, inode: batch.entries.len() as u64 + 2 },
+                    modified_time: ModifiedTime::from_unix_seconds(mtime).unwrap(),
+                    link_count: 1,
+                    apparent_bytes: apparent,
+                    allocated_bytes: allocated,
+                    state,
+                });
+            };
+            push(&mut batch, b"sub", EntryType::Directory, Some(1), NodeStatus::Complete, 0, 0, 1_700_000_001);
+            push(&mut batch, b"kept.bin", EntryType::RegularFile, None, NodeStatus::Complete, 100, 512, 1_700_000_002);
+            push(
+                &mut batch,
+                b"broken.bin",
+                EntryType::RegularFile,
+                None,
+                NodeStatus::Incomplete,
+                50,
+                64,
+                1_700_000_003,
+            );
+            batch
+        }
+
+        // Both scan consumers fold through the same function, so folding the
+        // same batch twice — once per caller — must produce identical trees.
+        let mut browser_tree = Tree::new(b"root", FileIdentity { device: 1, inode: 1 }, 1).unwrap();
+        let mut browser_tokens = vec![Some(browser_tree.root())];
+        let browser_outcome = fold_entry_batch(&mut browser_tree, &mut browser_tokens, &batch());
+        let mut rmrf_tree = Tree::new(b"root", FileIdentity { device: 1, inode: 1 }, 1).unwrap();
+        let mut rmrf_tokens = vec![Some(rmrf_tree.root())];
+        let rmrf_outcome = fold_entry_batch(&mut rmrf_tree, &mut rmrf_tokens, &batch());
+        assert_eq!(browser_outcome.appended.len(), 3);
+        assert_eq!(rmrf_outcome.appended.len(), 3);
+        assert_eq!(snapshot(&browser_tree), snapshot(&rmrf_tree));
+
+        let tree = &mut browser_tree;
+        let token_nodes = &mut browser_tokens;
+        let outcome = browser_outcome;
+        assert_eq!(outcome.appended.len(), 3);
+        assert_eq!(outcome.incomplete_entries, 1);
+        assert!(!outcome.unknown_directory && !outcome.invalid_range && !outcome.exhausted && !outcome.overflow);
+
+        let sub = token_nodes[1].expect("directory token is registered");
+        assert_eq!(tree.name(sub), Some(b"sub".as_slice()));
+        assert_eq!(tree.record(sub).unwrap().modified_time().unix_seconds(), Some(1_700_000_001));
+        assert_eq!(tree.record(sub).unwrap().state, NodeState::Complete);
+        let kept = outcome.appended[1];
+        assert_eq!(tree.name(kept), Some(b"kept.bin".as_slice()));
+        assert_eq!(tree.record(kept).unwrap().modified_time().unix_seconds(), Some(1_700_000_002));
+        assert_eq!(tree.record(kept).unwrap().state, NodeState::Complete);
+        let broken = outcome.appended[2];
+        assert_eq!(tree.record(broken).unwrap().modified_time().unix_seconds(), Some(1_700_000_003));
+        assert_eq!(tree.record(broken).unwrap().state, NodeState::Incomplete);
+        assert_eq!(tree.record(tree.root()).unwrap().state, NodeState::Incomplete);
+        assert_eq!(tree.record(tree.root()).unwrap().apparent_bytes, 100);
+        assert_eq!(tree.record(tree.root()).unwrap().allocated_bytes, 512);
+
+        assert_eq!(finish_scan_directory(tree, token_nodes, DirectoryToken(1), true), 0);
+        assert_eq!(tree.record(sub).unwrap().state, NodeState::Complete);
+    }
+
+    #[test]
+    fn unfinished_and_excluded_directories_settle_without_changing_exclusions() {
+        use super::{finish_scan_directory, ExclusionReason};
+        let mut tree = Tree::new(b"root", FileIdentity { device: 1, inode: 1 }, 1).unwrap();
+        let scanning = tree
+            .append(
+                tree.root(),
+                b"scanning",
+                EntryType::Directory,
+                FileIdentity { device: 1, inode: 2 },
+                1,
+                0,
+                0,
+                NodeStatus::Scanning,
+            )
+            .unwrap();
+        let excluded = tree
+            .append(
+                tree.root(),
+                b"excluded",
+                EntryType::Directory,
+                FileIdentity { device: 1, inode: 3 },
+                1,
+                0,
+                0,
+                NodeStatus::Excluded(ExclusionReason::MountBoundary),
+            )
+            .unwrap();
+        let token_nodes = vec![Some(tree.root()), Some(scanning), Some(excluded)];
+        assert_eq!(finish_scan_directory(&mut tree, &token_nodes, super::DirectoryToken(1), true), 0);
+        assert_eq!(tree.record(scanning).unwrap().state, NodeState::Complete);
+        assert_eq!(finish_scan_directory(&mut tree, &token_nodes, super::DirectoryToken(2), false), 0);
+        assert_eq!(tree.record(excluded).unwrap().state, NodeState::Excluded(ExclusionReason::MountBoundary));
+        assert_eq!(tree.record(tree.root()).unwrap().state, NodeState::Scanning);
+        assert_eq!(finish_scan_directory(&mut tree, &token_nodes, super::DirectoryToken(1), false), 2);
+        assert_eq!(tree.record(scanning).unwrap().state, NodeState::Incomplete);
+        assert_eq!(tree.record(tree.root()).unwrap().state, NodeState::Incomplete);
     }
 
     #[test]

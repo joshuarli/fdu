@@ -1,4 +1,4 @@
-use fdu_core::{EntryType, NodeState, NodeStatus, ScanEvent, Tree};
+use fdu_core::{NodeState, NodeStatus, ScanEvent, Tree};
 use fdu_delete::{DeleteEvent, OutcomeKind, create_plan};
 use fdu_scan::{RootAnchor, open_root_no_follow, start_indexed_scan};
 use std::error::Error;
@@ -451,101 +451,35 @@ fn finish_directory(
     directory: fdu_core::DirectoryToken,
     complete: bool,
 ) {
-    let Some(node) = token_nodes.get(directory.0 as usize).copied().flatten() else {
-        return;
-    };
-    let state = tree.record(node).map(|record| record.state);
-    if complete {
-        if state == Some(NodeState::Scanning) {
-            tree.set_state(node, NodeStatus::Complete);
-        }
-    } else {
-        tree.mark_incomplete_to_root(node);
-    }
+    fdu_core::finish_scan_directory(tree, token_nodes, directory, complete);
 }
 
-/// Appends one scanner batch, accumulating file totals once per run of entries
-/// with the same parent. Entries of several directories may share a batch with
-/// each run contiguous.
+/// Folds one scanner batch through the shared fold, so the deletion plan sees
+/// the same states and totals as the browser. The fold already marked whatever
+/// it could not complete; only unrecoverable batch defects fail the index.
 fn apply_batch(
     tree: &mut Tree,
     token_nodes: &mut Vec<Option<fdu_core::NodeId>>,
     batch: &fdu_core::EntryBatch,
 ) -> io::Result<()> {
-    struct Run {
-        parent: fdu_core::NodeId,
-        apparent: u64,
-        allocated: u64,
-        fits: bool,
-        problem: bool,
+    let outcome = fdu_core::fold_entry_batch(tree, token_nodes, batch);
+    if outcome.unknown_directory {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "scanner sent entries for an unknown directory",
+        ));
     }
-    let mut run: Option<Run> = None;
-    let finish = |tree: &mut Tree, run: Run| {
-        if run.problem {
-            tree.mark_incomplete_to_root(run.parent);
-        }
-        if !run.fits || !tree.add_to_ancestors(run.parent, run.apparent, run.allocated) {
-            tree.mark_incomplete_to_root(run.parent);
-        }
-    };
-    for entry in &batch.entries {
-        let parent = token_nodes
-            .get(entry.parent.0 as usize)
-            .copied()
-            .flatten()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "scanner sent entries for an unknown directory"))?;
-        if run.as_ref().is_some_and(|run| run.parent != parent) {
-            finish(tree, run.take().expect("run exists"));
-        }
-        let current = run.get_or_insert(Run { parent, apparent: 0, allocated: 0, fits: true, problem: false });
-        let name = batch
-            .names
-            .get(entry.name.start as usize..entry.name.end as usize)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "scanner sent an invalid filename range"))?;
-        let id = tree
-            .append(
-                parent,
-                name,
-                entry.entry_type,
-                entry.identity,
-                entry.link_count,
-                entry.apparent_bytes,
-                entry.allocated_bytes,
-                entry.state,
-            )
-            .ok_or_else(|| io::Error::new(io::ErrorKind::OutOfMemory, "index exhausted the supported number of entries"))?;
-        if let Some(token) = entry.directory_token {
-            let index = token.0 as usize;
-            if token_nodes.len() <= index {
-                token_nodes.resize(index + 1, None);
-            }
-            token_nodes[index] = Some(id);
-        }
-        match entry.state {
-            NodeStatus::Complete => {
-                if entry.entry_type != EntryType::Directory {
-                    match (
-                        current.apparent.checked_add(entry.apparent_bytes),
-                        current.allocated.checked_add(entry.allocated_bytes),
-                    ) {
-                        (Some(apparent), Some(allocated)) => {
-                            current.apparent = apparent;
-                            current.allocated = allocated;
-                        }
-                        _ => current.fits = false,
-                    }
-                }
-            }
-            NodeStatus::Incomplete | NodeStatus::Excluded(_) => {
-                current.problem = true;
-            }
-            NodeStatus::Scanning | NodeStatus::Stale => {
-                current.problem = true;
-            }
-        }
+    if outcome.invalid_range {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "scanner sent an invalid filename range",
+        ));
     }
-    if let Some(run) = run {
-        finish(tree, run);
+    if outcome.exhausted {
+        return Err(io::Error::new(
+            io::ErrorKind::OutOfMemory,
+            "index exhausted the supported number of entries",
+        ));
     }
     Ok(())
 }
