@@ -25,7 +25,8 @@ test-mounts:
 	$(call cargo,test) test --locked --release -p fdu-scan --test indexed_policy mounts_and_bind_mounts_below_the_root_are_boundaries_without_children -- --ignored
 
 lint:
-	cargo clippy --fix --allow-dirty --all-targets --all-features -- --deny warnings
+	cargo clippy --locked --workspace --all-targets --all-features -- --deny warnings
+	uvx ruff check
 
 release:
 	$(call cargo,release-static) clean -p $(NAME) --profile dist --target $(TARGET)

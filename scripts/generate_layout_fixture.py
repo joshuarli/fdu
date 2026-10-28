@@ -3,13 +3,12 @@
 """Generate a synthetic filesystem tree from an anonymized layout profile."""
 
 import argparse
-from dataclasses import dataclass
 import json
 import os
-from pathlib import Path
 import random
 import shutil
-
+from dataclasses import dataclass
+from pathlib import Path
 
 DEFAULT_PROFILE = (
     Path(__file__).resolve().parents[1]
@@ -49,7 +48,7 @@ def nonnegative_count(value: str) -> int:
 
 def profile_count(value: object, field: str, *, positive: bool = False) -> int:
     if not isinstance(value, int) or isinstance(value, bool):
-        raise ValueError(f"profile field {field!r} must be an integer")
+        raise TypeError(f"profile field {field!r} must be an integer")
     if value < (1 if positive else 0):
         qualifier = "positive" if positive else "nonnegative"
         raise ValueError(f"profile field {field!r} must be {qualifier}")
@@ -67,7 +66,7 @@ def read_profile(path: Path) -> tuple[list[list[DirectoryLayout]], list[int]]:
     directory_counts = profile.get("directory_counts_by_depth")
     raw_layers = profile.get("layouts_by_depth")
     if not isinstance(directory_counts, list) or not isinstance(raw_layers, list):
-        raise ValueError("layout profile is missing its depth tables")
+        raise TypeError("layout profile is missing its depth tables")
     if not directory_counts or len(directory_counts) != len(raw_layers):
         raise ValueError("layout profile depth tables do not match")
 
@@ -78,11 +77,11 @@ def read_profile(path: Path) -> tuple[list[list[DirectoryLayout]], list[int]]:
     layouts_by_depth: list[list[DirectoryLayout]] = []
     for depth, raw_layer in enumerate(raw_layers):
         if not isinstance(raw_layer, list):
-            raise ValueError(f"layout profile depth {depth} is not a list")
+            raise TypeError(f"layout profile depth {depth} is not a list")
         layouts: list[DirectoryLayout] = []
         for row in raw_layer:
             if not isinstance(row, dict):
-                raise ValueError(f"layout profile depth {depth} has a malformed row")
+                raise TypeError(f"layout profile depth {depth} has a malformed row")
             layout = DirectoryLayout(
                 child_directories=profile_count(
                     row.get("child_directories"), "child_directories"

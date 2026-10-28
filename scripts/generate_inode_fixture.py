@@ -4,7 +4,6 @@ import argparse
 import os
 from pathlib import Path
 
-
 SMALL_PAYLOADS = (b"x", b"tiny", b"12345678")
 
 
