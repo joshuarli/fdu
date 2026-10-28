@@ -1,15 +1,6 @@
 Prefix: FDU
 Next: 6
 
-### FDU-3 · P3 · Committed browser backup is not the program
-
-- **Area:** Dead code
-- **Where:** `src/browser.rs.bak:1`, `src/browser.rs:1`
-- **Problem:** `src/browser.rs.bak` is tracked and is not a module. `cargo build` does not compile it. It is 2,858 lines, the same length as `src/browser.rs`, and the files differ (`cmp` exit 1; the test import block has already drifted). Text search returns both copies, so a change can land in the backup and never run.
-- **Recommendation:** Delete `src/browser.rs.bak`. Do not replace it with another uncompiled copy.
-- **Fix with:** delete
-- **Effort:** S
-
 ### FDU-4 · P3 · Browser and `--rmrf` each fold scan events
 
 - **Area:** Architecture
