@@ -64,10 +64,10 @@ RUN for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do \
         done; \
     done
 
-ADD https://static.rust-lang.org/rustup/archive/1.29.0/x86_64-unknown-linux-musl/rustup-init /rustup-init-x86_64
-ADD https://static.rust-lang.org/rustup/archive/1.29.0/aarch64-unknown-linux-musl/rustup-init /rustup-init-aarch64
-RUN echo '9cd3fda5fd293890e36ab271af6a786ee22084b5f6c2b83fd8323cec6f0992c1  /rustup-init-x86_64' | sha256sum -c - \
-    && echo '88761caacddb92cd79b0b1f939f3990ba1997d701a38b3e8dd6746a562f2a759  /rustup-init-aarch64' | sha256sum -c - \
+ADD https://static.rust-lang.org/rustup/archive/1.29.1/x86_64-unknown-linux-musl/rustup-init /rustup-init-x86_64
+ADD https://static.rust-lang.org/rustup/archive/1.29.1/aarch64-unknown-linux-musl/rustup-init /rustup-init-aarch64
+RUN echo '331228566cc931f32cd684f9bebc5956a5e5d7394c8d5de595f196a658ab98e6  /rustup-init-x86_64' | sha256sum -c - \
+    && echo '1ddf36182ac5d1782dbeefcb9bea7f5f9412d88f4a0d5047b1564a223624e8c6  /rustup-init-aarch64' | sha256sum -c - \
     && case "$TARGETARCH" in \
         amd64) init=/rustup-init-x86_64 ;; \
         arm64) init=/rustup-init-aarch64 ;; \
