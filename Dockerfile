@@ -10,7 +10,7 @@ ARG MOLD_RELEASE_SHA=cfb4aab
 RUN apk add --no-cache \
     binutils=2.45.1-r1 \
     coreutils=9.11-r0 \
-    python3=3.14.8-r0 \
+    python3=3.14.10-r1 \
     file=5.47-r2 \
     make=4.4.1-r4 \
     strace=6.19-r1 \
